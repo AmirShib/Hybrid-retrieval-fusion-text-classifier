@@ -1,0 +1,8 @@
+numpy
+pandas
+scipy
+scikit-learn
+xgboost
+sentence-transformers
+# torch is pulled in by sentence-transformers; pin all of these for the
+# air-gapped host once you've resolved compatible wheels.
