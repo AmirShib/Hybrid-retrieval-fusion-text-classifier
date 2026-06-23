@@ -1,6 +1,6 @@
 # T02 — Domain unit tests (LabelSpace, policies, threshold tuner)
 
-status: todo
+status: done
 tier: 1
 depends_on: T01
 

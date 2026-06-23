@@ -15,7 +15,7 @@ improvement is unsafe until Tier 1 exists.
 | ID  | Title                                              | Status | Depends on |
 |-----|----------------------------------------------------|--------|------------|
 | T01 | Test harness, fixtures, CI, determinism            | done   | —          |
-| T02 | Domain unit tests (LabelSpace, policies, tuner)    | todo   | T01        |
+| T02 | Domain unit tests (LabelSpace, policies, tuner)    | done   | T01        |
 | T03 | Feature-assembly tests (numpy helpers + assemble)  | todo   | T01        |
 | T04 | Retrieval tests (BM25 + dense adapters)            | todo   | T01        |
 | T05 | Fusion + calibration tests                         | todo   | T01        |
