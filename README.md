@@ -1,8 +1,8 @@
 # Hybrid retrieval-fusion text classifier
 
-Classifies free-text items into one of many (here ~500) text-described classes,
-and **abstains** when it isn't confident enough — routing those items to a human.
-Built for an imbalanced, air-gapped setting.
+Classifies free-text items into one of many text-described classes,
+and **abstains** when it isn't confident enough —> routing those items to a human
+(Built with imbalanced data and air-gapped setting in mind).
 
 ## How it works
 
@@ -21,9 +21,7 @@ useful feature. The candidate set is the union of each signal's top-N, so
 **candidate recall is the ceiling on accuracy** and is reported every run.
 
 The fusion model is **pointwise** — one shared binary model over ~28 features per
-(item, candidate) — not a 500-way classifier, so tail classes don't starve for
-parameters. `XGBoost` is used because it treats `NaN` as "missing" natively,
-which is exactly how an un-retrieved signal is encoded.
+(item, candidate). 
 
 Confidence is isotonic-calibrated, and a threshold is tuned for a target
 accuracy (max coverage subject to accuracy ≥ target), with per-class thresholds
@@ -112,14 +110,3 @@ print(report)  # coverage / accuracy-on-accepted / candidate recall
 preds = InferencePipeline.from_directory("model_dir/").predict(["where is my refund"])
 ```
 
-Verify the wiring offline first (no model download, needs `xgboost`):
-
-```bash
-python -m scripts.demo
-```
-
-## Dependencies
-
-numpy, pandas, scikit-learn, scipy, xgboost, sentence-transformers (+ torch).
-`scripts/demo.py` runs without sentence-transformers/torch by injecting a
-hashing-based encoder double.
