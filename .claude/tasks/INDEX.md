@@ -22,6 +22,8 @@ improvement is unsafe until Tier 1 exists.
 | T06 | Leakage regression test (the scientific claim)     | todo   | T01, T03   |
 | T07 | End-to-end pipeline + persistence round-trip       | todo   | T01–T05    |
 
+| T08 | Code comments and professional documentation       | todo   | T01        |
+
 ## Tier 2+ — Stubs (expand into full tickets when Tier 1 is green)
 
 | ID  | Tier | Title                                                                    | Status |
