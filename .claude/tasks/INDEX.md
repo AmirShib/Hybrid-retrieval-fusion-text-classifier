@@ -5,6 +5,8 @@ top-to-bottom and you have everything needed to do the work.
 
 **Status values:** `todo` · `in-progress` · `in-review` · `done`
 When you start a ticket, set its `status:` field (top of the file) and update the table here.
+When a ticket reaches `done` and the work is merged: move its file from `.claude/tasks/` into
+`.claude/tasks/done/` — the row stays in this table for history.
 
 Priority is top-down: **finish Tier 1 (tests) before Tier 2+.** The package has no
 regression net today, and its core leakage guarantee is unverified — every later
