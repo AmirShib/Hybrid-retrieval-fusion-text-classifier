@@ -17,6 +17,9 @@ dependencies = [
     "sentence-transformers",
 ]
 
+[project.optional-dependencies]
+test = ["pytest", "pytest-cov"]
+
 # Flat layout: pick up the package, leave scripts/ as runnable entry points.
 [tool.setuptools.packages.find]
 include = ["text_classifier*"]

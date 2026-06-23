@@ -1,6 +1,6 @@
 # T01 — Test harness, fixtures, CI, determinism
 
-status: todo
+status: done
 tier: 1
 depends_on: none
 

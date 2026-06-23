@@ -16,59 +16,11 @@ Requires: numpy, pandas, scikit-learn, scipy, xgboost (no network, no torch).
 from __future__ import annotations
 
 import logging
-from typing import Sequence
 
-import numpy as np
-
-from text_classifier import (
-    ClassDefinition,
-    LabeledItem,
-    LabelSpace,
-    PipelineConfig,
-    TrainingPipeline,
-)
+from text_classifier import PipelineConfig, TrainingPipeline
 from text_classifier.application import InferencePipeline
-from text_classifier.domain import TextEncoder
 
-
-class HashingEncoder(TextEncoder):
-    """Deterministic bag-of-hashed-tokens embeddings, L2-normalized. A test
-    double: shared tokens -> higher cosine, so retrieval is meaningful enough
-    to smoke-test the pipeline offline."""
-
-    def __init__(self, dim: int = 128):
-        self.dim = dim
-
-    def encode(self, texts: Sequence[str]) -> np.ndarray:
-        out = np.zeros((len(texts), self.dim), dtype=np.float32)
-        for i, t in enumerate(texts):
-            for tok in str(t).lower().split():
-                h = hash(tok)
-                out[i, h % self.dim] += 1.0 if (h >> 32) & 1 else -1.0
-        norms = np.linalg.norm(out, axis=1, keepdims=True)
-        return out / np.clip(norms, 1e-8, None)
-
-
-def make_synthetic(n_classes=40, per_class=60, seed=0):
-    rng = np.random.default_rng(seed)
-    vocab = [f"w{i}" for i in range(600)]
-    definitions, items = [], []
-    for c in range(n_classes):
-        theme = rng.choice(vocab, size=8, replace=False)
-        definitions.append(ClassDefinition(
-            key=f"CLS{c:03d}",
-            description=f"class about {' '.join(theme[:4])} and related {' '.join(theme[4:])}",
-        ))
-        # imbalance: some classes much smaller
-        count = per_class if c % 7 else max(8, per_class // 5)
-        for _ in range(count):
-            k = rng.integers(4, 9)
-            words = list(rng.choice(theme, size=min(k, len(theme)), replace=True))
-            words += list(rng.choice(vocab, size=2, replace=True))  # noise
-            rng.shuffle(words)
-            items.append(LabeledItem(text=" ".join(words), label=f"CLS{c:03d}"))
-    rng.shuffle(items)
-    return LabelSpace(definitions), items
+from tests._doubles import HashingEncoder, make_synthetic
 
 
 def main() -> None:
