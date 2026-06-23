@@ -1,6 +1,6 @@
 # T03 — Feature-assembly tests (numpy helpers + `assemble`)
 
-status: todo
+status: done
 tier: 1
 depends_on: T01
 
