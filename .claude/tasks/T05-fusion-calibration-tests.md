@@ -1,6 +1,6 @@
 # T05 — Fusion + calibration tests
 
-status: todo
+status: done
 tier: 1
 depends_on: T01
 
