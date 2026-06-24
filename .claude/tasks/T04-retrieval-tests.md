@@ -1,6 +1,6 @@
 # T04 — Retrieval tests (BM25 + dense adapters)
 
-status: todo
+status: done
 tier: 1
 depends_on: T01
 
