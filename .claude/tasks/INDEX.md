@@ -25,24 +25,31 @@ specified and ready to pick up. Tier 3+ remain as stubs.
 
 | T08 | Code comments and professional documentation       | todo   | T01        |
 
-## Tier 2 — Hardening (fully specified, pick up now)
+## Tier 2 — Hardening + pluggability (fully specified, pick up now)
 
 | ID  | Title                                                                    | Status | Depends on       |
 |-----|--------------------------------------------------------------------------|--------|------------------|
 | T20 | Input validation: labels∈classes, empty/dup keys, empty text, clear errors | todo | T01, T07        |
 | T21 | Deterministic test double: replace `hash()` in HashingEncoder with `hashlib` | todo | T01            |
 | T22 | Edge cases: single class, class with no examples, k>n_docs, empty batch    | todo | T01, T04, T05, T07 |
+| T23 | Pluggable component registry + factory DI (encoder/fusion/calibrator)      | todo | T01, T07        |
+| T24 | Pluggable encoder backends behind `TextEncoder` (e.g. TF-IDF, torch-free)  | todo | T23             |
 
-## Tier 3+ — Stubs (expand when Tier 2 is green)
+**Pluggability chain:** T23 is the prerequisite seam — it makes encoder, fusion,
+and calibrator selectable by config. Once it lands, T24 (alt encoders), T41
+(LightGBM fusion), T42 (alt calibrators), and T31 (FAISS retrieval) each plug a
+real backend into that seam without touching the pipeline or persistence.
+
+## Tier 3+ — Stubs (T41 fully specified; rest expand when Tier 2 is green)
 
 | ID  | Tier | Title                                                                    | Status |
 |-----|------|--------------------------------------------------------------------------|--------|
 | T30 | 3    | Vectorize `InferencePipeline.predict` (drop the `.iterrows()` loop)        | todo |
-| T31 | 3    | Optional FAISS/ANN backend behind the `DenseRetriever` port               | todo |
+| T31 | 3    | Optional FAISS/ANN backend behind the `DenseRetriever` port (needs T23)    | todo |
 | T32 | 3    | BM25 memory profile for large corpora; chunk/sparsify as needed           | todo |
 | T40 | 4    | Feature ablation + importance reporting harness                           | todo |
-| T41 | 4    | Alternative fusion model (LightGBM) behind `FusionModel` port             | todo |
-| T42 | 4    | Calibration comparison (isotonic vs Platt vs beta)                        | todo |
+| T41 | 4    | Alternative fusion model (LightGBM) behind `FusionModel` port (needs T23)  | todo |
+| T42 | 4    | Calibration comparison (isotonic vs Platt vs beta) (needs T23)             | todo |
 | T43 | 4    | Threshold tuner: add target-coverage mode alongside target-precision      | todo |
 | T50 | 5    | Pin requirements for air-gapped reproducibility                           | todo |
 | T51 | 5    | ruff + mypy + pre-commit; type-clean the package                          | todo |
