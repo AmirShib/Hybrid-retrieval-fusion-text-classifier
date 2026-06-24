@@ -21,8 +21,8 @@ improvement is unsafe until Tier 1 exists.
 | T03 | Feature-assembly tests (numpy helpers + assemble)  | done   | T01        |
 | T04 | Retrieval tests (BM25 + dense adapters)            | done   | T01        |
 | T05 | Fusion + calibration tests                         | done   | T01        |
-| T06 | Leakage regression test (the scientific claim)     | todo   | T01, T03   |
-| T07 | End-to-end pipeline + persistence round-trip       | todo   | T01–T05    |
+| T06 | Leakage regression test (the scientific claim)     | done   | T01, T03   |
+| T07 | End-to-end pipeline + persistence round-trip       | done   | T01–T05    |
 
 | T08 | Code comments and professional documentation       | todo   | T01        |
 

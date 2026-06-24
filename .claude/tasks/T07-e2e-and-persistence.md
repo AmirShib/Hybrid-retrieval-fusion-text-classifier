@@ -1,6 +1,6 @@
 # T07 — End-to-end pipeline + persistence round-trip
 
-status: todo
+status: done
 tier: 1
 depends_on: T01, T02, T03, T04, T05
 

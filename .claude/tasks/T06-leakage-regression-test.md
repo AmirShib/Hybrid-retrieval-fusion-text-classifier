@@ -1,6 +1,6 @@
 # T06 — Leakage regression test (the scientific claim)
 
-status: todo
+status: done
 tier: 1
 depends_on: T01, T03
 

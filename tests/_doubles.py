@@ -8,6 +8,8 @@ both tests/ and scripts/demo.py so there is no copy-paste divergence.
 """
 from __future__ import annotations
 
+import json
+import os
 from typing import Sequence
 
 import numpy as np
@@ -37,6 +39,20 @@ class HashingEncoder(TextEncoder):
                 out[i, h % self.dim] += 1.0 if (h >> 32) & 1 else -1.0
         norms = np.linalg.norm(out, axis=1, keepdims=True)
         return out / np.clip(norms, 1e-8, None)
+
+    def save(self, directory: str) -> None:
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, "hashing_encoder.json"), "w") as fh:
+            json.dump({"dim": self.dim}, fh)
+
+    @classmethod
+    def load(cls, path: str, batch_size: int = 64, device=None) -> "HashingEncoder":
+        """Signature matches SentenceTransformerEncoder.load so it can be patched in."""
+        try:
+            with open(os.path.join(path, "hashing_encoder.json")) as fh:
+                return cls(dim=json.load(fh)["dim"])
+        except FileNotFoundError:
+            return cls()
 
 
 def make_synthetic(
