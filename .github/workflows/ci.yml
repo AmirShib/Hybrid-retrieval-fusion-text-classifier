@@ -23,6 +23,7 @@ jobs:
         run: pip install -e .[test]
 
       - name: Run tests
-        env:
-          PYTHONHASHSEED: "0"
+        # No PYTHONHASHSEED pinning needed: HashingEncoder hashes tokens with
+        # hashlib.sha256 (T21), so embeddings are deterministic across processes,
+        # Python versions, and platforms.
         run: pytest -q --cov=text_classifier

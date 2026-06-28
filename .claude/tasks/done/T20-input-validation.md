@@ -1,6 +1,6 @@
 # T20 — Input validation: labels ∈ classes, empty/dup keys, empty text, clear errors
 
-status: in-review
+status: done
 tier: 2
 depends_on: T01, T07
 

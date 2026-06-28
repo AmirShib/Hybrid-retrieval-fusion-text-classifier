@@ -108,19 +108,28 @@ class LexicalRetrieverAdapter(LexicalRetriever):
 
 # ------------------------------------------------------------------- dense adapter
 def _dense_topk(Q: np.ndarray, X: np.ndarray, k: int, chunk: int = 256) -> Tuple[np.ndarray, np.ndarray]:
+    """Top-k nearest examples by dot product, always shaped ``(n_queries, k)``.
+
+    The result is padded to the requested ``k`` even when the corpus is smaller
+    (``k > n_examples``): the first ``min(k, n)`` columns hold real neighbours in
+    descending-similarity order and the remainder are ``-1`` / ``NaN`` padding,
+    mirroring ``BM25Index.top_k``. An empty query batch returns ``(0, k)`` arrays.
+    """
     n = X.shape[0]
-    k = min(k, n)
-    out_idx = np.empty((Q.shape[0], k), dtype=np.int64)
-    out_sim = np.empty((Q.shape[0], k), dtype=np.float32)
+    k_eff = min(k, n)
+    out_idx = np.full((Q.shape[0], k), -1, dtype=np.int64)
+    out_sim = np.full((Q.shape[0], k), np.nan, dtype=np.float32)
+    if Q.shape[0] == 0 or k_eff == 0:
+        return out_idx, out_sim
     Xt = np.ascontiguousarray(X.T)
     for s in range(0, Q.shape[0], chunk):
         sims = Q[s:s + chunk] @ Xt
-        part = np.argpartition(sims, -k, axis=1)[:, -k:]
+        part = np.argpartition(sims, -k_eff, axis=1)[:, -k_eff:]
         rows = np.arange(part.shape[0])[:, None]
         part_sims = sims[rows, part]
         order = np.argsort(-part_sims, axis=1)
-        out_idx[s:s + chunk] = np.take_along_axis(part, order, axis=1)
-        out_sim[s:s + chunk] = np.take_along_axis(part_sims, order, axis=1)
+        out_idx[s:s + chunk, :k_eff] = np.take_along_axis(part, order, axis=1)
+        out_sim[s:s + chunk, :k_eff] = np.take_along_axis(part_sims, order, axis=1)
     return out_idx, out_sim
 
 
@@ -169,7 +178,10 @@ class DenseRetrieverAdapter(DenseRetriever):
 
     def knn_example_labels(self, query_emb: np.ndarray, k: int) -> Tuple[np.ndarray, np.ndarray]:
         idx, sim = _dense_topk(query_emb, self._s.example_emb, k, self._chunk)
-        return self._s.example_labels[idx], sim
+        # idx == -1 marks padding (k > n_examples); keep it as -1 rather than
+        # letting np indexing wrap around to a real label.
+        labels = np.where(idx >= 0, self._s.example_labels[np.clip(idx, 0, None)], -1)
+        return labels.astype(np.int64), sim
 
     def prototype_similarity(self, query_emb: np.ndarray) -> np.ndarray:
         return query_emb @ self._s.prototypes.T

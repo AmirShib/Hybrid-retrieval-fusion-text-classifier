@@ -2,12 +2,10 @@
 
 Single source of truth for HashingEncoder and make_synthetic — imported by
 both tests/ and scripts/demo.py so there is no copy-paste divergence.
-
-# TODO(T21): replace builtin hash() with hashlib.sha256 for cross-process
-# determinism without relying on PYTHONHASHSEED.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from typing import Sequence
@@ -25,18 +23,32 @@ class HashingEncoder(TextEncoder):
     meaningful enough to smoke-test the pipeline offline without a real
     bi-encoder or network access.
 
-    # TODO(T21): replace builtin hash() with hashlib.sha256.
+    Token hashing uses ``hashlib.sha256`` rather than the builtin ``hash()`` so
+    that embeddings are byte-for-byte identical across Python processes,
+    versions, and platforms — no ``PYTHONHASHSEED`` pinning required.
     """
 
     def __init__(self, dim: int = 128) -> None:
         self.dim = dim
 
+    @staticmethod
+    def _bucket_and_sign(token: str) -> tuple[int, float]:
+        """Map a token to a (bucket_index_seed, signed_weight) pair via SHA-256.
+
+        First 4 bytes (little-endian) seed the bucket; bit 0 of byte 4 picks the
+        sign. SHA-256 is stable everywhere, so this is fully reproducible.
+        """
+        digest = hashlib.sha256(token.encode("utf-8")).digest()
+        h = int.from_bytes(digest[:4], "little")
+        sign = 1.0 if digest[4] & 1 else -1.0
+        return h, sign
+
     def encode(self, texts: Sequence[str]) -> np.ndarray:
         out = np.zeros((len(texts), self.dim), dtype=np.float32)
         for i, t in enumerate(texts):
             for tok in str(t).lower().split():
-                h = hash(tok)
-                out[i, h % self.dim] += 1.0 if (h >> 32) & 1 else -1.0
+                h, sign = self._bucket_and_sign(tok)
+                out[i, h % self.dim] += sign
         norms = np.linalg.norm(out, axis=1, keepdims=True)
         return out / np.clip(norms, 1e-8, None)
 

@@ -8,9 +8,9 @@ Integration tests (tests/integration/) assert bounds and invariants only —
 never exact floats — because pipeline outputs depend on XGBoost internals
 that may vary across platforms and library versions.
 
-PYTHONHASHSEED is pinned to "0" in CI (.github/workflows/ci.yml) so that
-builtin hash() is stable within a run.  T21 will replace hash() with
-hashlib.sha256, removing the PYTHONHASHSEED dependency entirely.
+Determinism does not depend on PYTHONHASHSEED: HashingEncoder hashes tokens
+with hashlib.sha256 (T21), so embeddings are identical across processes, Python
+versions, and platforms without any env-var pinning.
 """
 from __future__ import annotations
 

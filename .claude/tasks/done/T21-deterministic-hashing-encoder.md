@@ -1,6 +1,6 @@
 # T21 — Deterministic test double: replace `hash()` in HashingEncoder with `hashlib`
 
-status: todo
+status: done
 tier: 2
 depends_on: T01
 

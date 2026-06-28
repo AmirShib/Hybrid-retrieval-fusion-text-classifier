@@ -1,6 +1,6 @@
 # T22 — Edge cases: single class, class with no examples, k > n_docs, empty batch
 
-status: todo
+status: done
 tier: 2
 depends_on: T01, T04, T05, T07
 

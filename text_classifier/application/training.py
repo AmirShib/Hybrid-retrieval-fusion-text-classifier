@@ -85,9 +85,15 @@ class TrainingPipeline:
 
         Checks, in order:
           1. the item list is non-empty;
-          2. every item label is defined in ``label_space``;
-          3. every class present has at least ``n_folds`` examples — the minimum
+          2. the label space has at least two classes (fusion needs negatives);
+          3. every item label is defined in ``label_space``;
+          4. every class present has at least ``n_folds`` examples — the minimum
              ``StratifiedKFold`` requires per class.
+
+        A class that is declared in the label space but has *zero* training
+        examples is acceptable (it simply never appears in the folds and gets an
+        all-NaN prototype); only classes with 1..n_folds-1 examples are rejected,
+        because StratifiedKFold cannot split them.
 
         Note on the minimum-support invariant: a dataset where every item belongs
         to a *single* class is acceptable (StratifiedKFold simply splits within
@@ -97,6 +103,13 @@ class TrainingPipeline:
         """
         if not items:
             raise ValueError("TrainingPipeline.run requires a non-empty list of items")
+
+        if label_space.size < 2:
+            raise ValueError(
+                "TrainingPipeline needs at least 2 classes to train a fusion model "
+                f"and calibrate it; LabelSpace has {label_space.size}. "
+                "(A single-class problem has no negatives to learn from.)"
+            )
 
         known = set(label_space.keys)
         unknown = sorted({it.label for it in items if it.label not in known})

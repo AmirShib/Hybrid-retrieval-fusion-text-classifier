@@ -331,14 +331,19 @@ def test_dense_knn_sorted_by_descending_similarity(dense_env):
     assert np.all(sims[0, :-1] >= sims[0, 1:])
 
 
-def test_dense_knn_k_clamped_to_n_examples(dense_env):
+def test_dense_knn_k_larger_than_n_examples_pads_remainder(dense_env):
     adapter, _, enc, texts, _ = dense_env
     q_emb = enc.encode([texts[0]])
     lab, sim = adapter.knn_example_labels(q_emb, k=1000)
     n_examples = len(texts)   # 5
-    # shape is (1, min(k, n_examples))
-    assert lab.shape == (1, n_examples)
-    assert sim.shape == (1, n_examples)
+    # shape is padded to the requested k (mirrors BM25Index.top_k)...
+    assert lab.shape == (1, 1000)
+    assert sim.shape == (1, 1000)
+    # ...with exactly n_examples real neighbours and the rest -1 / NaN padding.
+    assert int((lab[0] >= 0).sum()) == n_examples
+    assert int(np.isfinite(sim[0]).sum()) == n_examples
+    npt.assert_array_equal(lab[0, n_examples:], -1)
+    assert np.all(np.isnan(sim[0, n_examples:]))
 
 
 def test_dense_similarity_values_in_range(dense_env):
