@@ -8,8 +8,10 @@ When you start a ticket, set its `status:` field (top of the file) and update th
 When a ticket reaches `done` and the work is merged: move its file from `.claude/tasks/` into
 `.claude/tasks/done/` — the row stays in this table for history.
 
-Priority is top-down: **Tier 1 is complete.** Tier 2 tickets are now fully
-specified and ready to pick up. Tier 3+ remain as stubs.
+Priority is top-down. **Tiers 1–2 are done** (lone remaining Tier-1 item: T08,
+docs). **Tier 3 (T30–T33) is the active tier — do these next**; all four are now
+fully specified as self-contained tickets. Tier 4–5 remain stubs, except T41,
+T42, and T44 (done).
 
 ## Tier 1 — Tests (detailed, do first)
 
@@ -25,7 +27,7 @@ specified and ready to pick up. Tier 3+ remain as stubs.
 
 | T08 | Code comments and professional documentation       | todo   | T01        |
 
-## Tier 2 — Hardening + pluggability (fully specified, pick up now)
+## Tier 2 — Hardening + pluggability (complete)
 
 | ID  | Title                                                                    | Status | Depends on       |
 |-----|--------------------------------------------------------------------------|--------|------------------|
@@ -46,7 +48,7 @@ or persistence.
 fusion swap. It depends only on T03 (feature assembly). When absent (default), the
 system is byte-for-byte identical to today. T33 does NOT depend on T23.
 
-## Tier 3+ (T33 specified; T41/T42 done; the rest are stubs — expand when picked up)
+## Tier 3 — Next up (all four tickets are specified; pick up in any order)
 
 | ID  | Tier | Title                                                                        | Status |
 |-----|------|------------------------------------------------------------------------------|--------|
@@ -54,6 +56,11 @@ system is byte-for-byte identical to today. T33 does NOT depend on T23.
 | T31 | 3    | Optional FAISS/ANN backend behind the `DenseRetriever` port (needs T23)        | todo |
 | T32 | 3    | BM25 memory profile for large corpora; chunk/sparsify as needed               | todo |
 | T33 | 3    | Optional cross-encoder reranker as 6th retrieval signal (needs T03, optional)  | todo |
+
+## Tier 4+ — Stubs (T41/T42/T44 done; rest expand when picked up)
+
+| ID  | Tier | Title                                                                        | Status |
+|-----|------|------------------------------------------------------------------------------|--------|
 | T40 | 4    | Feature ablation + importance reporting harness                               | todo |
 | T41 | 4    | Alternative fusion model (LightGBM) behind `FusionModel` port (needs T23)      | done |
 | T42 | 4    | Calibration comparison (isotonic vs Platt vs beta) (needs T23)                 | done |
