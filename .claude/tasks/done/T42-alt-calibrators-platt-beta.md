@@ -1,6 +1,6 @@
 # T42 — Alternative calibrators (Platt, beta) behind the `ConfidenceCalibrator` port
 
-status: todo
+status: done
 tier: 4
 depends_on: T23
 

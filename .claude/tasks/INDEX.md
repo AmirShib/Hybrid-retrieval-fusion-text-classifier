@@ -46,7 +46,7 @@ or persistence.
 fusion swap. It depends only on T03 (feature assembly). When absent (default), the
 system is byte-for-byte identical to today. T33 does NOT depend on T23.
 
-## Tier 3+ — Stubs (T41, T42 fully specified; rest expand when Tier 2 is green)
+## Tier 3+ (T33 specified; T41/T42 done; the rest are stubs — expand when picked up)
 
 | ID  | Tier | Title                                                                        | Status |
 |-----|------|------------------------------------------------------------------------------|--------|
@@ -56,7 +56,7 @@ system is byte-for-byte identical to today. T33 does NOT depend on T23.
 | T33 | 3    | Optional cross-encoder reranker as 6th retrieval signal (needs T03, optional)  | todo |
 | T40 | 4    | Feature ablation + importance reporting harness                               | todo |
 | T41 | 4    | Alternative fusion model (LightGBM) behind `FusionModel` port (needs T23)      | done |
-| T42 | 4    | Calibration comparison (isotonic vs Platt vs beta) (needs T23)                 | todo |
+| T42 | 4    | Calibration comparison (isotonic vs Platt vs beta) (needs T23)                 | done |
 | T43 | 4    | Threshold tuner: add target-coverage mode alongside target-precision          | todo |
 | T44 | 4    | Alternative fusion model (XGBRanker) behind `FusionModel` port (needs T23)     | done |
 | T50 | 5    | Pin requirements for air-gapped reproducibility                               | todo |

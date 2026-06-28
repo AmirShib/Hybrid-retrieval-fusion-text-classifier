@@ -7,7 +7,7 @@ Layout:
     <dir>/dense.npz        dense retriever numeric state
     <dir>/lexical.pkl      pickled LexicalRetrieverAdapter (vectorizers + BM25 weights)
     <dir>/fusion.json      XGBoost model
-    <dir>/calibrator.pkl   isotonic regressor
+    <dir>/calibrator.pkl   calibrator (isotonic | platt | beta)
     <dir>/meta.json        label space, thresholds, config, feature schema
 """
 from __future__ import annotations

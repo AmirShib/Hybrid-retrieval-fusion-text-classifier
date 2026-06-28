@@ -55,7 +55,7 @@ class FusionConfig:
 
 @dataclass
 class CalibrationConfig:
-    kind: str = "isotonic"   # registry key (see infrastructure/registry.py)
+    kind: str = "isotonic"   # registry key: "isotonic" | "platt" | "beta"
     params: Dict[str, Any] = field(default_factory=dict)
 
 

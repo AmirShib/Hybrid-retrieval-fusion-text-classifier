@@ -6,8 +6,10 @@ from .encoder import (
     train_encoder,
 )
 from .fusion import (
+    BetaCalibrator,
     IsotonicCalibrator,
     LightGBMFusionModel,
+    PlattCalibrator,
     XGBoostFusionModel,
     XGBRankerFusionModel,
 )
@@ -35,7 +37,8 @@ from .retrieval import (
 __all__ = [
     "SentenceTransformerEncoder", "TfidfEncoder", "train_encoder", "fit_tfidf_encoder",
     "BM25Index", "DenseRetrieverAdapter", "DenseState", "LexicalRetrieverAdapter",
-    "XGBoostFusionModel", "LightGBMFusionModel", "XGBRankerFusionModel", "IsotonicCalibrator",
+    "XGBoostFusionModel", "LightGBMFusionModel", "XGBRankerFusionModel",
+    "IsotonicCalibrator", "PlattCalibrator", "BetaCalibrator",
     "ArtifactRepository", "DeployedArtifacts",
     "EncoderSpec", "FusionSpec", "CalibratorSpec",
     "build_encoder", "build_fusion", "build_calibrator",

@@ -32,8 +32,10 @@ from .encoder import (
     train_encoder,
 )
 from .fusion import (
+    BetaCalibrator,
     IsotonicCalibrator,
     LightGBMFusionModel,
+    PlattCalibrator,
     XGBoostFusionModel,
     XGBRankerFusionModel,
 )
@@ -202,5 +204,23 @@ register_calibrator(
         build=lambda cfg: IsotonicCalibrator(),
         filename="calibrator.pkl",
         load=IsotonicCalibrator.load,
+    ),
+)
+
+register_calibrator(
+    "platt",
+    CalibratorSpec(
+        build=lambda cfg: PlattCalibrator(),
+        filename="calibrator.pkl",
+        load=PlattCalibrator.load,
+    ),
+)
+
+register_calibrator(
+    "beta",
+    CalibratorSpec(
+        build=lambda cfg: BetaCalibrator(),
+        filename="calibrator.pkl",
+        load=BetaCalibrator.load,
     ),
 )

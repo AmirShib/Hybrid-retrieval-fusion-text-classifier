@@ -22,6 +22,7 @@ from text_classifier import LabeledItem, LabelSpace
 from text_classifier.application.inference import InferencePipeline
 from text_classifier.application.training import TrainingPipeline
 from text_classifier.config import (
+    CalibrationConfig,
     EncoderConfig,
     FusionConfig,
     PipelineConfig,
@@ -321,6 +322,37 @@ class TestFusionBackends:
         ArtifactRepository().save(artifacts, model_dir)
         with open(os.path.join(model_dir, "meta.json")) as fh:
             assert json.load(fh)["components"]["fusion"] == fusion_kind
+
+        loaded = ArtifactRepository().load(model_dir)
+        texts = [it.text for it in items[:8]]
+        before = InferencePipeline(artifacts).predict(texts)
+        after = InferencePipeline(loaded).predict(texts)
+        assert len(before) == len(after) == 8
+        for a, b in zip(before, after):
+            assert a.top_key == b.top_key
+            assert a.abstained == b.abstained
+            assert abs(a.confidence - b.confidence) < 1e-5
+
+
+class TestCalibratorBackends:
+    """T42 — the whole pipeline trains/saves/loads/predicts over multiple
+    calibrator backends selected purely by config, fully offline."""
+
+    @pytest.mark.parametrize("calibrator_kind", ["isotonic", "platt", "beta"])
+    def test_full_pipeline_round_trip(self, calibrator_kind, tmp_path):
+        label_space, items = make_synthetic(n_classes=6, per_class=15, seed=17)
+        cfg = _e2e_cfg()  # encoder kind="hashing", xgboost fusion
+        cfg.calibration = CalibrationConfig(kind=calibrator_kind)
+
+        enc = HashingEncoder(dim=64)
+        artifacts, report = TrainingPipeline(cfg, shared_encoder=enc).run(items, label_space)
+        assert report.n_items > 0
+        assert 0.0 <= report.coverage <= 1.0
+
+        model_dir = str(tmp_path / "model")
+        ArtifactRepository().save(artifacts, model_dir)
+        with open(os.path.join(model_dir, "meta.json")) as fh:
+            assert json.load(fh)["components"]["calibrator"] == calibrator_kind
 
         loaded = ArtifactRepository().load(model_dir)
         texts = [it.text for it in items[:8]]
