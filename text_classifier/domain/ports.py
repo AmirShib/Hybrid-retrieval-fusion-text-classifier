@@ -7,7 +7,7 @@ All array shapes are documented as (rows, cols). `b` = query batch size,
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -55,11 +55,21 @@ class LexicalRetriever(ABC):
 
 
 class FusionModel(ABC):
-    """Pointwise model scoring P(candidate is the true class). Must tolerate NaN
-    features (the 'not retrieved' encoding)."""
+    """Model scoring P(candidate is the true class). Must tolerate NaN features
+    (the 'not retrieved' encoding).
+
+    ``NEEDS_GROUPS`` flags learning-to-rank backends (e.g. XGBRanker) that need a
+    per-query ``groups`` array at fit time. Pointwise backends leave it False and
+    ignore ``groups``; the training pipeline only computes/passes groups when a
+    model declares it needs them, so existing call sites stay ``fit(X, y)``."""
+
+    NEEDS_GROUPS: bool = False
 
     @abstractmethod
-    def fit(self, X: np.ndarray, y: np.ndarray) -> None: ...
+    def fit(self, X: np.ndarray, y: np.ndarray, *, groups: Optional[np.ndarray] = None) -> None:
+        """Fit on features ``X`` and binary labels ``y``. ``groups`` (one count
+        per query, summing to ``len(X)``) is required only when
+        ``NEEDS_GROUPS`` is True; pointwise models ignore it."""
 
     @abstractmethod
     def predict_proba(self, X: np.ndarray) -> np.ndarray:  # (n,) P(class==1)

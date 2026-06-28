@@ -1,6 +1,6 @@
 # T41 — Alternative fusion model (LightGBM) behind the `FusionModel` port
 
-status: todo
+status: done
 tier: 4
 depends_on: T05, T23
 

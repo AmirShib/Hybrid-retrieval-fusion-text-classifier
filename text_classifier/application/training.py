@@ -190,7 +190,15 @@ class TrainingPipeline:
         ca = oof[oof["fold"].isin(roles["calibration"])]
 
         fusion = build_fusion(self.cfg.fusion)
-        fusion.fit(tr[FEATURE_NAMES].to_numpy(np.float32), tr["is_true"].to_numpy())
+        if getattr(fusion, "NEEDS_GROUPS", False):
+            # Learning-to-rank: each item's candidate rows form one query group.
+            # Sort so groups are contiguous, then pass run-length group sizes.
+            tr = tr.sort_values("item_id", kind="stable")
+            groups = tr.groupby("item_id", sort=False).size().to_numpy()
+            fusion.fit(tr[FEATURE_NAMES].to_numpy(np.float32), tr["is_true"].to_numpy(),
+                       groups=groups)
+        else:
+            fusion.fit(tr[FEATURE_NAMES].to_numpy(np.float32), tr["is_true"].to_numpy())
 
         raw = fusion.predict_proba(ca[FEATURE_NAMES].to_numpy(np.float32))
         calibrator = build_calibrator(self.cfg.calibration)

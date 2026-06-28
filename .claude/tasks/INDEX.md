@@ -54,9 +54,9 @@ system is byte-for-byte identical to today. T33 does NOT depend on T23.
 | T32 | 3    | BM25 memory profile for large corpora; chunk/sparsify as needed               | todo |
 | T33 | 3    | Optional cross-encoder reranker as 6th retrieval signal (needs T03, optional)  | todo |
 | T40 | 4    | Feature ablation + importance reporting harness                               | todo |
-| T41 | 4    | Alternative fusion model (LightGBM) behind `FusionModel` port (needs T23)      | todo |
+| T41 | 4    | Alternative fusion model (LightGBM) behind `FusionModel` port (needs T23)      | done |
 | T42 | 4    | Calibration comparison (isotonic vs Platt vs beta) (needs T23)                 | todo |
 | T43 | 4    | Threshold tuner: add target-coverage mode alongside target-precision          | todo |
-| T44 | 4    | Alternative fusion model (XGBRanker) behind `FusionModel` port (needs T23)     | todo |
+| T44 | 4    | Alternative fusion model (XGBRanker) behind `FusionModel` port (needs T23)     | done |
 | T50 | 5    | Pin requirements for air-gapped reproducibility                               | todo |
 | T51 | 5    | ruff + mypy + pre-commit; type-clean the package                              | todo |

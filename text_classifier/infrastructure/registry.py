@@ -31,7 +31,12 @@ from .encoder import (
     fit_tfidf_encoder,
     train_encoder,
 )
-from .fusion import IsotonicCalibrator, XGBoostFusionModel
+from .fusion import (
+    IsotonicCalibrator,
+    LightGBMFusionModel,
+    XGBoostFusionModel,
+    XGBRankerFusionModel,
+)
 
 
 # --------------------------------------------------------------------------- specs
@@ -170,6 +175,24 @@ register_fusion(
         build=lambda cfg: XGBoostFusionModel(cfg.xgb_params, cfg.auto_scale_pos_weight),
         filename="fusion.json",
         load=XGBoostFusionModel.load,
+    ),
+)
+
+register_fusion(
+    "lightgbm",
+    FusionSpec(
+        build=lambda cfg: LightGBMFusionModel(cfg.params, cfg.auto_scale_pos_weight),
+        filename="fusion.txt",  # LightGBM native text format
+        load=LightGBMFusionModel.load,
+    ),
+)
+
+register_fusion(
+    "xgbranker",
+    FusionSpec(
+        build=lambda cfg: XGBRankerFusionModel(cfg.params),
+        filename="fusion_ranker",  # a directory: native model + isotonic head
+        load=XGBRankerFusionModel.load,
     ),
 )
 

@@ -1,6 +1,6 @@
 # T44 — Alternative fusion model (XGBRanker) behind the `FusionModel` port
 
-status: todo
+status: done
 tier: 4
 depends_on: T23
 

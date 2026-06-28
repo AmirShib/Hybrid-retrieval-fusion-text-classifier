@@ -10,6 +10,7 @@ the persistence module with HashingEncoder (same interface).
 from __future__ import annotations
 
 import dataclasses
+import importlib.util
 import json
 import os
 from unittest.mock import patch
@@ -275,6 +276,51 @@ class TestEncoderBackends:
 
         with open(os.path.join(model_dir, "meta.json")) as fh:
             assert json.load(fh)["components"]["encoder"] == encoder_kind
+
+        loaded = ArtifactRepository().load(model_dir)
+        texts = [it.text for it in items[:8]]
+        before = InferencePipeline(artifacts).predict(texts)
+        after = InferencePipeline(loaded).predict(texts)
+        assert len(before) == len(after) == 8
+        for a, b in zip(before, after):
+            assert a.top_key == b.top_key
+            assert a.abstained == b.abstained
+            assert abs(a.confidence - b.confidence) < 1e-5
+
+
+_HAS_LGBM = importlib.util.find_spec("lightgbm") is not None
+
+
+class TestFusionBackends:
+    """T41 + T44 — the whole pipeline trains/saves/loads/predicts over multiple
+    fusion backends selected purely by config, fully offline."""
+
+    @pytest.mark.parametrize("fusion_kind", ["xgboost", "lightgbm", "xgbranker"])
+    def test_full_pipeline_round_trip(self, fusion_kind, tmp_path):
+        if fusion_kind == "lightgbm" and not _HAS_LGBM:
+            pytest.skip("lightgbm not installed")
+
+        label_space, items = make_synthetic(n_classes=6, per_class=15, seed=13)
+        cfg = _e2e_cfg()  # encoder kind="hashing"
+        if fusion_kind == "lightgbm":
+            cfg.fusion = FusionConfig(kind="lightgbm", params={
+                "n_estimators": 20, "max_depth": 3, "random_state": 0, "verbosity": -1,
+            })
+        elif fusion_kind == "xgbranker":
+            cfg.fusion = FusionConfig(kind="xgbranker", params={
+                "n_estimators": 20, "max_depth": 3, "random_state": 0,
+            })
+        # else: keep the default xgboost fusion from _e2e_cfg
+
+        enc = HashingEncoder(dim=64)
+        artifacts, report = TrainingPipeline(cfg, shared_encoder=enc).run(items, label_space)
+        assert report.n_items > 0
+        assert 0.0 <= report.coverage <= 1.0
+
+        model_dir = str(tmp_path / "model")
+        ArtifactRepository().save(artifacts, model_dir)
+        with open(os.path.join(model_dir, "meta.json")) as fh:
+            assert json.load(fh)["components"]["fusion"] == fusion_kind
 
         loaded = ArtifactRepository().load(model_dir)
         texts = [it.text for it in items[:8]]

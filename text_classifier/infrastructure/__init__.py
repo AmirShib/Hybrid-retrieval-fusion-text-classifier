@@ -5,7 +5,12 @@ from .encoder import (
     fit_tfidf_encoder,
     train_encoder,
 )
-from .fusion import IsotonicCalibrator, XGBoostFusionModel
+from .fusion import (
+    IsotonicCalibrator,
+    LightGBMFusionModel,
+    XGBoostFusionModel,
+    XGBRankerFusionModel,
+)
 from .persistence import ArtifactRepository, DeployedArtifacts
 from .registry import (
     CalibratorSpec,
@@ -30,7 +35,7 @@ from .retrieval import (
 __all__ = [
     "SentenceTransformerEncoder", "TfidfEncoder", "train_encoder", "fit_tfidf_encoder",
     "BM25Index", "DenseRetrieverAdapter", "DenseState", "LexicalRetrieverAdapter",
-    "XGBoostFusionModel", "IsotonicCalibrator",
+    "XGBoostFusionModel", "LightGBMFusionModel", "XGBRankerFusionModel", "IsotonicCalibrator",
     "ArtifactRepository", "DeployedArtifacts",
     "EncoderSpec", "FusionSpec", "CalibratorSpec",
     "build_encoder", "build_fusion", "build_calibrator",
