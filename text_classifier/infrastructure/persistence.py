@@ -81,8 +81,18 @@ class ArtifactRepository:
             json.dump(meta, fh, indent=2)
 
     def load(self, directory: str) -> DeployedArtifacts:
-        with open(os.path.join(directory, "meta.json")) as fh:
+        if not os.path.isdir(directory):
+            raise FileNotFoundError(f"model directory not found: {directory!r}")
+        meta_path = os.path.join(directory, "meta.json")
+        if not os.path.isfile(meta_path):
+            raise FileNotFoundError(
+                f"meta.json not found in model directory {directory!r} "
+                f"(expected at {meta_path!r})"
+            )
+        with open(meta_path) as fh:
             meta = json.load(fh)
+
+        self._check_feature_schema(meta.get("feature_names"))
 
         config = PipelineConfig.from_dict(meta["config"])
         label_space = LabelSpace([ClassDefinition(c["key"], c["description"]) for c in meta["classes"]])
@@ -110,3 +120,27 @@ class ArtifactRepository:
             per_class={int(k): float(v) for k, v in meta["abstention"]["per_class"].items()},
         )
         return DeployedArtifacts(config, label_space, encoder, dense, lexical, fusion, calibrator, abstention)
+
+    @staticmethod
+    def _check_feature_schema(saved_names) -> None:
+        """Guard against schema drift between a persisted model and the running code.
+
+        ``FEATURE_NAMES`` is the single source of truth for column order; a model
+        trained against a different version of it would feed XGBoost mislabelled
+        columns and produce silently wrong scores. Detecting the mismatch at load
+        time turns that into a clear, actionable error.
+        """
+        if saved_names == FEATURE_NAMES:
+            return
+        saved = list(saved_names or [])
+        missing = [n for n in FEATURE_NAMES if n not in saved]
+        extra = [n for n in saved if n not in FEATURE_NAMES]
+        if not missing and not extra:
+            detail = "feature names match but column order differs"
+        else:
+            detail = f"missing from model: {missing or 'none'}; unknown to code: {extra or 'none'}"
+        raise ValueError(
+            "feature schema drift between the saved model and the current code "
+            f"(meta.json has {len(saved)} feature(s), code expects {len(FEATURE_NAMES)}): "
+            f"{detail}. Retrain the model against this version of the package."
+        )

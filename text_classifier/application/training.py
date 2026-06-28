@@ -11,6 +11,7 @@ Orchestrates the full training use case:
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -61,6 +62,8 @@ class TrainingPipeline:
     # ---------------------------------------------------------------- public API
     def run(self, items: Sequence[LabeledItem], label_space: LabelSpace,
             output_dir: Optional[str] = None) -> Tuple[DeployedArtifacts, CoverageReport]:
+        items = list(items)
+        self._validate_inputs(items, label_space)
         self.assembler = FeatureAssembler(label_space, CandidatePolicy(self.cfg.candidate_top_n))
         texts = [it.text for it in items]
         y = np.array(label_space.encode_labels([it.label for it in items]), dtype=np.int64)
@@ -74,6 +77,49 @@ class TrainingPipeline:
             ArtifactRepository().save(artifacts, output_dir)
             log.info("saved trained pipeline to %s", output_dir)
         return artifacts, report
+
+    # ---------------------------------------------------------------- validation
+    def _validate_inputs(self, items: Sequence[LabeledItem], label_space: LabelSpace) -> None:
+        """Fail fast, before any encoder/index work, on inputs that would otherwise
+        surface as a cryptic numpy/pandas/sklearn traceback deep in the pipeline.
+
+        Checks, in order:
+          1. the item list is non-empty;
+          2. every item label is defined in ``label_space``;
+          3. every class present has at least ``n_folds`` examples — the minimum
+             ``StratifiedKFold`` requires per class.
+
+        Note on the minimum-support invariant: a dataset where every item belongs
+        to a *single* class is acceptable (StratifiedKFold simply splits within
+        that class), provided that class clears the per-class minimum. What
+        StratifiedKFold cannot do is split a class with fewer than ``n_folds``
+        members, so that is the boundary we guard.
+        """
+        if not items:
+            raise ValueError("TrainingPipeline.run requires a non-empty list of items")
+
+        known = set(label_space.keys)
+        unknown = sorted({it.label for it in items if it.label not in known})
+        if unknown:
+            shown = unknown[:10]
+            suffix = " ..." if len(unknown) > 10 else ""
+            raise ValueError(
+                f"{len(unknown)} item label(s) are not defined in the LabelSpace: "
+                f"{shown}{suffix}"
+            )
+
+        n_folds = self.cfg.training.n_folds
+        underpopulated = sorted(
+            ((k, c) for k, c in Counter(it.label for it in items).items() if c < n_folds),
+            key=lambda kc: (kc[1], kc[0]),
+        )
+        if underpopulated:
+            shown = underpopulated[:10]
+            suffix = " ..." if len(underpopulated) > 10 else ""
+            raise ValueError(
+                f"StratifiedKFold(n_folds={n_folds}) needs at least {n_folds} examples "
+                f"per class; these class(es) have too few (key, count): {shown}{suffix}"
+            )
 
     # ---------------------------------------------------------------- (1) OOF
     def _encoder_for_split(self, items_idx: np.ndarray, texts, y, label_space,

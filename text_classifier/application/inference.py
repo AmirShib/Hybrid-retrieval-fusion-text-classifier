@@ -36,7 +36,16 @@ class InferencePipeline:
         return self._a.config
 
     def predict(self, texts: Sequence[str]) -> List[Prediction]:
+        """Classify each input string.
+
+        Empty strings are accepted: they encode to a degenerate vector that
+        retrieves nothing, so the corresponding item abstains (``top_key=""``,
+        ``abstained=True``) rather than raising. Non-string inputs (including
+        ``None``) are a programming error and raise ``TypeError`` before any
+        encoding work begins, pointing at the offending index.
+        """
         texts = list(texts)
+        self._validate_texts(texts)
         a = self._a
         q_emb = a.encoder.encode(texts)
         feats = self._assembler.assemble(
@@ -66,3 +75,12 @@ class InferencePipeline:
             if r is None:
                 results[i] = Prediction(top_key="", confidence=0.0, abstained=True)
         return results
+
+    @staticmethod
+    def _validate_texts(texts: List[str]) -> None:
+        for i, t in enumerate(texts):
+            if not isinstance(t, str):
+                raise TypeError(
+                    f"InferencePipeline.predict expects str inputs; item at index {i} "
+                    f"is {type(t).__name__}: {t!r}"
+                )
