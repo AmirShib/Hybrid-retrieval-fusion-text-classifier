@@ -34,6 +34,7 @@ specified and ready to pick up. Tier 3+ remain as stubs.
 | T22 | Edge cases: single class, class with no examples, k>n_docs, empty batch    | done | T01, T04, T05, T07 |
 | T23 | Pluggable component registry + factory DI (encoder/fusion/calibrator)      | done | T01, T07        |
 | T24 | Pluggable encoder backends behind `TextEncoder` (e.g. TF-IDF, torch-free)  | done | T23             |
+| T25 | Expose `--encoder-kind` in the train CLI (reach the torch-free backend)    | todo | T23, T24        |
 
 **Pluggability chain:** T23 is the prerequisite seam — it makes encoder, fusion,
 and calibrator selectable by config. Once it lands, T24 (alt encoders), T41
