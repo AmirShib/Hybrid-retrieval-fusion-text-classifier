@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 @dataclass
 class EncoderConfig:
+    kind: str = "sentence-transformers"   # registry key (see infrastructure/registry.py)
     model_name_or_path: str = "sentence-transformers/all-MiniLM-L6-v2"
     encode_batch_size: int = 64
     device: Optional[str] = None
@@ -30,6 +31,7 @@ class RetrievalConfig:
 
 @dataclass
 class FusionConfig:
+    kind: str = "xgboost"   # registry key (see infrastructure/registry.py)
     xgb_params: Dict[str, Any] = field(default_factory=lambda: {
         "n_estimators": 600,
         "max_depth": 6,
@@ -43,6 +45,14 @@ class FusionConfig:
         "n_jobs": -1,
     })
     auto_scale_pos_weight: bool = True   # set scale_pos_weight = n_neg / n_pos at fit time
+    # Generic params block read by non-xgboost backends (e.g. LightGBM in T41).
+    params: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class CalibrationConfig:
+    kind: str = "isotonic"   # registry key (see infrastructure/registry.py)
+    params: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -64,6 +74,7 @@ class PipelineConfig:
     encoder: EncoderConfig = field(default_factory=EncoderConfig)
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     fusion: FusionConfig = field(default_factory=FusionConfig)
+    calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     candidate_top_n: int = 10
 
@@ -72,10 +83,13 @@ class PipelineConfig:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "PipelineConfig":
+        # `.get` with defaults keeps older serialized configs (written before a
+        # field existed) loadable — new fields fall back to their defaults.
         return cls(
             encoder=EncoderConfig(**data["encoder"]),
             retrieval=RetrievalConfig(**data["retrieval"]),
             fusion=FusionConfig(**data["fusion"]),
+            calibration=CalibrationConfig(**data.get("calibration", {})),
             training=TrainingConfig(**data["training"]),
             candidate_top_n=data["candidate_top_n"],
         )

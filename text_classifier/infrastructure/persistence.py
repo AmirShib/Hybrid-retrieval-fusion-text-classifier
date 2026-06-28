@@ -24,24 +24,36 @@ from ..config import PipelineConfig
 from ..domain import (
     AbstentionPolicy,
     ClassDefinition,
+    ConfidenceCalibrator,
     FEATURE_NAMES,
+    FusionModel,
     LabelSpace,
+    TextEncoder,
 )
-from .encoder import SentenceTransformerEncoder
-from .fusion import IsotonicCalibrator, XGBoostFusionModel
+from .registry import calibrator_spec, encoder_spec, fusion_spec
 from .retrieval import DenseRetrieverAdapter, DenseState, LexicalRetrieverAdapter
+
+
+# Defaults for model dirs written before component kinds were recorded (T23).
+_LEGACY_COMPONENTS = {
+    "encoder": "sentence-transformers",
+    "fusion": "xgboost",
+    "calibrator": "isotonic",
+}
 
 
 @dataclass
 class DeployedArtifacts:
-    """Everything the inference pipeline needs, in memory."""
+    """Everything the inference pipeline needs, in memory. Component fields are
+    typed against the ports, not concrete classes, so any registered backend
+    fits."""
     config: PipelineConfig
     label_space: LabelSpace
-    encoder: SentenceTransformerEncoder
+    encoder: TextEncoder
     dense: DenseRetrieverAdapter
     lexical: LexicalRetrieverAdapter
-    fusion: XGBoostFusionModel
-    calibrator: IsotonicCalibrator
+    fusion: FusionModel
+    calibrator: ConfidenceCalibrator
     abstention: AbstentionPolicy
 
 
@@ -51,7 +63,14 @@ class ArtifactRepository:
     def save(self, artifacts: DeployedArtifacts, directory: str) -> None:
         os.makedirs(directory, exist_ok=True)
 
-        artifacts.encoder.save(os.path.join(directory, "encoder"))
+        cfg = artifacts.config
+        # Component filenames/dirnames come from the registry, so a backend with
+        # its own on-disk format round-trips without editing this method.
+        enc_spec = encoder_spec(cfg.encoder.kind)
+        fus_spec = fusion_spec(cfg.fusion.kind)
+        cal_spec = calibrator_spec(cfg.calibration.kind)
+
+        artifacts.encoder.save(os.path.join(directory, enc_spec.dirname))
 
         s = artifacts.dense.state
         np.savez_compressed(
@@ -62,12 +81,17 @@ class ArtifactRepository:
         with open(os.path.join(directory, "lexical.pkl"), "wb") as fh:
             pickle.dump(artifacts.lexical, fh)
 
-        artifacts.fusion.save(os.path.join(directory, "fusion.json"))
-        artifacts.calibrator.save(os.path.join(directory, "calibrator.pkl"))
+        artifacts.fusion.save(os.path.join(directory, fus_spec.filename))
+        artifacts.calibrator.save(os.path.join(directory, cal_spec.filename))
 
         meta = {
             "feature_names": FEATURE_NAMES,
-            "config": artifacts.config.to_dict(),
+            "config": cfg.to_dict(),
+            "components": {
+                "encoder": cfg.encoder.kind,
+                "fusion": cfg.fusion.kind,
+                "calibrator": cfg.calibration.kind,
+            },
             "classes": [
                 {"key": k, "description": d}
                 for k, d in zip(artifacts.label_space.keys, artifacts.label_space.descriptions)
@@ -97,11 +121,14 @@ class ArtifactRepository:
         config = PipelineConfig.from_dict(meta["config"])
         label_space = LabelSpace([ClassDefinition(c["key"], c["description"]) for c in meta["classes"]])
 
-        encoder = SentenceTransformerEncoder.load(
-            os.path.join(directory, "encoder"),
-            batch_size=config.encoder.encode_batch_size,
-            device=config.encoder.device,
-        )
+        # Dispatch each swappable component through the registry by its recorded
+        # kind (defaulting for legacy dirs that predate the `components` block).
+        components = self._components_from_meta(meta)
+        enc_spec = encoder_spec(components["encoder"])
+        fus_spec = fusion_spec(components["fusion"])
+        cal_spec = calibrator_spec(components["calibrator"])
+
+        encoder = enc_spec.load(os.path.join(directory, enc_spec.dirname), config.encoder)
 
         npz = np.load(os.path.join(directory, "dense.npz"))
         dense = DenseRetrieverAdapter(
@@ -112,14 +139,36 @@ class ArtifactRepository:
         with open(os.path.join(directory, "lexical.pkl"), "rb") as fh:
             lexical: LexicalRetrieverAdapter = pickle.load(fh)
 
-        fusion = XGBoostFusionModel.load(os.path.join(directory, "fusion.json"))
-        calibrator = IsotonicCalibrator.load(os.path.join(directory, "calibrator.pkl"))
+        fusion = fus_spec.load(os.path.join(directory, fus_spec.filename))
+        calibrator = cal_spec.load(os.path.join(directory, cal_spec.filename))
 
         abstention = AbstentionPolicy(
             global_threshold=float(meta["abstention"]["global_threshold"]),
             per_class={int(k): float(v) for k, v in meta["abstention"]["per_class"].items()},
         )
         return DeployedArtifacts(config, label_space, encoder, dense, lexical, fusion, calibrator, abstention)
+
+    @staticmethod
+    def _components_from_meta(meta: Dict) -> Dict[str, str]:
+        """Resolve each component's ``kind`` for load dispatch.
+
+        Prefers the explicit ``components`` block (written since T23); falls back
+        to the kinds embedded in ``config``; finally to the built-in defaults so
+        a model directory written before this change still loads.
+        """
+        comp = meta.get("components") or {}
+        cfg = meta.get("config") or {}
+        return {
+            "encoder": comp.get("encoder")
+            or cfg.get("encoder", {}).get("kind")
+            or _LEGACY_COMPONENTS["encoder"],
+            "fusion": comp.get("fusion")
+            or cfg.get("fusion", {}).get("kind")
+            or _LEGACY_COMPONENTS["fusion"],
+            "calibrator": comp.get("calibrator")
+            or cfg.get("calibration", {}).get("kind")
+            or _LEGACY_COMPONENTS["calibrator"],
+        }
 
     @staticmethod
     def _check_feature_schema(saved_names) -> None:

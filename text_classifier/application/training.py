@@ -26,16 +26,17 @@ from ..domain import (
     FEATURE_NAMES,
     LabeledItem,
     LabelSpace,
+    TextEncoder,
     ThresholdTuner,
 )
 from ..infrastructure import (
     ArtifactRepository,
     DenseRetrieverAdapter,
     DeployedArtifacts,
-    IsotonicCalibrator,
     LexicalRetrieverAdapter,
-    SentenceTransformerEncoder,
-    XGBoostFusionModel,
+    build_calibrator,
+    build_fusion,
+    build_encoder,
     train_encoder,
 )
 from .features import FeatureAssembler
@@ -45,19 +46,16 @@ log = logging.getLogger(__name__)
 
 
 class TrainingPipeline:
-    def __init__(self, config: PipelineConfig, shared_encoder: Optional[SentenceTransformerEncoder] = None):
+    def __init__(self, config: PipelineConfig, shared_encoder: Optional[TextEncoder] = None):
         self.cfg = config
         self.assembler: Optional[FeatureAssembler] = None
         # Optional injected encoder for the shared-encoder path (DI / offline tests).
         self._shared_override = shared_encoder
 
-    def _load_shared_encoder(self) -> SentenceTransformerEncoder:
+    def _load_shared_encoder(self) -> TextEncoder:
         if self._shared_override is not None:
             return self._shared_override
-        return SentenceTransformerEncoder.load(
-            self.cfg.encoder.model_name_or_path,
-            self.cfg.encoder.encode_batch_size, self.cfg.encoder.device,
-        )
+        return build_encoder(self.cfg.encoder)
 
     # ---------------------------------------------------------------- public API
     def run(self, items: Sequence[LabeledItem], label_space: LabelSpace,
@@ -136,7 +134,7 @@ class TrainingPipeline:
 
     # ---------------------------------------------------------------- (1) OOF
     def _encoder_for_split(self, items_idx: np.ndarray, texts, y, label_space,
-                           shared: Optional[SentenceTransformerEncoder]) -> SentenceTransformerEncoder:
+                           shared: Optional[TextEncoder]) -> TextEncoder:
         if not self.cfg.training.use_per_fold_encoder:
             assert shared is not None
             return shared
@@ -181,11 +179,11 @@ class TrainingPipeline:
         tr = oof[oof["fold"].isin(roles["train"])]
         ca = oof[oof["fold"].isin(roles["calibration"])]
 
-        fusion = XGBoostFusionModel(self.cfg.fusion.xgb_params, self.cfg.fusion.auto_scale_pos_weight)
+        fusion = build_fusion(self.cfg.fusion)
         fusion.fit(tr[FEATURE_NAMES].to_numpy(np.float32), tr["is_true"].to_numpy())
 
         raw = fusion.predict_proba(ca[FEATURE_NAMES].to_numpy(np.float32))
-        calibrator = IsotonicCalibrator()
+        calibrator = build_calibrator(self.cfg.calibration)
         calibrator.fit(raw, ca["is_true"].to_numpy())
 
         decided = top_per_item(add_confidence(ca, fusion, calibrator))

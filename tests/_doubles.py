@@ -14,6 +14,7 @@ import numpy as np
 
 from text_classifier import ClassDefinition, LabeledItem, LabelSpace
 from text_classifier.domain import TextEncoder
+from text_classifier.infrastructure import EncoderSpec, register_encoder
 
 
 class HashingEncoder(TextEncoder):
@@ -59,12 +60,25 @@ class HashingEncoder(TextEncoder):
 
     @classmethod
     def load(cls, path: str, batch_size: int = 64, device=None) -> "HashingEncoder":
-        """Signature matches SentenceTransformerEncoder.load so it can be patched in."""
+        """Signature matches SentenceTransformerEncoder.load."""
         try:
             with open(os.path.join(path, "hashing_encoder.json")) as fh:
                 return cls(dim=json.load(fh)["dim"])
         except FileNotFoundError:
             return cls()
+
+
+# Register the offline encoder under the registry seam (T23) so tests can select
+# it by config (`cfg.encoder.kind = "hashing"`) and round-trip through
+# ArtifactRepository without patching any concrete class.
+register_encoder(
+    "hashing",
+    EncoderSpec(
+        build=lambda cfg: HashingEncoder(),
+        dirname="encoder",
+        load=lambda path, cfg: HashingEncoder.load(path, cfg.encode_batch_size, cfg.device),
+    ),
+)
 
 
 def make_synthetic(

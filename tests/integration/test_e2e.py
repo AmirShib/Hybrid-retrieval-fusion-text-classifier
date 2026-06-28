@@ -37,6 +37,7 @@ from tests._doubles import HashingEncoder, make_synthetic
 
 def _e2e_cfg() -> PipelineConfig:
     cfg = PipelineConfig()
+    cfg.encoder.kind = "hashing"   # offline encoder via the registry seam (T23)
     cfg.training = TrainingConfig(
         n_folds=3,
         random_state=0,
@@ -63,21 +64,18 @@ def trained():
 
 @pytest.fixture(scope="module")
 def saved_dir(trained, tmp_path_factory):
-    """Save artifacts to a temp dir (patching out SentenceTransformerEncoder)."""
+    """Save artifacts to a temp dir. No patching: the encoder kind is "hashing",
+    so the registry dispatches save/load to HashingEncoder."""
     artifacts, _, _, _, _ = trained
     d = str(tmp_path_factory.mktemp("model"))
-    with patch("text_classifier.infrastructure.persistence.SentenceTransformerEncoder",
-               HashingEncoder):
-        ArtifactRepository().save(artifacts, d)
+    ArtifactRepository().save(artifacts, d)
     return d
 
 
 @pytest.fixture(scope="module")
 def loaded_artifacts(saved_dir):
-    """Load artifacts from the saved dir (patching encoder load)."""
-    with patch("text_classifier.infrastructure.persistence.SentenceTransformerEncoder",
-               HashingEncoder):
-        return ArtifactRepository().load(saved_dir)
+    """Load artifacts from the saved dir via the registry seam."""
+    return ArtifactRepository().load(saved_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -246,9 +244,7 @@ class TestInferenceContract:
 
     def test_from_directory(self, saved_dir, loaded_artifacts):
         """InferencePipeline.from_directory loads the same artifacts as ArtifactRepository."""
-        with patch("text_classifier.infrastructure.persistence.SentenceTransformerEncoder",
-                   HashingEncoder):
-            pipeline = InferencePipeline.from_directory(saved_dir)
+        pipeline = InferencePipeline.from_directory(saved_dir)
         assert pipeline.label_space.keys == loaded_artifacts.label_space.keys
 
 
@@ -269,3 +265,21 @@ class TestConfigSerialization:
         assert d["training"]["n_folds"] == cfg.training.n_folds
         assert d["fusion"]["xgb_params"] == cfg.fusion.xgb_params
         assert d["retrieval"]["k_neighbors"] == cfg.retrieval.k_neighbors
+
+    def test_component_kinds_roundtrip(self):
+        """The T23 `kind` selectors (encoder/fusion/calibration) survive serialization."""
+        cfg = _e2e_cfg()
+        d = cfg.to_dict()
+        assert d["encoder"]["kind"] == "hashing"
+        assert d["fusion"]["kind"] == "xgboost"
+        assert d["calibration"]["kind"] == "isotonic"
+        restored = PipelineConfig.from_dict(d)
+        assert restored.encoder.kind == "hashing"
+        assert restored.calibration.kind == "isotonic"
+
+    def test_from_dict_without_calibration_uses_default(self):
+        """A config serialized before `calibration` existed still loads."""
+        d = _e2e_cfg().to_dict()
+        del d["calibration"]
+        restored = PipelineConfig.from_dict(d)
+        assert restored.calibration.kind == "isotonic"

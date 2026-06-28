@@ -2,6 +2,17 @@
 from .encoder import SentenceTransformerEncoder, train_encoder
 from .fusion import IsotonicCalibrator, XGBoostFusionModel
 from .persistence import ArtifactRepository, DeployedArtifacts
+from .registry import (
+    CalibratorSpec,
+    EncoderSpec,
+    FusionSpec,
+    build_calibrator,
+    build_encoder,
+    build_fusion,
+    register_calibrator,
+    register_encoder,
+    register_fusion,
+)
 from .retrieval import (
     BM25Index,
     DenseRetrieverAdapter,
@@ -14,4 +25,7 @@ __all__ = [
     "BM25Index", "DenseRetrieverAdapter", "DenseState", "LexicalRetrieverAdapter",
     "XGBoostFusionModel", "IsotonicCalibrator",
     "ArtifactRepository", "DeployedArtifacts",
+    "EncoderSpec", "FusionSpec", "CalibratorSpec",
+    "build_encoder", "build_fusion", "build_calibrator",
+    "register_encoder", "register_fusion", "register_calibrator",
 ]

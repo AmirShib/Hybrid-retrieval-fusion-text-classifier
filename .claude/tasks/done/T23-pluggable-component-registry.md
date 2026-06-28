@@ -1,6 +1,6 @@
 # T23 — Pluggable component registry + factory DI (encoder / fusion / calibrator)
 
-status: todo
+status: done
 tier: 2
 depends_on: T01, T07
 
