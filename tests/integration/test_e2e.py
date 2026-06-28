@@ -21,6 +21,7 @@ from text_classifier import LabeledItem, LabelSpace
 from text_classifier.application.inference import InferencePipeline
 from text_classifier.application.training import TrainingPipeline
 from text_classifier.config import (
+    EncoderConfig,
     FusionConfig,
     PipelineConfig,
     RetrievalConfig,
@@ -251,6 +252,40 @@ class TestInferenceContract:
 # ---------------------------------------------------------------------------
 # Config serialization
 # ---------------------------------------------------------------------------
+
+class TestEncoderBackends:
+    """T24 — the whole pipeline trains/saves/loads/predicts over multiple
+    encoder backends selected purely by config, fully offline."""
+
+    @pytest.mark.parametrize("encoder_kind", ["hashing", "tfidf"])
+    def test_full_pipeline_round_trip(self, encoder_kind, tmp_path):
+        label_space, items = make_synthetic(n_classes=6, per_class=15, seed=11)
+        cfg = _e2e_cfg()
+        cfg.encoder = EncoderConfig(kind=encoder_kind)
+        # "hashing" is data-independent and injected; "tfidf" is corpus-dependent
+        # and fit per fold by the pipeline (no injection).
+        shared = HashingEncoder(dim=64) if encoder_kind == "hashing" else None
+
+        artifacts, report = TrainingPipeline(cfg, shared_encoder=shared).run(items, label_space)
+        assert report.n_items > 0
+        assert 0.0 <= report.coverage <= 1.0
+
+        model_dir = str(tmp_path / "model")
+        ArtifactRepository().save(artifacts, model_dir)
+
+        with open(os.path.join(model_dir, "meta.json")) as fh:
+            assert json.load(fh)["components"]["encoder"] == encoder_kind
+
+        loaded = ArtifactRepository().load(model_dir)
+        texts = [it.text for it in items[:8]]
+        before = InferencePipeline(artifacts).predict(texts)
+        after = InferencePipeline(loaded).predict(texts)
+        assert len(before) == len(after) == 8
+        for a, b in zip(before, after):
+            assert a.top_key == b.top_key
+            assert a.abstained == b.abstained
+            assert abs(a.confidence - b.confidence) < 1e-5
+
 
 class TestConfigSerialization:
     def test_pipeline_config_roundtrip(self):

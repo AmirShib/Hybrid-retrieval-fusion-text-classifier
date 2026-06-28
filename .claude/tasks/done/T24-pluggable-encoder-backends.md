@@ -1,6 +1,6 @@
 # T24 — Pluggable encoder backends behind the `TextEncoder` port
 
-status: todo
+status: done
 tier: 2
 depends_on: T23
 

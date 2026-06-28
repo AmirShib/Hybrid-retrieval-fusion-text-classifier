@@ -21,11 +21,16 @@ anything about it.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Dict, Mapping, TypeVar
+from typing import Callable, Dict, Mapping, Optional, Sequence, TypeVar
 
 from ..config import CalibrationConfig, EncoderConfig, FusionConfig
-from ..domain import ConfidenceCalibrator, FusionModel, TextEncoder
-from .encoder import SentenceTransformerEncoder
+from ..domain import ConfidenceCalibrator, FusionModel, LabeledItem, LabelSpace, TextEncoder
+from .encoder import (
+    SentenceTransformerEncoder,
+    TfidfEncoder,
+    fit_tfidf_encoder,
+    train_encoder,
+)
 from .fusion import IsotonicCalibrator, XGBoostFusionModel
 
 
@@ -34,10 +39,19 @@ from .fusion import IsotonicCalibrator, XGBoostFusionModel
 class EncoderSpec:
     """How to build/persist a ``TextEncoder``. Encoders persist to a *directory*
     (SentenceTransformer writes several files), so ``load`` also receives the
-    ``EncoderConfig`` for batch-size/device wiring."""
+    ``EncoderConfig`` for batch-size/device wiring.
+
+    ``corpus_dependent`` marks encoders whose parameters depend on the training
+    data (e.g. TF-IDF vocabulary). For those the pipeline must fit per fold on
+    training rows only — never reuse one encoder across folds — to stay
+    leakage-free. ``fit`` builds such an encoder from a corpus; for pretrained
+    encoders it performs optional fine-tuning (used only when
+    ``use_per_fold_encoder`` is set)."""
     build: Callable[[EncoderConfig], TextEncoder]
     dirname: str
     load: Callable[[str, EncoderConfig], TextEncoder]
+    corpus_dependent: bool = False
+    fit: Optional[Callable[[Sequence[LabeledItem], LabelSpace, EncoderConfig], TextEncoder]] = None
 
 
 @dataclass(frozen=True)
@@ -101,6 +115,20 @@ def build_encoder(config: EncoderConfig) -> TextEncoder:
     return encoder_spec(config.kind).build(config)
 
 
+def encoder_is_corpus_dependent(config: EncoderConfig) -> bool:
+    """Whether this encoder must be fit on a corpus (and therefore per fold)."""
+    return encoder_spec(config.kind).corpus_dependent
+
+
+def fit_encoder(config: EncoderConfig, items: Sequence[LabeledItem],
+                label_space: LabelSpace) -> TextEncoder:
+    """Fit/train a corpus-dependent (or fine-tunable) encoder on ``items``."""
+    spec = encoder_spec(config.kind)
+    if spec.fit is None:
+        raise ValueError(f"encoder kind {config.kind!r} is not corpus-fittable")
+    return spec.fit(items, label_space, config)
+
+
 def build_fusion(config: FusionConfig) -> FusionModel:
     return fusion_spec(config.kind).build(config)
 
@@ -120,6 +148,19 @@ register_encoder(
         load=lambda path, cfg: SentenceTransformerEncoder.load(
             path, cfg.encode_batch_size, cfg.device
         ),
+        corpus_dependent=False,  # pretrained weights are data-independent
+        fit=lambda items, ls, cfg: train_encoder(items, ls, cfg),  # optional fine-tune
+    ),
+)
+
+register_encoder(
+    "tfidf",
+    EncoderSpec(
+        build=lambda cfg: TfidfEncoder.from_config(cfg),  # unfitted; must be fit before use
+        dirname="encoder",
+        load=lambda path, cfg: TfidfEncoder.load(path),
+        corpus_dependent=True,  # vocabulary/IDF depend on the corpus -> fit per fold
+        fit=lambda items, ls, cfg: fit_tfidf_encoder(items, ls, cfg),
     ),
 )
 

@@ -17,6 +17,10 @@ class EncoderConfig:
     train_epochs: int = 1
     train_batch_size: int = 64
     warmup_ratio: float = 0.1
+    # Backend-specific kwargs read by non-ST encoders. For kind="tfidf" these are
+    # passed straight to sklearn's TfidfVectorizer (e.g. {"ngram_range": [1, 2],
+    # "max_features": 50000, "stop_words": "english"}).
+    params: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

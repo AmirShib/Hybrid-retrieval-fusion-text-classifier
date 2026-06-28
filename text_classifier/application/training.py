@@ -35,9 +35,10 @@ from ..infrastructure import (
     DeployedArtifacts,
     LexicalRetrieverAdapter,
     build_calibrator,
-    build_fusion,
     build_encoder,
-    train_encoder,
+    build_fusion,
+    encoder_is_corpus_dependent,
+    fit_encoder,
 )
 from .features import FeatureAssembler
 from .scoring import add_confidence, top_per_item
@@ -51,6 +52,15 @@ class TrainingPipeline:
         self.assembler: Optional[FeatureAssembler] = None
         # Optional injected encoder for the shared-encoder path (DI / offline tests).
         self._shared_override = shared_encoder
+
+    def _use_per_fold_encoder(self) -> bool:
+        """Refit the encoder per fold when explicitly requested, or whenever the
+        encoder is corpus-dependent (e.g. TF-IDF) and no encoder was injected —
+        a shared corpus-dependent encoder fit on all data would leak vocabulary
+        from the validation rows into their own features."""
+        if self.cfg.training.use_per_fold_encoder:
+            return True
+        return self._shared_override is None and encoder_is_corpus_dependent(self.cfg.encoder)
 
     def _load_shared_encoder(self) -> TextEncoder:
         if self._shared_override is not None:
@@ -135,15 +145,15 @@ class TrainingPipeline:
     # ---------------------------------------------------------------- (1) OOF
     def _encoder_for_split(self, items_idx: np.ndarray, texts, y, label_space,
                            shared: Optional[TextEncoder]) -> TextEncoder:
-        if not self.cfg.training.use_per_fold_encoder:
+        if not self._use_per_fold_encoder():
             assert shared is not None
             return shared
         fold_items = [LabeledItem(texts[i], label_space.key_at(int(y[i]))) for i in items_idx]
-        return train_encoder(fold_items, label_space, self.cfg.encoder)
+        return fit_encoder(self.cfg.encoder, fold_items, label_space)
 
     def _build_oof(self, texts: List[str], y: np.ndarray, label_space: LabelSpace) -> pd.DataFrame:
         shared = None
-        if not self.cfg.training.use_per_fold_encoder:
+        if not self._use_per_fold_encoder():
             shared = self._load_shared_encoder()
         skf = StratifiedKFold(self.cfg.training.n_folds, shuffle=True,
                               random_state=self.cfg.training.random_state)
@@ -219,9 +229,9 @@ class TrainingPipeline:
 
     # ---------------------------------------------------------------- (5) deploy
     def _build_deployment(self, texts, y, label_space, fusion, calibrator, abstention) -> DeployedArtifacts:
-        if self.cfg.training.use_per_fold_encoder:
+        if self._use_per_fold_encoder():
             items = [LabeledItem(texts[i], label_space.key_at(int(y[i]))) for i in range(len(texts))]
-            encoder = train_encoder(items, label_space, self.cfg.encoder)
+            encoder = fit_encoder(self.cfg.encoder, items, label_space)
         else:
             encoder = self._load_shared_encoder()
         dense = DenseRetrieverAdapter.build(encoder, texts, y, label_space, self.cfg.retrieval)
