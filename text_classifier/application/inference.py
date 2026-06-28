@@ -54,26 +54,37 @@ class InferencePipeline:
             chunk=a.config.retrieval.feature_chunk,
         )
 
-        results: List[Prediction] = [None] * len(texts)  # type: ignore[list-item]
-        if len(feats):
-            decided = top_per_item(add_confidence(feats, a.fusion, a.calibrator))
-            for _, row in decided.iterrows():
-                i = int(row["item_id"])
-                cls = int(row["candidate"])
-                conf = float(row["conf"])
-                abstain = not bool(a.abstention.accept(np.array([conf]), np.array([cls]))[0])
-                results[i] = Prediction(
-                    top_key=a.label_space.key_at(cls),
-                    confidence=conf,
-                    abstained=abstain,
-                    predicted_key=None if abstain else a.label_space.key_at(cls),
-                    margin=float(row["margin"]) if "margin" in row else None,
-                )
+        # Every item defaults to abstaining; this also covers items whose features
+        # surfaced no candidate at all (and are therefore absent from `decided`).
+        results: List[Prediction] = [
+            Prediction(top_key="", confidence=0.0, abstained=True) for _ in texts
+        ]
+        if not len(feats):
+            return results
 
-        # items where no candidate surfaced at all -> abstain
-        for i, r in enumerate(results):
-            if r is None:
-                results[i] = Prediction(top_key="", confidence=0.0, abstained=True)
+        # Collapse to one decision per item, then score the whole batch at once:
+        # pulling the columns into arrays lets us call `accept` a single time and
+        # map class indices to keys vectorized — no per-row pandas loop on the hot
+        # path (the trailing loop only packages the immutable Predictions).
+        decided = top_per_item(add_confidence(feats, a.fusion, a.calibrator))
+        item_ids = decided["item_id"].to_numpy(dtype=np.intp)
+        candidates = decided["candidate"].to_numpy(dtype=np.intp)
+        confidences = decided["conf"].to_numpy(dtype=np.float64)
+        margins = decided["margin"].to_numpy(dtype=np.float64)
+        accepted = a.abstention.accept(confidences, candidates)
+        top_keys = np.asarray(a.label_space.keys)[candidates]
+
+        for item_id, top_key, conf, margin, ok in zip(
+            item_ids, top_keys, confidences, margins, accepted
+        ):
+            key = str(top_key)
+            results[item_id] = Prediction(
+                top_key=key,
+                confidence=float(conf),
+                abstained=not ok,
+                predicted_key=key if ok else None,
+                margin=float(margin),
+            )
         return results
 
     @staticmethod

@@ -52,7 +52,7 @@ system is byte-for-byte identical to today. T33 does NOT depend on T23.
 
 | ID  | Tier | Title                                                                        | Status |
 |-----|------|------------------------------------------------------------------------------|--------|
-| T30 | 3    | Vectorize `InferencePipeline.predict` (drop the `.iterrows()` loop)            | todo |
+| T30 | 3    | Vectorize `InferencePipeline.predict` (drop the `.iterrows()` loop)            | done |
 | T31 | 3    | Optional FAISS/ANN backend behind the `DenseRetriever` port (needs T23)        | todo |
 | T32 | 3    | BM25 memory profile for large corpora; chunk/sparsify as needed               | todo |
 | T33 | 3    | Optional cross-encoder reranker as 6th retrieval signal (needs T03, optional)  | todo |

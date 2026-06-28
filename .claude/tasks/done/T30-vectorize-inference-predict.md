@@ -1,6 +1,6 @@
 # T30 — Vectorize `InferencePipeline.predict` (drop the `.iterrows()` loop)
 
-status: todo
+status: done
 tier: 3
 depends_on: T07
 

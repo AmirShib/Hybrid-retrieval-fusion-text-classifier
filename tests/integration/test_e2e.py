@@ -396,3 +396,44 @@ class TestConfigSerialization:
         del d["calibration"]
         restored = PipelineConfig.from_dict(d)
         assert restored.calibration.kind == "isotonic"
+
+
+class TestVectorizedPredict:
+    """T30 — predict() is vectorized: a single accept() call per batch, and
+    results stay aligned to input order (no per-row pandas loop)."""
+
+    def test_accept_called_once_per_batch(self, trained):
+        from text_classifier.domain.services import AbstentionPolicy
+
+        artifacts, _, _, items, _ = trained
+        texts = [it.text for it in items[:12]]
+
+        calls = []
+        original = AbstentionPolicy.accept
+
+        def counting_accept(self, confidence, class_index):
+            calls.append(len(confidence))
+            return original(self, confidence, class_index)
+
+        with patch.object(AbstentionPolicy, "accept", counting_accept):
+            preds = InferencePipeline(artifacts).predict(texts)
+
+        assert len(preds) == len(texts)
+        assert len(calls) == 1  # one batched call, not one per item
+
+    def test_results_track_input_order(self, trained):
+        """Each output corresponds to its input position and is independent of
+        batch order — reversing the inputs reverses the outputs."""
+        artifacts, _, _, items, _ = trained
+        texts = [it.text for it in items[:6]]
+        pipeline = InferencePipeline(artifacts)
+
+        forward = pipeline.predict(texts)
+        reversed_ = pipeline.predict(texts[::-1])
+        n = len(texts)
+        for i in range(n):
+            mirror = reversed_[n - 1 - i]
+            assert forward[i].top_key == mirror.top_key
+            assert forward[i].predicted_key == mirror.predicted_key
+            assert forward[i].abstained == mirror.abstained
+            assert abs(forward[i].confidence - mirror.confidence) < 1e-9
