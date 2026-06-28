@@ -46,7 +46,7 @@ or persistence.
 fusion swap. It depends only on T03 (feature assembly). When absent (default), the
 system is byte-for-byte identical to today. T33 does NOT depend on T23.
 
-## Tier 3+ — Stubs (T41 fully specified; rest expand when Tier 2 is green)
+## Tier 3+ — Stubs (T41, T42 fully specified; rest expand when Tier 2 is green)
 
 | ID  | Tier | Title                                                                        | Status |
 |-----|------|------------------------------------------------------------------------------|--------|
