@@ -1,6 +1,6 @@
 # T25 — Expose `--encoder-kind` in the train CLI
 
-status: todo
+status: done
 tier: 2
 depends_on: T23, T24
 

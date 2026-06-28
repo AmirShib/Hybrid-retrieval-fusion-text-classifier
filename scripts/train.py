@@ -6,7 +6,7 @@ Usage:
         --items items.csv \           # columns: text,label
         --classes classes.csv \       # columns: key,description
         --out model_dir/ \
-        [--per-fold-encoder] [--target-precision 0.95] [--folds 5]
+        [--encoder-kind tfidf] [--per-fold-encoder] [--target-precision 0.95] [--folds 5]
 
 `label` in items.csv must match a `key` in classes.csv.
 """
@@ -24,6 +24,7 @@ from text_classifier import (
     PipelineConfig,
     TrainingPipeline,
 )
+from text_classifier.infrastructure.registry import encoder_spec
 
 
 def main() -> None:
@@ -31,7 +32,12 @@ def main() -> None:
     p.add_argument("--items", required=True)
     p.add_argument("--classes", required=True)
     p.add_argument("--out", required=True)
-    p.add_argument("--encoder", default="sentence-transformers/all-MiniLM-L6-v2")
+    p.add_argument("--encoder-kind", default="sentence-transformers",
+                   help="encoder backend (registry key): 'sentence-transformers' "
+                        "(default) or 'tfidf' (torch-free, air-gapped)")
+    p.add_argument("--encoder", default="sentence-transformers/all-MiniLM-L6-v2",
+                   help="model name/path for the sentence-transformers encoder; "
+                        "ignored by corpus-fitted encoders such as tfidf")
     p.add_argument("--folds", type=int, default=5)
     p.add_argument("--target-precision", type=float, default=0.95)
     p.add_argument("--candidate-top-n", type=int, default=10)
@@ -41,6 +47,13 @@ def main() -> None:
     args = p.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
+    # Validate the encoder kind up front: an unknown backend fails fast with a
+    # clear message listing the registered kinds, not a deep traceback.
+    try:
+        enc_spec = encoder_spec(args.encoder_kind)
+    except ValueError as exc:
+        p.error(str(exc))
+
     classes_df = pd.read_csv(args.classes)
     label_space = LabelSpace([ClassDefinition(str(r.key), str(r.description))
                               for r in classes_df.itertuples()])
@@ -49,7 +62,11 @@ def main() -> None:
     items = [LabeledItem(str(r.text), str(r.label)) for r in items_df.itertuples()]
 
     cfg = PipelineConfig(candidate_top_n=args.candidate_top_n)
+    cfg.encoder.kind = args.encoder_kind
     cfg.encoder.model_name_or_path = args.encoder
+    if enc_spec.corpus_dependent:
+        logging.info("encoder kind %r is corpus-fitted; --encoder=%r is ignored",
+                     args.encoder_kind, args.encoder)
     cfg.retrieval.k_neighbors = args.k_neighbors
     cfg.training.n_folds = args.folds
     cfg.training.target_precision = args.target_precision

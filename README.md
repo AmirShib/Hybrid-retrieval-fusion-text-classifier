@@ -89,6 +89,14 @@ python -m scripts.train \
 # add --per-fold-encoder for the rigorous (expensive) encoder path
 ```
 
+For a torch-free, air-gapped run (no torch, no model download) use the TF-IDF
+encoder backend — `--encoder` is ignored for it:
+
+```bash
+python -m scripts.train --items items.csv --classes classes.csv \
+    --out model_dir/ --encoder-kind tfidf
+```
+
 Predict:
 
 ```bash
