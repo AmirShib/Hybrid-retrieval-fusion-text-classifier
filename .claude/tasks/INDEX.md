@@ -11,7 +11,9 @@ When a ticket reaches `done` and the work is merged: move its file from `.claude
 Priority is top-down. **Tiers 1–2 are done** (lone remaining Tier-1 item: T08,
 docs). **Tier 3 (T30–T33) is the active tier — do these next**; all four are now
 fully specified as self-contained tickets. Tier 4–5 remain stubs, except T41,
-T42, and T44 (done).
+T42, and T44 (done); T50 and T51 are now fully specified. **Tier 6 is the
+packaging / production-readiness tier**: T60–T62 are done (the package is now
+`pip install`-able with persisted evaluation); T63–T64 remain.
 
 ## Tier 1 — Tests (detailed, do first)
 
@@ -66,5 +68,19 @@ system is byte-for-byte identical to today. T33 does NOT depend on T23.
 | T42 | 4    | Calibration comparison (isotonic vs Platt vs beta) (needs T23)                 | done |
 | T43 | 4    | Threshold tuner: add target-coverage mode alongside target-precision          | todo |
 | T44 | 4    | Alternative fusion model (XGBRanker) behind `FusionModel` port (needs T23)     | done |
-| T50 | 5    | Pin requirements for air-gapped reproducibility                               | todo |
-| T51 | 5    | ruff + mypy + pre-commit; type-clean the package                              | todo |
+| T50 | 5    | Pin requirements for air-gapped reproducibility (hash-locked) — *specified*    | todo |
+| T51 | 5    | ruff + mypy + pre-commit; type-clean the package — *specified*                 | todo |
+
+## Tier 6 — Packaging & production readiness
+
+What turns a good repo into a package a domain expert can install and trust.
+T60–T62 landed together (installable CLIs, persisted evaluation, version
+provenance). T63–T64 are the remaining essentials.
+
+| ID  | Title                                                                          | Status | Depends on   |
+|-----|--------------------------------------------------------------------------------|--------|--------------|
+| T60 | Installable distribution + CLI ergonomics (console scripts, packaged offline encoder/datasets, friendly IO, py.typed, wheel-smoke CI) | done | T23–T25 |
+| T61 | Evaluation metrics + persisted evaluation.json/model_card + `eval` CLI          | done   | T07          |
+| T62 | Package version provenance (`__version__`, recorded in meta.json)               | done   | T07          |
+| T63 | Torch-optional install via extras (core torch-free)                             | todo   | T24, T60     |
+| T64 | Release process + project hygiene (CHANGELOG/CONTRIBUTING/SECURITY, versioning) | todo   | T60          |
