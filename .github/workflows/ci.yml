@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.10", "3.11"]
+        python-version: ["3.10", "3.11", "3.12"]
 
     steps:
       - uses: actions/checkout@v4
@@ -27,3 +27,46 @@ jobs:
         # hashlib.sha256 (T21), so embeddings are deterministic across processes,
         # Python versions, and platforms.
         run: pytest -q --cov=text_classifier
+
+  package-smoke:
+    # Build the wheel, install it into a clean environment, and drive the
+    # console scripts end-to-end. This is what catches a packaging regression
+    # (a CLI not shipped, an entry point misnamed, a missing data file) that the
+    # source-tree test suite cannot see. Uses the torch-free `hashing` encoder so
+    # the smoke test stays fast and needs no model download.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build wheel
+        run: |
+          pip install build
+          python -m build --wheel
+
+      - name: Install the built wheel (torch-free runtime subset)
+        run: |
+          pip install dist/*.whl --no-deps
+          pip install numpy pandas scipy scikit-learn xgboost
+
+      - name: Train, infer, evaluate via the installed console scripts
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import pandas as pd
+          from text_classifier.datasets import make_synthetic
+          ls, items = make_synthetic(n_classes=5, per_class=12, seed=1)
+          pd.DataFrame({"text": [i.text for i in items], "label": [i.label for i in items]}).to_csv("items.csv", index=False)
+          pd.DataFrame({"key": ls.keys, "description": ls.descriptions}).to_csv("classes.csv", index=False)
+          PY
+          text-classifier-train --items items.csv --classes classes.csv --out model \
+            --encoder-kind hashing --folds 3 --target-precision 0.6 --candidate-top-n 8 --k-neighbors 8
+          text-classifier-infer --model model --input items.csv --output preds.csv
+          text-classifier-eval --model model --input items.csv --output report.json
+          test -f model/evaluation.json
+          test -f model/model_card.md
+          test -f report.json

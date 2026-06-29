@@ -26,6 +26,7 @@ from typing import Callable, Dict, Mapping, Optional, Sequence, TypeVar
 from ..config import CalibrationConfig, EncoderConfig, FusionConfig
 from ..domain import ConfidenceCalibrator, FusionModel, LabeledItem, LabelSpace, TextEncoder
 from .encoder import (
+    HashingEncoder,
     SentenceTransformerEncoder,
     TfidfEncoder,
     fit_tfidf_encoder,
@@ -168,6 +169,19 @@ register_encoder(
         load=lambda path, cfg: TfidfEncoder.load(path),
         corpus_dependent=True,  # vocabulary/IDF depend on the corpus -> fit per fold
         fit=lambda items, ls, cfg: fit_tfidf_encoder(items, ls, cfg),
+    ),
+)
+
+register_encoder(
+    "hashing",
+    EncoderSpec(
+        # Dependency-free, deterministic, stateless: builds without config and
+        # round-trips through the artifact repository like any other encoder. The
+        # offline demo and CI select it via cfg.encoder.kind = "hashing".
+        build=lambda cfg: HashingEncoder(),
+        dirname="encoder",
+        load=lambda path, cfg: HashingEncoder.load(path, cfg.encode_batch_size, cfg.device),
+        corpus_dependent=False,  # no learned/data-dependent state
     ),
 )
 

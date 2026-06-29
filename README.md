@@ -76,12 +76,25 @@ public entry points.
   `Q_binary @ W.T`.
 * kNN and feature assembly are query-chunked to bound peak memory.
 
-## Usage
-
-Train:
+## Install
 
 ```bash
-python -m scripts.train \
+pip install .                 # core (includes sentence-transformers)
+pip install .[lightgbm]       # + optional LightGBM fusion backend
+pip install .[test]           # + pytest for the test suite
+```
+
+Installing exposes three console commands — `text-classifier-train`,
+`text-classifier-infer`, and `text-classifier-eval`. From a source checkout you
+can equivalently run `python -m scripts.train` / `scripts.infer` /
+`text_classifier.cli.evaluate`.
+
+## Usage
+
+Train (writes the model directory plus `evaluation.json` and `model_card.md`):
+
+```bash
+text-classifier-train \
     --items items.csv \        # columns: text,label
     --classes classes.csv \    # columns: key,description
     --out model_dir/ \
@@ -90,18 +103,31 @@ python -m scripts.train \
 ```
 
 For a torch-free, air-gapped run (no torch, no model download) use the TF-IDF
-encoder backend — `--encoder` is ignored for it:
+encoder backend (corpus-fitted, so `--encoder` is ignored). For a
+dependency-free smoke test there is also a non-semantic `hashing` encoder:
 
 ```bash
-python -m scripts.train --items items.csv --classes classes.csv \
+text-classifier-train --items items.csv --classes classes.csv \
     --out model_dir/ --encoder-kind tfidf
 ```
 
 Predict:
 
 ```bash
-python -m scripts.infer --model model_dir/ --input new_items.csv --output preds.csv
+text-classifier-infer --model model_dir/ --input new_items.csv --output preds.csv
 ```
+
+Evaluate a trained model on a labeled set (coverage, accuracy-on-accepted,
+calibration — Brier/ECE — a risk-coverage curve, and a per-class breakdown).
+Use it to validate before deploying, or to watch for drift over time:
+
+```bash
+text-classifier-eval --model model_dir/ --input labeled.csv --output report.json
+```
+
+Each trained model directory carries its own evidence: `evaluation.json` (the
+full held-out report) and `model_card.md` (a human-readable summary with the
+package version, dataset shape, headline metrics, and the abstention thresholds).
 
 Library:
 

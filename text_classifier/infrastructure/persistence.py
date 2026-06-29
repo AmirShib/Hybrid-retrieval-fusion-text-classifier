@@ -13,6 +13,7 @@ Layout:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import pickle
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ from typing import Dict
 
 import numpy as np
 
+from .._version import __version__
 from ..config import PipelineConfig
 from ..domain import (
     AbstentionPolicy,
@@ -32,6 +34,8 @@ from ..domain import (
 )
 from .registry import calibrator_spec, encoder_spec, fusion_spec
 from .retrieval import DenseRetrieverAdapter, DenseState, LexicalRetrieverAdapter
+
+log = logging.getLogger(__name__)
 
 
 # Defaults for model dirs written before component kinds were recorded (T23).
@@ -86,6 +90,7 @@ class ArtifactRepository:
 
         meta = {
             "feature_names": FEATURE_NAMES,
+            "package_version": __version__,
             "config": cfg.to_dict(),
             "components": {
                 "encoder": cfg.encoder.kind,
@@ -117,6 +122,7 @@ class ArtifactRepository:
             meta = json.load(fh)
 
         self._check_feature_schema(meta.get("feature_names"))
+        self._check_package_version(meta.get("package_version"))
 
         config = PipelineConfig.from_dict(meta["config"])
         label_space = LabelSpace([ClassDefinition(c["key"], c["description"]) for c in meta["classes"]])
@@ -169,6 +175,23 @@ class ArtifactRepository:
             or cfg.get("calibration", {}).get("kind")
             or _LEGACY_COMPONENTS["calibrator"],
         }
+
+    @staticmethod
+    def _check_package_version(saved_version) -> None:
+        """Warn (do not fail) when a model was trained on a different version.
+
+        Compatibility of the on-disk format is governed by the feature-schema
+        check, which raises on a real mismatch. The package version is recorded
+        for provenance and surfaced as a soft warning so an operator can notice a
+        version skew without it blocking a load that is otherwise valid.
+        """
+        if saved_version and saved_version != __version__:
+            log.warning(
+                "model was trained with text-classifier %s but the current "
+                "version is %s; behavior should be unchanged (the feature schema "
+                "is checked separately), but verify if results look off.",
+                saved_version, __version__,
+            )
 
     @staticmethod
     def _check_feature_schema(saved_names) -> None:

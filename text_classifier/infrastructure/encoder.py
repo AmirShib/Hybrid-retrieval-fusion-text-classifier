@@ -6,12 +6,19 @@
 - ``TfidfEncoder``: a torch-free, air-gap-friendly alternative built on sklearn's
   TfidfVectorizer. Its vocabulary/IDF are corpus-dependent, so it is *fit* on a
   training corpus rather than loaded pretrained.
+- ``HashingEncoder``: a dependency-free, deterministic bag-of-hashed-tokens
+  encoder. It carries no learned weights, needs no network, and is reproducible
+  across processes/platforms — useful for offline smoke tests, CI, and as a
+  trivial baseline. It is *not* a semantic model and should not be used where
+  embedding quality matters.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import pickle
-from typing import List, Sequence
+from typing import List, Sequence, Tuple
 
 import numpy as np
 
@@ -100,6 +107,59 @@ class TfidfEncoder(TextEncoder):
         """Signature mirrors SentenceTransformerEncoder.load for registry parity."""
         with open(os.path.join(directory, cls._PICKLE_NAME), "rb") as fh:
             return cls(vectorizer=pickle.load(fh))
+
+
+class HashingEncoder(TextEncoder):
+    """Deterministic bag-of-hashed-tokens embeddings, L2-normalized.
+
+    Shared tokens produce higher cosine similarity, making retrieval meaningful
+    enough to exercise the pipeline offline without a real bi-encoder or network
+    access. It learns nothing and depends only on numpy + the standard library,
+    so it is the right encoder for the offline demo, CI, and air-gapped smoke
+    tests; it is deliberately *not* a substitute for a semantic encoder.
+
+    Token hashing uses ``hashlib.sha256`` rather than the builtin ``hash()`` so
+    embeddings are byte-for-byte identical across Python processes, versions, and
+    platforms — no ``PYTHONHASHSEED`` pinning required.
+    """
+
+    def __init__(self, dim: int = 128) -> None:
+        self.dim = dim
+
+    @staticmethod
+    def _bucket_and_sign(token: str) -> Tuple[int, float]:
+        """Map a token to a (bucket_index_seed, signed_weight) pair via SHA-256.
+
+        First 4 bytes (little-endian) seed the bucket; bit 0 of byte 4 picks the
+        sign. SHA-256 is stable everywhere, so this is fully reproducible.
+        """
+        digest = hashlib.sha256(token.encode("utf-8")).digest()
+        h = int.from_bytes(digest[:4], "little")
+        sign = 1.0 if digest[4] & 1 else -1.0
+        return h, sign
+
+    def encode(self, texts: Sequence[str]) -> np.ndarray:
+        out = np.zeros((len(texts), self.dim), dtype=np.float32)
+        for i, t in enumerate(texts):
+            for tok in str(t).lower().split():
+                h, sign = self._bucket_and_sign(tok)
+                out[i, h % self.dim] += sign
+        norms = np.linalg.norm(out, axis=1, keepdims=True)
+        return out / np.clip(norms, 1e-8, None)
+
+    def save(self, directory: str) -> None:
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, "hashing_encoder.json"), "w") as fh:
+            json.dump({"dim": self.dim}, fh)
+
+    @classmethod
+    def load(cls, path: str, batch_size: int = 64, device=None) -> "HashingEncoder":
+        """Signature mirrors SentenceTransformerEncoder.load for registry parity."""
+        try:
+            with open(os.path.join(path, "hashing_encoder.json")) as fh:
+                return cls(dim=json.load(fh)["dim"])
+        except FileNotFoundError:
+            return cls()
 
 
 def fit_tfidf_encoder(

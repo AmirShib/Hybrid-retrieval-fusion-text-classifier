@@ -40,6 +40,7 @@ from ..infrastructure import (
     encoder_is_corpus_dependent,
     fit_encoder,
 )
+from .evaluation import build_manifest, evaluate_decisions, write_evaluation_artifacts
 from .features import FeatureAssembler
 from .scoring import add_confidence, top_per_item
 
@@ -78,12 +79,21 @@ class TrainingPipeline:
 
         oof = self._build_oof(texts, y, label_space)
         fusion, calibrator, abstention = self._fit_fusion(oof)
-        report = self._evaluate(oof, fusion, calibrator, abstention)
+        report, evaluation = self._evaluate(oof, y, label_space, fusion, calibrator, abstention)
 
         artifacts = self._build_deployment(texts, y, label_space, fusion, calibrator, abstention)
         if output_dir:
             ArtifactRepository().save(artifacts, output_dir)
-            log.info("saved trained pipeline to %s", output_dir)
+            # Persist the held-out evaluation + a provenance manifest next to the
+            # model so a trained directory carries its own evidence: how it scored,
+            # on what, and with which version/config. This is what makes a deployed
+            # model auditable after the fact, not just at training time.
+            manifest = build_manifest(
+                n_training_items=len(items), n_classes=label_space.size,
+                config=self.cfg, n_evaluated=report.n_items,
+            )
+            write_evaluation_artifacts(output_dir, evaluation, manifest)
+            log.info("saved trained pipeline + evaluation to %s", output_dir)
         return artifacts, report
 
     # ---------------------------------------------------------------- validation
@@ -219,21 +229,49 @@ class TrainingPipeline:
         return fusion, calibrator, AbstentionPolicy(global_thr, per_class)
 
     # ---------------------------------------------------------------- (4) evaluate
-    def _evaluate(self, oof, fusion, calibrator, abstention) -> CoverageReport:
+    def _evaluate(self, oof, y, label_space, fusion, calibrator, abstention):
+        """Score the untouched test fold and assemble the full evaluation.
+
+        Returns ``(CoverageReport, evaluation_dict)``: the report is the compact
+        headline (kept for the public API), and the dict is the rich, persistable
+        report (per-class breakdown, calibration, risk-coverage) built from the
+        same per-item decisions.
+        """
         roles = self.cfg.training.fold_roles()
         te = oof[oof["fold"].isin(roles["test"])]
         decided = top_per_item(add_confidence(te, fusion, calibrator))
-        accept = abstention.accept(decided["conf"].to_numpy(), decided["candidate"].to_numpy())
+
+        item_ids = decided["item_id"].to_numpy(dtype=np.intp)
+        pred_idx = decided["candidate"].to_numpy(dtype=np.intp)
+        conf = decided["conf"].to_numpy(dtype=np.float64)
+        correct = decided["is_true"].to_numpy().astype(bool)
+        accept = abstention.accept(conf, pred_idx)
+        # item_id is the original item index (query_ids=va), so y[item_id] is the
+        # true class even for items whose true class missed the candidate set.
+        true_idx = y[item_ids]
 
         n = len(decided)
         coverage = float(accept.mean()) if n else 0.0
-        acc_acc = float(decided.loc[accept, "is_true"].mean()) if accept.any() else float("nan")
-        acc_all = float(decided["is_true"].mean()) if n else float("nan")
+        acc_acc = float(correct[accept].mean()) if accept.any() else float("nan")
+        acc_all = float(correct.mean()) if n else float("nan")
         recall = float(te.groupby("item_id")["is_true"].max().mean()) if n else 0.0
         report = CoverageReport(coverage, acc_acc, acc_all, recall, n)
         log.info("eval: coverage=%.3f acc_on_accepted=%.3f acc_no_abstain=%.3f",
                  coverage, acc_acc, acc_all)
-        return report
+
+        evaluation = evaluate_decisions(
+            confidence=conf, correct=correct, accepted=accept,
+            pred_idx=pred_idx, true_idx=true_idx, keys=label_space.keys,
+            candidate_recall=recall,
+        )
+        evaluation["abstention"] = {
+            "global_threshold": abstention.global_threshold,
+            "n_per_class_thresholds": len(abstention.per_class),
+            "per_class": {
+                label_space.key_at(c): thr for c, thr in abstention.per_class.items()
+            },
+        }
+        return report, evaluation
 
     # ---------------------------------------------------------------- (5) deploy
     def _build_deployment(self, texts, y, label_space, fusion, calibrator, abstention) -> DeployedArtifacts:

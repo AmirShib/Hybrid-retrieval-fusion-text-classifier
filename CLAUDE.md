@@ -37,7 +37,11 @@ Dependency rule: `domain` imports no ML framework. `infrastructure` depends on `
 - Offline smoke test (no network, no torch): `python -m scripts.demo`
 - Train: `python -m scripts.train --items items.csv --classes classes.csv --out model_dir/`
 - Infer: `python -m scripts.infer --model model_dir/ --input new.csv --output preds.csv`
-- Tests (once T01 lands): `pytest -q`
+- Evaluate on a labeled set: `python -m text_classifier.cli.evaluate --model model_dir/ --input labeled.csv`
+- Tests: `pytest -q`
+- After `pip install .`: console scripts `text-classifier-train` / `-infer` / `-eval`. CLI logic lives in
+  `text_classifier/cli/`; `scripts/*.py` are thin dev wrappers. Training writes `evaluation.json` +
+  `model_card.md` into the model dir.
 
 ## Conventions
 - Keep numerics vectorized: signals are `(batch, n_classes)` matrices; gather candidate rows

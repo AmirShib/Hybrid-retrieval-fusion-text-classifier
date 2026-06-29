@@ -1,5 +1,6 @@
 """Infrastructure layer: concrete adapters implementing the domain ports."""
 from .encoder import (
+    HashingEncoder,
     SentenceTransformerEncoder,
     TfidfEncoder,
     fit_tfidf_encoder,
@@ -35,7 +36,8 @@ from .retrieval import (
 )
 
 __all__ = [
-    "SentenceTransformerEncoder", "TfidfEncoder", "train_encoder", "fit_tfidf_encoder",
+    "SentenceTransformerEncoder", "TfidfEncoder", "HashingEncoder",
+    "train_encoder", "fit_tfidf_encoder",
     "BM25Index", "DenseRetrieverAdapter", "DenseState", "LexicalRetrieverAdapter",
     "XGBoostFusionModel", "LightGBMFusionModel", "XGBRankerFusionModel",
     "IsotonicCalibrator", "PlattCalibrator", "BetaCalibrator",

@@ -8,13 +8,17 @@ version = "0.1.0"
 description = "Hybrid retrieval-fusion text classifier with calibrated abstention"
 readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "MIT" }
 dependencies = [
-    "numpy",
-    "pandas",
-    "scipy",
-    "scikit-learn",
-    "xgboost",
-    "sentence-transformers",
+    # Lower bounds only: these are conservative floors for the APIs the package
+    # uses. For air-gapped reproducibility, pin exact versions in a lockfile /
+    # constraints file (see requirements.txt) for your deployment.
+    "numpy>=1.23",
+    "pandas>=1.5",
+    "scipy>=1.9",
+    "scikit-learn>=1.1",
+    "xgboost>=1.7",
+    "sentence-transformers>=2.2",
 ]
 
 [project.optional-dependencies]
@@ -24,6 +28,15 @@ test = ["pytest", "pytest-cov"]
 # it is absent.
 lightgbm = ["lightgbm"]
 
-# Flat layout: pick up the package, leave scripts/ as runnable entry points.
+[project.scripts]
+text-classifier-train = "text_classifier.cli.train:main"
+text-classifier-infer = "text_classifier.cli.infer:main"
+text-classifier-eval = "text_classifier.cli.evaluate:main"
+
+# Flat layout: pick up the package, leave scripts/ as runnable dev wrappers.
 [tool.setuptools.packages.find]
 include = ["text_classifier*"]
+
+[tool.setuptools.package-data]
+# Ship the PEP 561 marker so downstream consumers get the package's type hints.
+text_classifier = ["py.typed"]

@@ -19,8 +19,8 @@ import logging
 
 from text_classifier import PipelineConfig, TrainingPipeline
 from text_classifier.application import InferencePipeline
-
-from tests._doubles import HashingEncoder, make_synthetic
+from text_classifier.datasets import make_synthetic
+from text_classifier.infrastructure import HashingEncoder
 
 
 def main() -> None:
