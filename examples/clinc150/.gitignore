@@ -1,0 +1,3 @@
+# Downloaded data and generated artifacts — never commit these.
+data_full.json
+build/
