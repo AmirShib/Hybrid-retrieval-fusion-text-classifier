@@ -97,3 +97,4 @@ existing one. T70 is the high-value capability; T71 is a design spike gated on i
 | T70 | Pluggable custom features into the fusion layer (train + inference parity)     | todo   | T23, T03     |
 | T71 | Design spike: DAG-based pipeline orchestration with declared dependencies       | todo   | T70          |
 | T72 | Pluggable input/output formats (Parquet/JSONL/SQL/cloud) behind a `RecordSource`/`RecordSink` port | todo | T23 |
+| T73 | Richer labeled-evaluation analytics (confusion, aggregate scores, abstention quality, bootstrap CIs) | todo | T61 |
