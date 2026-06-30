@@ -134,7 +134,9 @@ package version, dataset shape, headline metrics, and the abstention thresholds)
 `examples/clinc150/` is a runnable, fully offline demo on CLINC150 (150 intents +
 an out-of-scope set). It shows the abstention knob in action — raising the
 confidence bar routes more out-of-scope queries to a human while keeping in-scope
-accuracy high. See `examples/clinc150/README.md`.
+accuracy high. Start with the notebook walkthrough,
+`examples/clinc150/clinc150_abstention_demo.ipynb` (cell-by-cell, with charts);
+`examples/clinc150/README.md` has the command-line equivalent.
 
 Library:
 

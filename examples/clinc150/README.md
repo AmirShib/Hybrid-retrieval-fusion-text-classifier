@@ -1,4 +1,4 @@
-# CLINC150 demo — abstention / route-to-human
+# CLINC150 demo — calibrated abstention / route-to-human
 
 [CLINC150](https://github.com/clinc/oos-eval) is 150 fine-grained user intents
 across 10 domains, plus an explicit **out-of-scope (OOS)** set of queries that
@@ -6,11 +6,27 @@ belong to none of them. That makes it an ideal showcase for this package: the
 model learns the 150 in-scope intents, and the OOS queries are exactly what a
 calibrated, abstaining classifier should decline and route to a human.
 
-This demo runs **fully offline** with the torch-free TF-IDF encoder (no model
-download). Swap `--encoder-kind tfidf` for the default sentence-transformers
-encoder for higher quality if you have network access.
+The whole demo runs **fully offline** with the torch-free TF-IDF encoder (no
+model download). The only network access is a one-time dataset download (~2.5 MB).
 
-## Run it
+## ▶ Start here: the notebook
+
+**[`clinc150_abstention_demo.ipynb`](clinc150_abstention_demo.ipynb)** is the
+walkthrough — a clean, end-to-end tour you can run cell by cell and adapt to
+your own data. It covers data prep, offline training, evaluation (coverage,
+accuracy, calibration), the abstention behavior on out-of-scope queries, and the
+risk–coverage trade-off, with charts at each step.
+
+```bash
+pip install .          # from the repo root
+pip install matplotlib jupyter
+jupyter notebook examples/clinc150/clinc150_abstention_demo.ipynb
+```
+
+## Or run it from the command line
+
+The notebook drives the library directly; the same workflow is available as
+console scripts.
 
 ```bash
 # 1. Build the CSVs (downloads CLINC150 once, ~2.5 MB).
