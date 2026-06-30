@@ -68,6 +68,7 @@ system is byte-for-byte identical to today. T33 does NOT depend on T23.
 | T42 | 4    | Calibration comparison (isotonic vs Platt vs beta) (needs T23)                 | done |
 | T43 | 4    | Threshold tuner: add target-coverage mode alongside target-precision          | todo |
 | T44 | 4    | Alternative fusion model (XGBRanker) behind `FusionModel` port (needs T23)     | done |
+| T45 | 4    | Per-class calibration behind `ConfidenceCalibrator` port (needs T42)           | todo |
 | T50 | 5    | Pin requirements for air-gapped reproducibility (hash-locked) — *specified*    | todo |
 | T51 | 5    | ruff + mypy + pre-commit; type-clean the package — *specified*                 | todo |
 
@@ -84,3 +85,14 @@ provenance). T63–T64 are the remaining essentials.
 | T62 | Package version provenance (`__version__`, recorded in meta.json)               | done   | T07          |
 | T63 | Torch-optional install via extras (core torch-free)                             | todo   | T24, T60     |
 | T64 | Release process + project hygiene (CHANGELOG/CONTRIBUTING/SECURITY, versioning) | todo   | T60          |
+
+## Tier 7 — Extensibility & architecture (forward-looking)
+
+Cross-cutting extensions that grow the system's surface rather than harden the
+existing one. T70 is the high-value capability; T71 is a design spike gated on it
+(land T70 first so the feature-provider dependency graph informs the DAG decision).
+
+| ID  | Title                                                                          | Status | Depends on   |
+|-----|--------------------------------------------------------------------------------|--------|--------------|
+| T70 | Pluggable custom features into the fusion layer (train + inference parity)     | todo   | T23, T03     |
+| T71 | Design spike: DAG-based pipeline orchestration with declared dependencies       | todo   | T70          |
