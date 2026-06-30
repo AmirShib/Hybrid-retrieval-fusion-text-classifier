@@ -1,0 +1,3 @@
+# Downloaded workbook and generated artifacts — never commit these.
+build/
+*.xlsx

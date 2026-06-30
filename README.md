@@ -129,7 +129,7 @@ Each trained model directory carries its own evidence: `evaluation.json` (the
 full held-out report) and `model_card.md` (a human-readable summary with the
 package version, dataset shape, headline metrics, and the abstention thresholds).
 
-### Worked example
+### Worked examples
 
 `examples/clinc150/` is a runnable, fully offline demo on CLINC150 (150 intents +
 an out-of-scope set). It shows the abstention knob in action — raising the
@@ -137,6 +137,13 @@ confidence bar routes more out-of-scope queries to a human while keeping in-scop
 accuracy high. Start with the notebook walkthrough,
 `examples/clinc150/clinc150_abstention_demo.ipynb` (cell-by-cell, with charts);
 `examples/clinc150/README.md` has the command-line equivalent.
+
+`examples/coicop_hebrew/` is a cross-lingual, **zero-shot** demo: short Hebrew
+grocery names classified into the international COICOP 2018 taxonomy (English
+labels) with a multilingual encoder and no labeled training data. It shows the
+encoder + description-similarity signal carrying the easy cases and abstaining on
+the noisy ones, and how the full pipeline takes over once labels exist. See
+`examples/coicop_hebrew/coicop_hebrew_classification.ipynb`.
 
 Library:
 
