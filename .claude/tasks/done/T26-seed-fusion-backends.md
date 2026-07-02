@@ -1,6 +1,6 @@
 # T26 — Seed the fusion backends: two identical runs must produce identical models
 
-status: todo
+status: done
 tier: 2
 depends_on: T01
 

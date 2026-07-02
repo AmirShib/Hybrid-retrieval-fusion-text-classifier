@@ -1,6 +1,6 @@
 # T52 — Offline quality-regression benchmark in CI (metric floors)
 
-status: todo
+status: done
 tier: 5
 depends_on: T01, T61
 

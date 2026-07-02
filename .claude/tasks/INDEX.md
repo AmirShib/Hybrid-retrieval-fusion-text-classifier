@@ -8,20 +8,19 @@ When you start a ticket, set its `status:` field (top of the file) and update th
 When a ticket reaches `done` and the work is merged: move its file from `.claude/tasks/` into
 `.claude/tasks/done/` — the row stays in this table for history.
 
-Priority is top-down. **Tier 1 has one open item (T08, docs). Tier 2 gained four
-tickets from the 2026-07 roadmap reviews: T26 (seed the fusion backends) and T27
-(config validation) — both small, both prerequisites for trusting any A/B
-numbers, do them first — plus T28 (encode-time kwargs / asymmetric prompts) and
-T29 (plugin discovery), which unblock modern encoders and cross-host custom
-backends.** Tier 3 (T30–T35) is the active feature tier. Tier 4–5 remain stubs,
-except T41, T42, and T44 (done); T50, T51, and T52 are fully specified. **Tier 6
-is the packaging / production-readiness tier**: T60–T62 are done (the package is
-now `pip install`-able with persisted evaluation); T63–T69 remain — T63 (torch-
-optional install) is the priority item, it closes the gap between the README's
-air-gapped/torch-free claim and what `pip install .` actually delivers, and T68
-(taxonomy update without retrain) is the highest-value operational capability
-for adopters. Tier 7 added T74 (`--config`) — the cheapest unlock in the
-backlog — and T75 (DataFrame API + streaming).
+Priority is top-down. **Phase 0 of the execution order is complete** (T26, T27,
+T52, T51, T50 — determinism, config validation, the quality-benchmark net, lint/
+type gates, hash-locked pins). **Tier 1 has one open item (T08, docs). Tier 2's
+remaining items are T28 (encode-time kwargs / asymmetric prompts) and T29
+(plugin discovery), which unblock modern encoders and cross-host custom
+backends.** Tier 3 (T30–T35) is the active feature tier. Tier 4 remains stubs
+except T41/T42/T44 (done). **Tier 6 is the packaging / production-readiness
+tier**: T60–T62 are done; T63–T69 remain — T63 (torch-optional install) is the
+priority item, it closes the gap between the README's air-gapped/torch-free
+claim and what `pip install .` actually delivers, and T68 (taxonomy update
+without retrain) is the highest-value operational capability for adopters.
+Tier 7 added T74 (`--config`) — the cheapest unlock in the backlog — and T75
+(DataFrame API + streaming).
 
 ## Suggested execution order (2026-07 roadmap review)
 
@@ -34,7 +33,7 @@ make the signal-provider refactor a safe refactor instead of a rewrite-and-pray.
 
 | Phase | Theme | Order |
 |-------|-------|-------|
-| 0 | Foundations (strictly ordered) | T26 → T27 → T52 → T51 → T50 |
+| 0 | Foundations (strictly ordered) — **done 2026-07-02** | T26 → T27 → T52 → T51 → T50 |
 | 1 | Cheap unlocks | T74, T65, T64 → T35 (changelog before the behavior change), T28 |
 | 2 | Trust & packaging | T63, T67, T08 (docs after the Phase-1 surface settles) |
 | 3 | Operational capabilities (strictly ordered) | T66 → T43 → T68 → T69, then T29 |
@@ -55,7 +54,7 @@ make the signal-provider refactor a safe refactor instead of a rewrite-and-pray.
 
 | T08 | Code comments and professional documentation       | todo   | T01        |
 
-## Tier 2 — Hardening + pluggability (T20–T25 complete; T26–T27 open)
+## Tier 2 — Hardening + pluggability (T20–T27 complete; T28–T29 open)
 
 | ID  | Title                                                                    | Status | Depends on       |
 |-----|--------------------------------------------------------------------------|--------|------------------|
@@ -65,8 +64,8 @@ make the signal-provider refactor a safe refactor instead of a rewrite-and-pray.
 | T23 | Pluggable component registry + factory DI (encoder/fusion/calibrator)      | done | T01, T07        |
 | T24 | Pluggable encoder backends behind `TextEncoder` (e.g. TF-IDF, torch-free)  | done | T23             |
 | T25 | Expose `--encoder-kind` in the train CLI (reach the torch-free backend)    | done | T23, T24        |
-| T26 | Seed the fusion backends: identical runs → identical models               | todo | T01             |
-| T27 | Validate the config at pipeline entry (n_folds ≥ 3 and friends)            | todo | T01             |
+| T26 | Seed the fusion backends: identical runs → identical models               | done | T01             |
+| T27 | Validate the config at pipeline entry (n_folds ≥ 3 and friends)            | done | T01             |
 | T28 | Encode-time kwargs + asymmetric query/document encoding (E5/BGE prompts)   | todo | T24             |
 | T29 | Plugin discovery via entry points (custom kinds load on any host)          | todo | T23             |
 
@@ -105,9 +104,9 @@ signal once T34 phase 2 lands.
 | T43 | 4    | Threshold tuner: add target-coverage mode alongside target-precision          | todo |
 | T44 | 4    | Alternative fusion model (XGBRanker) behind `FusionModel` port (needs T23)     | done |
 | T45 | 4    | Per-class calibration behind `ConfidenceCalibrator` port (needs T42)           | todo |
-| T50 | 5    | Pin requirements for air-gapped reproducibility (hash-locked) — *specified*    | todo |
-| T51 | 5    | ruff + mypy + pre-commit; type-clean the package — *specified*                 | todo |
-| T52 | 5    | Offline quality-regression benchmark in CI (metric floors) — *specified*       | todo |
+| T50 | 5    | Pin requirements for air-gapped reproducibility (hash-locked)                  | done |
+| T51 | 5    | ruff + mypy + pre-commit; type-clean the package                               | done |
+| T52 | 5    | Offline quality-regression benchmark in CI (metric floors)                     | done |
 
 ## Tier 6 — Packaging & production readiness
 

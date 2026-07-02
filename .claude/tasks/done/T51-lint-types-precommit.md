@@ -1,6 +1,6 @@
 # T51 — ruff + mypy + pre-commit; type-clean the package
 
-status: todo
+status: done
 tier: 5
 depends_on: —
 

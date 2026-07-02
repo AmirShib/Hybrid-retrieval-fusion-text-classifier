@@ -1,6 +1,6 @@
 # T27 — Validate the config at pipeline entry (n_folds ≥ 3 and friends)
 
-status: todo
+status: done
 tier: 2
 depends_on: T01
 
