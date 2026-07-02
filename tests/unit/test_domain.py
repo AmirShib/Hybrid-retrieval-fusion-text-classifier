@@ -9,6 +9,7 @@ Covers:
   - text_classifier/domain/services.py (CandidatePolicy, AbstentionPolicy,
     ThresholdTuner, FEATURE_NAMES)
 """
+
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
@@ -151,8 +152,8 @@ def test_candidate_policy_is_frozen():
 # --------------------------------------------------------------------------- #
 def test_threshold_for_global_and_override():
     policy = AbstentionPolicy(global_threshold=0.5, per_class={1: 0.8})
-    assert policy.threshold_for(0) == 0.5      # falls back to global
-    assert policy.threshold_for(1) == 0.8      # per-class override
+    assert policy.threshold_for(0) == 0.5  # falls back to global
+    assert policy.threshold_for(1) == 0.8  # per-class override
 
 
 def test_threshold_for_coerces_numpy_int():
@@ -180,9 +181,7 @@ def test_accept_boundary_is_inclusive():
 # ThresholdTuner.threshold_for_precision
 # --------------------------------------------------------------------------- #
 def test_empty_input_returns_one():
-    assert ThresholdTuner.threshold_for_precision(
-        np.array([]), np.array([]), target=0.9
-    ) == 1.0
+    assert ThresholdTuner.threshold_for_precision(np.array([]), np.array([]), target=0.9) == 1.0
 
 
 def test_all_correct_returns_lowest_confidence():

@@ -3,6 +3,7 @@
 Covers PlattCalibrator and BetaCalibrator in infrastructure/fusion.py, alongside
 the existing IsotonicCalibrator (tested in test_fusion.py). Fully offline.
 """
+
 import numpy as np
 import pytest
 
@@ -24,7 +25,7 @@ def _miscalibrated(n: int = 4000, seed: int = 0):
     back toward ``s`` and lower the Brier score."""
     rng = np.random.default_rng(seed)
     s = rng.uniform(0.0, 1.0, n)
-    raw = s ** 2
+    raw = s**2
     correct = rng.binomial(1, s).astype(np.float64)
     return raw, correct
 

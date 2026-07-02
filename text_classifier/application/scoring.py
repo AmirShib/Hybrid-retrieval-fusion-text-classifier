@@ -2,6 +2,7 @@
 turn a feature table into calibrated confidences and collapse to one decision
 per item.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -10,8 +11,9 @@ import pandas as pd
 from ..domain import FEATURE_NAMES, ConfidenceCalibrator, FusionModel
 
 
-def add_confidence(features: pd.DataFrame, fusion: FusionModel,
-                   calibrator: ConfidenceCalibrator) -> pd.DataFrame:
+def add_confidence(
+    features: pd.DataFrame, fusion: FusionModel, calibrator: ConfidenceCalibrator
+) -> pd.DataFrame:
     """Append a calibrated `conf` column = P(candidate is correct)."""
     X = features[FEATURE_NAMES].to_numpy(dtype=np.float32)
     raw = fusion.predict_proba(X)

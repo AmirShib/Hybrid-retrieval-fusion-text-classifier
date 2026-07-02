@@ -4,6 +4,7 @@ Proves the seam works without touching TrainingPipeline or ArtifactRepository:
 a backend is wired in purely by registering a spec and selecting its kind in
 config. Also pins the error contract and the persistence back-compat path.
 """
+
 from __future__ import annotations
 
 import json
@@ -14,12 +15,10 @@ import pytest
 from text_classifier.config import CalibrationConfig, EncoderConfig, FusionConfig
 from text_classifier.domain import ConfidenceCalibrator, FusionModel
 from text_classifier.infrastructure import (
-    CalibratorSpec,
     FusionSpec,
     build_calibrator,
     build_encoder,
     build_fusion,
-    register_calibrator,
     register_fusion,
 )
 from text_classifier.infrastructure.persistence import ArtifactRepository
@@ -125,8 +124,13 @@ def test_components_from_meta_reads_explicit_block():
 
 
 def test_components_from_meta_falls_back_to_config_kinds():
-    meta = {"config": {"encoder": {"kind": "hashing"}, "fusion": {"kind": "xgboost"},
-                       "calibration": {"kind": "isotonic"}}}
+    meta = {
+        "config": {
+            "encoder": {"kind": "hashing"},
+            "fusion": {"kind": "xgboost"},
+            "calibration": {"kind": "isotonic"},
+        }
+    }
     got = ArtifactRepository._components_from_meta(meta)
     assert got == {"encoder": "hashing", "fusion": "xgboost", "calibrator": "isotonic"}
 
@@ -162,10 +166,13 @@ def test_end_to_end_with_custom_fusion(tmp_path):
 
     label_space, items = make_synthetic(n_classes=6, per_class=15, seed=5)
     cfg = PipelineConfig()
-    cfg.encoder.kind = "hashing"                                   # encoder seam
+    cfg.encoder.kind = "hashing"  # encoder seam
     cfg.fusion = FusionConfig(kind="constant-e2e", params={"value": 0.6})  # fusion seam
     cfg.training = TrainingConfig(
-        n_folds=3, random_state=0, target_precision=0.5, per_class_min_support=1,
+        n_folds=3,
+        random_state=0,
+        target_precision=0.5,
+        per_class_min_support=1,
     )
     cfg.retrieval = RetrievalConfig(k_neighbors=10)
 
@@ -180,7 +187,9 @@ def test_end_to_end_with_custom_fusion(tmp_path):
     with open(f"{model_dir}/meta.json") as fh:
         meta = json.load(fh)
     assert meta["components"] == {
-        "encoder": "hashing", "fusion": "constant-e2e", "calibrator": "isotonic",
+        "encoder": "hashing",
+        "fusion": "constant-e2e",
+        "calibrator": "isotonic",
     }
 
     loaded = ArtifactRepository().load(model_dir)

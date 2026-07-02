@@ -11,6 +11,7 @@ IsotonicCalibrator (non-parametric, default), PlattCalibrator (sigmoid), and
 BetaCalibrator (three-parameter beta calibration). The parametric pair share a
 base class and tend to be more robust than isotonic on a small calibration fold.
 """
+
 from __future__ import annotations
 
 import os
@@ -28,7 +29,7 @@ class XGBoostFusionModel(FusionModel):
     def __init__(self, params: Dict[str, Any], auto_scale_pos_weight: bool = True):
         self._params = dict(params)
         self._auto_spw = auto_scale_pos_weight
-        self._model = None  # lazily created in fit/load
+        self._model: Any = None  # lazily created in fit/load (xgboost.XGBClassifier)
 
     def fit(self, X: np.ndarray, y: np.ndarray, *, groups: Optional[np.ndarray] = None) -> None:
         from xgboost import XGBClassifier
@@ -75,7 +76,7 @@ class LightGBMFusionModel(FusionModel):
     def __init__(self, params: Dict[str, Any], auto_scale_pos_weight: bool = True):
         self._params = dict(params)
         self._auto_spw = auto_scale_pos_weight
-        self._booster = None  # lightgbm.Booster, set in fit/load
+        self._booster: Any = None  # lightgbm.Booster, set in fit/load
         self._scale_pos_weight: Optional[float] = None
 
     def fit(self, X: np.ndarray, y: np.ndarray, *, groups: Optional[np.ndarray] = None) -> None:
@@ -132,7 +133,7 @@ class XGBRankerFusionModel(FusionModel):
         # auto_scale_pos_weight is accepted for signature parity but unused: a
         # ranking loss handles within-group imbalance directly.
         self._params = dict(params)
-        self._model = None       # xgboost.XGBRanker
+        self._model: Any = None  # xgboost.XGBRanker
         self._iso: Optional[IsotonicRegression] = None
 
     def fit(self, X: np.ndarray, y: np.ndarray, *, groups: Optional[np.ndarray] = None) -> None:
@@ -145,9 +146,7 @@ class XGBRankerFusionModel(FusionModel):
 
         groups = np.asarray(groups)
         if int(groups.sum()) != len(X):
-            raise ValueError(
-                f"`groups` must sum to len(X)={len(X)}, got {int(groups.sum())}"
-            )
+            raise ValueError(f"`groups` must sum to len(X)={len(X)}, got {int(groups.sum())}")
         X = np.asarray(X, dtype=np.float32)
         params = dict(self._params)
         params.setdefault("objective", "rank:pairwise")

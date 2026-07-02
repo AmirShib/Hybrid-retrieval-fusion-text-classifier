@@ -7,6 +7,7 @@ Part B: LexicalRetrieverAdapter — build, label mapping, -1 padding guard.
 Part C: DenseRetrieverAdapter — prototypes, empty-class NaN, class_freq,
         kNN ordering, similarity ranges, chunking equivalence.
 """
+
 from __future__ import annotations
 
 import math
@@ -30,13 +31,14 @@ from tests._doubles import HashingEncoder
 #  Part A — BM25Index
 # =========================================================================== #
 
+
 class TestBM25MathCorrectness:
     def test_single_doc_single_term_exact_value(self):
         """Simplest possible case: N=1, df=1, avgdl=dl → len_norm=1.
         Formula collapses to: idf * tf*(k1+1)/(tf+k1) = log(4/3) * 2.5/2.5 = log(4/3).
         """
         idx = BM25Index(k1=1.5, b=0.75)
-        idx.fit(["apple"])                    # 1 doc, 1 term, tf=1, dl=1
+        idx.fit(["apple"])  # 1 doc, 1 term, tf=1, dl=1
         # idf = log(1 + (1−1+0.5)/(1+0.5)) = log(1+1/3) = log(4/3)
         # len_norm = 1 (dl == avgdl, b cancels)
         # W = log(4/3) * 1 * 2.5 / (1 + 1.5) = log(4/3)
@@ -63,21 +65,25 @@ class TestBM25MathCorrectness:
         query "apple cherry" → binary terms {apple, cherry}
         """
         k1, b = 1.5, 0.75
-        N, avgdl = 4, 1.5
+        # N=4 docs, avgdl=1.5 (baked into idf/len_norm below)
         log2 = math.log(2)
         log10_3 = math.log(10 / 3)
 
-        len_norm = [0.75, 1.25, 1.25, 0.75]   # 1 - b + b*(dl/avgdl)
+        len_norm = [0.75, 1.25, 1.25, 0.75]  # 1 - b + b*(dl/avgdl)
 
         # BM25 weight for (doc, term):
-        def w(idf, tf, ln): return idf * tf * (k1 + 1) / (tf + k1 * ln)
+        def w(idf, tf, ln):
+            return idf * tf * (k1 + 1) / (tf + k1 * ln)
 
-        expected = np.array([
-            w(log2, 1, len_norm[0]),   # doc0: apple tf=1
-            w(log2, 1, len_norm[1]),   # doc1: apple tf=1
-            0.0,                       # doc2: neither apple nor cherry
-            w(log10_3, 1, len_norm[3]),# doc3: cherry tf=1
-        ], dtype=np.float32)
+        expected = np.array(
+            [
+                w(log2, 1, len_norm[0]),  # doc0: apple tf=1
+                w(log2, 1, len_norm[1]),  # doc1: apple tf=1
+                0.0,  # doc2: neither apple nor cherry
+                w(log10_3, 1, len_norm[3]),  # doc3: cherry tf=1
+            ],
+            dtype=np.float32,
+        )
 
         idx = BM25Index(k1=k1, b=b)
         idx.fit(["apple", "apple banana", "banana banana", "cherry"])
@@ -95,7 +101,7 @@ class TestBM25MathCorrectness:
     def test_rare_term_has_higher_idf_than_common_term(self):
         """A term in every doc should contribute less per unit tf than a rare term."""
         # "common" appears in all 3 docs; "rare" only in doc0.
-        idx = BM25Index(k1=1.5, b=0.0)   # b=0 removes length effect
+        idx = BM25Index(k1=1.5, b=0.0)  # b=0 removes length effect
         idx.fit(["rare common", "common", "common"])
         # For doc0, query "rare common":
         # rare contribution > common contribution because idf_rare >> idf_common
@@ -107,7 +113,7 @@ class TestBM25MathCorrectness:
     def test_b_zero_length_invariant(self):
         """With b=0, two docs with the same term (tf=1) but different lengths score equally."""
         idx = BM25Index(k1=1.5, b=0.0)
-        idx.fit(["cat", "cat dog bird fish"])   # doc0: dl=1, doc1: dl=4, both cat tf=1
+        idx.fit(["cat", "cat dog bird fish"])  # doc0: dl=1, doc1: dl=4, both cat tf=1
         sm = idx.score_matrix(["cat"])
         # b=0 → len_norm=1.0 always → identical BM25 weight
         assert abs(float(sm[0, 0]) - float(sm[0, 1])) < 1e-5
@@ -115,7 +121,7 @@ class TestBM25MathCorrectness:
     def test_b_one_shorter_doc_scores_higher(self):
         """With b=1 (full normalization), the shorter doc scores higher for same tf."""
         idx = BM25Index(k1=1.5, b=1.0)
-        idx.fit(["cat", "cat dog bird fish"])   # doc0: dl=1, doc1: dl=4, both cat tf=1
+        idx.fit(["cat", "cat dog bird fish"])  # doc0: dl=1, doc1: dl=4, both cat tf=1
         sm = idx.score_matrix(["cat"])
         # b=1 → shorter doc (lower len_norm) gets higher weight
         assert float(sm[0, 0]) > float(sm[0, 1])
@@ -124,7 +130,7 @@ class TestBM25MathCorrectness:
         """Terms absent from the vocabulary add 0 and cause no error."""
         idx = BM25Index(k1=1.5, b=0.75)
         idx.fit(["apple orange"])
-        sm_oov = idx.score_matrix(["banana"])         # banana not in vocab
+        sm_oov = idx.score_matrix(["banana"])  # banana not in vocab
         sm_normal = idx.score_matrix(["apple"])
         npt.assert_allclose(sm_oov, np.zeros_like(sm_oov), atol=1e-8)
         assert float(sm_normal[0, 0]) > 0
@@ -197,23 +203,26 @@ class TestBM25TopK:
 #  Part B — LexicalRetrieverAdapter
 # =========================================================================== #
 
+
 @pytest.fixture
 def lex_env():
     """Small 3-class environment for lexical adapter tests."""
-    label_space = LabelSpace([
-        ClassDefinition("fruits", "apple orange fruit"),
-        ClassDefinition("fish", "salmon trout ocean"),
-        ClassDefinition("birds", "eagle falcon sky"),
-    ])
+    label_space = LabelSpace(
+        [
+            ClassDefinition("fruits", "apple orange fruit"),
+            ClassDefinition("fish", "salmon trout ocean"),
+            ClassDefinition("birds", "eagle falcon sky"),
+        ]
+    )
     texts = [
-        "apple apple fruit",   # label 0
-        "orange fruit",        # label 0
-        "salmon fish",         # label 1
-        "trout ocean fish",    # label 1
-        "eagle falcon",        # label 2
+        "apple apple fruit",  # label 0
+        "orange fruit",  # label 0
+        "salmon fish",  # label 1
+        "trout ocean fish",  # label 1
+        "eagle falcon",  # label 2
     ]
     labels = np.array([0, 0, 1, 1, 2])
-    cfg = RetrievalConfig(bm25_token_kwargs={})   # no stop_words for full control
+    cfg = RetrievalConfig(bm25_token_kwargs={})  # no stop_words for full control
     adapter = LexicalRetrieverAdapter.build(texts, labels, label_space, cfg)
     return adapter, label_space, labels
 
@@ -254,14 +263,17 @@ def test_lexical_knn_padding_preserved(lex_env):
 #  Part C — DenseRetrieverAdapter
 # =========================================================================== #
 
+
 @pytest.fixture
 def dense_env():
     """3-class env with a deliberate empty class (index 2 has no examples)."""
-    label_space = LabelSpace([
-        ClassDefinition("alpha", "alpha description one"),
-        ClassDefinition("beta",  "beta description two"),
-        ClassDefinition("empty", "empty class no examples"),
-    ])
+    label_space = LabelSpace(
+        [
+            ClassDefinition("alpha", "alpha description one"),
+            ClassDefinition("beta", "beta description two"),
+            ClassDefinition("empty", "empty class no examples"),
+        ]
+    )
     texts = ["alpha one", "alpha two", "alpha three", "beta one", "beta two"]
     labels = np.array([0, 0, 0, 1, 1])
     enc = HashingEncoder(dim=64)
@@ -283,10 +295,12 @@ def test_dense_prototype_is_l2_normalized(dense_env):
 def test_dense_prototype_direction_single_example(dense_env):
     """A class with one example: prototype must equal that example's embedding."""
     enc = HashingEncoder(dim=64)
-    label_space = LabelSpace([
-        ClassDefinition("solo", "solo"),
-        ClassDefinition("other", "other"),
-    ])
+    label_space = LabelSpace(
+        [
+            ClassDefinition("solo", "solo"),
+            ClassDefinition("other", "other"),
+        ]
+    )
     texts = ["solo item"]
     labels = np.array([0])
     cfg = RetrievalConfig(dense_chunk=256)
@@ -312,15 +326,15 @@ def test_dense_empty_class_gives_nan_similarity(dense_env):
     q_emb = enc.encode([texts[0]])
     proto_sim = adapter.prototype_similarity(q_emb)
     assert proto_sim.shape == (1, 3)
-    assert np.isnan(proto_sim[0, 2])   # empty class column must be NaN
+    assert np.isnan(proto_sim[0, 2])  # empty class column must be NaN
 
 
 def test_dense_class_freq_counts_correctly(dense_env):
     adapter, _, _, _, labels = dense_env
     freq = adapter.class_freq
-    npt.assert_array_equal(freq[0], int((labels == 0).sum()))   # 3
-    npt.assert_array_equal(freq[1], int((labels == 1).sum()))   # 2
-    npt.assert_array_equal(freq[2], 0)                          # empty class
+    npt.assert_array_equal(freq[0], int((labels == 0).sum()))  # 3
+    npt.assert_array_equal(freq[1], int((labels == 1).sum()))  # 2
+    npt.assert_array_equal(freq[2], 0)  # empty class
 
 
 def test_dense_knn_sorted_by_descending_similarity(dense_env):
@@ -335,7 +349,7 @@ def test_dense_knn_k_larger_than_n_examples_pads_remainder(dense_env):
     adapter, _, enc, texts, _ = dense_env
     q_emb = enc.encode([texts[0]])
     lab, sim = adapter.knn_example_labels(q_emb, k=1000)
-    n_examples = len(texts)   # 5
+    n_examples = len(texts)  # 5
     # shape is padded to the requested k (mirrors BM25Index.top_k)...
     assert lab.shape == (1, 1000)
     assert sim.shape == (1, 1000)

@@ -12,6 +12,7 @@ Determinism does not depend on PYTHONHASHSEED: HashingEncoder hashes tokens
 with hashlib.sha256 (T21), so embeddings are identical across processes, Python
 versions, and platforms without any env-var pinning.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -36,8 +37,10 @@ def synthetic_dataset() -> tuple:
 @pytest.fixture
 def tiny_label_space() -> LabelSpace:
     """Hand-built 3-class LabelSpace for exact-value assertions."""
-    return LabelSpace([
-        ClassDefinition(key="alpha", description="the alpha class"),
-        ClassDefinition(key="beta", description="the beta class"),
-        ClassDefinition(key="gamma", description="the gamma class"),
-    ])
+    return LabelSpace(
+        [
+            ClassDefinition(key="alpha", description="the alpha class"),
+            ClassDefinition(key="beta", description="the beta class"),
+            ClassDefinition(key="gamma", description="the gamma class"),
+        ]
+    )

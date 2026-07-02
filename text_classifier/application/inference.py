@@ -3,6 +3,7 @@
 Loads a trained model directory and classifies new items. Leakage-free by
 construction: a genuinely new item has no self-match in the index.
 """
+
 from __future__ import annotations
 
 from typing import List, Sequence
@@ -49,8 +50,13 @@ class InferencePipeline:
         a = self._a
         q_emb = a.encoder.encode(texts)
         feats = self._assembler.assemble(
-            texts, q_emb, a.dense, a.lexical, a.config.retrieval.k_neighbors,
-            query_ids=list(range(len(texts))), query_labels=None,
+            texts,
+            q_emb,
+            a.dense,
+            a.lexical,
+            a.config.retrieval.k_neighbors,
+            query_ids=list(range(len(texts))),
+            query_labels=None,
             chunk=a.config.retrieval.feature_chunk,
         )
 

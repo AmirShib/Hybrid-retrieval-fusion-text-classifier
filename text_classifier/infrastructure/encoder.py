@@ -12,30 +12,35 @@
   trivial baseline. It is *not* a semantic model and should not be used where
   embedding quality matters.
 """
+
 from __future__ import annotations
 
 import hashlib
 import json
 import os
 import pickle
-from typing import List, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Sequence, Tuple
 
 import numpy as np
 
 from ..config import EncoderConfig
 from ..domain import LabeledItem, LabelSpace, TextEncoder
 
+if TYPE_CHECKING:  # torch-free at runtime; the type is only for checkers
+    from sentence_transformers import SentenceTransformer
+
 
 class SentenceTransformerEncoder(TextEncoder):
     """Adapter producing L2-normalized float32 embeddings."""
 
-    def __init__(self, model: "SentenceTransformer", batch_size: int = 64):  # type: ignore[name-defined]
+    def __init__(self, model: "SentenceTransformer", batch_size: int = 64):
         self._model = model
         self._batch_size = batch_size
 
     @classmethod
-    def load(cls, model_name_or_path: str, batch_size: int = 64, device=None,
-             **kwargs) -> "SentenceTransformerEncoder":
+    def load(
+        cls, model_name_or_path: str, batch_size: int = 64, device=None, **kwargs
+    ) -> "SentenceTransformerEncoder":
         from sentence_transformers import SentenceTransformer
 
         return cls(SentenceTransformer(model_name_or_path, device=device, **kwargs), batch_size)
@@ -72,7 +77,7 @@ class TfidfEncoder(TextEncoder):
 
     _PICKLE_NAME = "tfidf.pkl"
 
-    def __init__(self, vectorizer=None, tfidf_kwargs: dict | None = None):  # type: ignore[no-untyped-def]
+    def __init__(self, vectorizer: Any = None, tfidf_kwargs: dict | None = None):
         self._vectorizer = vectorizer
         self._kwargs = dict(tfidf_kwargs or {})
 
@@ -190,7 +195,7 @@ def train_encoder(
     which is what prevents the symmetric in-batch negatives from treating an
     item's own description as a negative for a same-class sibling.
     """
-    from sentence_transformers import InputExample, SentenceTransformer, losses
+    from sentence_transformers import InputExample, SentenceTransformer, losses  # type: ignore[attr-defined]
     from sentence_transformers.datasets import NoDuplicatesDataLoader
 
     model = SentenceTransformer(config.model_name_or_path, device=config.device, **config.params)

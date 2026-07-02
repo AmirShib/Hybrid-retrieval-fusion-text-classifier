@@ -3,6 +3,7 @@
 This is the minimum gate that proves CI wiring is correct.  If this test
 fails, something is wrong with the package install, not the logic.
 """
+
 import text_classifier
 
 

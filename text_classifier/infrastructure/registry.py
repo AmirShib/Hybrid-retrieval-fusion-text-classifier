@@ -18,6 +18,7 @@ different on-disk format (LightGBM ``.txt``, a Platt ``.json``) only has to name
 its filename and loader here, and round-trips without the repository knowing
 anything about it.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -55,6 +56,7 @@ class EncoderSpec:
     leakage-free. ``fit`` builds such an encoder from a corpus; for pretrained
     encoders it performs optional fine-tuning (used only when
     ``use_per_fold_encoder`` is set)."""
+
     build: Callable[[EncoderConfig], TextEncoder]
     dirname: str
     load: Callable[[str, EncoderConfig], TextEncoder]
@@ -128,8 +130,9 @@ def encoder_is_corpus_dependent(config: EncoderConfig) -> bool:
     return encoder_spec(config.kind).corpus_dependent
 
 
-def fit_encoder(config: EncoderConfig, items: Sequence[LabeledItem],
-                label_space: LabelSpace) -> TextEncoder:
+def fit_encoder(
+    config: EncoderConfig, items: Sequence[LabeledItem], label_space: LabelSpace
+) -> TextEncoder:
     """Fit/train a corpus-dependent (or fine-tunable) encoder on ``items``."""
     spec = encoder_spec(config.kind)
     if spec.fit is None:

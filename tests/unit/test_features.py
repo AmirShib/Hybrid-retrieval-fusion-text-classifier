@@ -6,6 +6,7 @@ Part B: FeatureAssembler.assemble — schema/order, dtypes, NaN semantics,
         is_true, derived-feature identities, chunking equivalence, and the
         empty-input / empty-candidate paths.
 """
+
 from __future__ import annotations
 
 import warnings
@@ -38,6 +39,7 @@ from text_classifier.infrastructure.retrieval import (
 # =========================================================================== #
 #  Stubs: all-NaN / all-zero signals → no candidate survives the union mask.
 # =========================================================================== #
+
 
 class _NaNDense(DenseRetriever):
     def __init__(self, n_classes: int) -> None:
@@ -75,6 +77,7 @@ class _ZeroLexical(LexicalRetriever):
 #  Part A — pure helper tests
 # =========================================================================== #
 
+
 class TestScatterKnn:
     def test_basic_aggregation(self):
         # Row 0: class 0 twice (positions 0,2), class 1 once.
@@ -83,7 +86,7 @@ class TestScatterKnn:
         scores = np.array([[0.9, 0.8, 0.7], [0.6, 0.5, 0.1]])
         ksum, kmax, kcnt = _scatter_knn(labels, scores, n_classes=3)
 
-        npt.assert_allclose(ksum[0, 0], 1.6)   # 0.9 + 0.7
+        npt.assert_allclose(ksum[0, 0], 1.6)  # 0.9 + 0.7
         npt.assert_allclose(kmax[0, 0], 0.9)
         assert kcnt[0, 0] == 2
         npt.assert_allclose(ksum[0, 1], 0.8)
@@ -93,7 +96,7 @@ class TestScatterKnn:
 
         npt.assert_allclose(ksum[1, 2], 0.6)
         npt.assert_allclose(ksum[1, 1], 0.5)
-        assert np.isnan(ksum[1, 0])   # class 0 never retrieved in row 1
+        assert np.isnan(ksum[1, 0])  # class 0 never retrieved in row 1
 
     def test_nan_score_is_ignored(self):
         labels = np.array([[0, 1]])
@@ -111,7 +114,7 @@ class TestScatterKnn:
         scores = np.array([[0.5, 0.8]])
         ksum, _, kcnt = _scatter_knn(labels, scores, n_classes=2)
         assert kcnt[0, 0] == 1
-        assert np.isnan(ksum[0, 1])   # class 1 never validly retrieved
+        assert np.isnan(ksum[0, 1])  # class 1 never validly retrieved
 
     def test_empty_class_uses_nan_not_zero(self):
         """sum/max NaN for count==0 — the 'not retrieved' encoding."""
@@ -121,16 +124,15 @@ class TestScatterKnn:
         # class 2 never appears
         assert np.isnan(ksum[0, 2])
         assert np.isnan(kmax[0, 2])
-        assert kcnt[0, 2] == 0   # count is a true 0, not NaN
+        assert kcnt[0, 2] == 0  # count is a true 0, not NaN
 
 
 class TestTopnMask:
     def test_selects_top_n_columns(self):
-        M = np.array([[0.9, 0.1, 0.5],
-                      [0.2, 0.8, 0.3]])
+        M = np.array([[0.9, 0.1, 0.5], [0.2, 0.8, 0.3]])
         mask = _topn_mask(M, n=2)
-        npt.assert_array_equal(mask[0], [True, False, True])   # 0.9, 0.5
-        npt.assert_array_equal(mask[1], [False, True, True])   # 0.8, 0.3
+        npt.assert_array_equal(mask[0], [True, False, True])  # 0.9, 0.5
+        npt.assert_array_equal(mask[1], [False, True, True])  # 0.8, 0.3
 
     def test_n_larger_than_c_selects_all_finite(self):
         M = np.array([[0.9, 0.5, 0.1]])
@@ -176,7 +178,7 @@ class TestRowRank:
         ranks = _row_rank(M, cand)
         assert ranks[0, 0] == 1
         assert ranks[0, 1] == 2
-        assert ranks[0, 2] == 3   # non-candidate → worst
+        assert ranks[0, 2] == 3  # non-candidate → worst
 
     def test_nan_value_pushed_to_worst_rank(self):
         M = np.array([[0.9, np.nan, 0.1]])
@@ -184,7 +186,7 @@ class TestRowRank:
         ranks = _row_rank(M, cand)
         assert ranks[0, 0] == 1
         assert ranks[0, 2] == 2
-        assert ranks[0, 1] == 3   # NaN → worst
+        assert ranks[0, 1] == 3  # NaN → worst
 
 
 class TestRowMinmax:
@@ -217,8 +219,8 @@ class TestRowMinmax:
         M = np.array([[np.nan, np.nan]])
         cand = np.array([[True, True]])
         with warnings.catch_warnings():
-            warnings.simplefilter("error")   # any warning → error
-            result = _row_minmax(M, cand)   # must not raise
+            warnings.simplefilter("error")  # any warning → error
+            result = _row_minmax(M, cand)  # must not raise
         assert np.all(np.isnan(result))
 
 
@@ -248,10 +250,12 @@ class TestArgmaxOrMissing:
 #  Part B — FeatureAssembler integration tests
 # =========================================================================== #
 
+
 @pytest.fixture
 def fenv(hashing_encoder):
     """5-class × 10-item environment; first 8 items used as queries."""
     from tests._doubles import make_synthetic
+
     label_space, items = make_synthetic(n_classes=5, per_class=10, seed=7)
     texts = [it.text for it in items]
     label_idx = np.array(label_space.encode_labels([it.label for it in items]))
@@ -264,8 +268,12 @@ def fenv(hashing_encoder):
     q_emb = hashing_encoder.encode(q_texts)
     q_labels = np.array(label_space.encode_labels([it.label for it in q_items]))
     return dict(
-        assembler=assembler, dense=dense, lexical=lexical,
-        q_texts=q_texts, q_emb=q_emb, q_labels=q_labels,
+        assembler=assembler,
+        dense=dense,
+        lexical=lexical,
+        q_texts=q_texts,
+        q_emb=q_emb,
+        q_labels=q_labels,
         label_space=label_space,
     )
 
@@ -273,7 +281,10 @@ def fenv(hashing_encoder):
 def _assemble(fenv, with_labels=False, chunk=4096):
     e = fenv
     return e["assembler"].assemble(
-        e["q_texts"], e["q_emb"], e["dense"], e["lexical"],
+        e["q_texts"],
+        e["q_emb"],
+        e["dense"],
+        e["lexical"],
         k_neighbors=3,
         query_ids=list(range(len(e["q_texts"]))),
         query_labels=e["q_labels"] if with_labels else None,
@@ -317,13 +328,17 @@ class TestAssembleSchema:
 class TestAssembleDerivedFeatures:
     def test_desc_proto_gap_identity(self, fenv):
         df = _assemble(fenv)
-        expected = df["d_desc_sim"].values.astype(np.float64) - df["d_proto_sim"].values.astype(np.float64)
+        expected = df["d_desc_sim"].values.astype(np.float64) - df["d_proto_sim"].values.astype(
+            np.float64
+        )
         npt.assert_allclose(df["desc_proto_gap"].values.astype(np.float64), expected, atol=1e-5)
 
     def test_class_log_freq_identity(self, fenv):
         df = _assemble(fenv)
         freq = fenv["dense"].class_freq
-        expected = np.log1p(freq[df["candidate"].values.astype(int)].astype(np.float64)).astype(np.float32)
+        expected = np.log1p(freq[df["candidate"].values.astype(int)].astype(np.float64)).astype(
+            np.float32
+        )
         npt.assert_allclose(df["class_log_freq"].values, expected, atol=1e-5)
 
     def test_b_desc_missing_iff_b_desc_sim_nan(self, fenv):
@@ -349,8 +364,14 @@ class TestAssembleDerivedFeatures:
 
 class TestAssembleChunking:
     def test_chunk_size_does_not_affect_output(self, fenv):
-        big = _assemble(fenv, chunk=10_000).sort_values(["item_id", "candidate"]).reset_index(drop=True)
-        small = _assemble(fenv, chunk=2).sort_values(["item_id", "candidate"]).reset_index(drop=True)
+        big = (
+            _assemble(fenv, chunk=10_000)
+            .sort_values(["item_id", "candidate"])
+            .reset_index(drop=True)
+        )
+        small = (
+            _assemble(fenv, chunk=2).sort_values(["item_id", "candidate"]).reset_index(drop=True)
+        )
         for col in FEATURE_NAMES:
             npt.assert_allclose(
                 big[col].values.astype(np.float64),
@@ -366,9 +387,12 @@ class TestAssembleEdgeCases:
     def test_empty_query_list_returns_valid_empty_frame(self, fenv):
         e = fenv
         df = e["assembler"].assemble(
-            [], np.empty((0, 128), dtype=np.float32),
-            e["dense"], e["lexical"],
-            k_neighbors=3, query_ids=[],
+            [],
+            np.empty((0, 128), dtype=np.float32),
+            e["dense"],
+            e["lexical"],
+            k_neighbors=3,
+            query_ids=[],
         )
         assert len(df) == 0
         assert set(FEATURE_NAMES).issubset(df.columns)
@@ -378,9 +402,12 @@ class TestAssembleEdgeCases:
         e = fenv
         C = e["label_space"].size
         df = e["assembler"].assemble(
-            e["q_texts"][:2], e["q_emb"][:2],
-            _NaNDense(C), _ZeroLexical(C),
-            k_neighbors=3, query_ids=[0, 1],
+            e["q_texts"][:2],
+            e["q_emb"][:2],
+            _NaNDense(C),
+            _ZeroLexical(C),
+            k_neighbors=3,
+            query_ids=[0, 1],
         )
         assert len(df) == 0
         assert set(FEATURE_NAMES).issubset(df.columns)

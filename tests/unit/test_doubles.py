@@ -6,6 +6,7 @@ exact values; switching from the builtin ``hash()`` to ``hashlib.sha256`` makes
 that reproducibility independent of ``PYTHONHASHSEED``, Python version, and
 platform. These tests pin that contract.
 """
+
 from __future__ import annotations
 
 import os
@@ -13,7 +14,6 @@ import subprocess
 import sys
 
 import numpy as np
-import pytest
 
 from tests._doubles import HashingEncoder
 
@@ -70,7 +70,9 @@ def test_cross_process_stability(tmp_path):
     env["PYTHONHASHSEED"] = "12345"  # deliberately not 0
     proc = subprocess.run(
         [sys.executable, "-c", script],
-        capture_output=True, text=True, env=env,
+        capture_output=True,
+        text=True,
+        env=env,
         cwd=os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
     )
     assert proc.returncode == 0, proc.stderr

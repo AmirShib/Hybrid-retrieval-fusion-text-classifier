@@ -13,6 +13,7 @@ Approaches implemented:
   4. Role-separation: fold_roles() keeps train / calibration / test disjoint
      and exhaustive.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -36,6 +37,7 @@ from tests._doubles import HashingEncoder, make_synthetic
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+
 def _fast_cfg(n_folds: int = 3) -> PipelineConfig:
     cfg = PipelineConfig()
     cfg.training = TrainingConfig(
@@ -45,9 +47,14 @@ def _fast_cfg(n_folds: int = 3) -> PipelineConfig:
         target_precision=0.5,
         per_class_min_support=1,
     )
-    cfg.fusion = FusionConfig(xgb_params={
-        "n_estimators": 10, "max_depth": 2, "random_state": 0, "n_jobs": 1,
-    })
+    cfg.fusion = FusionConfig(
+        xgb_params={
+            "n_estimators": 10,
+            "max_depth": 2,
+            "random_state": 0,
+            "n_jobs": 1,
+        }
+    )
     cfg.retrieval = RetrievalConfig(k_neighbors=5)
     return cfg
 
@@ -65,6 +72,7 @@ def _run_oof(items, label_space, enc, n_folds=3):
 # Module-level fixture: run OOF once and share across tests
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(scope="module")
 def oof_result():
     enc = HashingEncoder(dim=64)
@@ -75,6 +83,7 @@ def oof_result():
 # ---------------------------------------------------------------------------
 # Approach 2 — fold disjointness
 # ---------------------------------------------------------------------------
+
 
 class TestFoldDisjointness:
     def test_item_id_sets_are_pairwise_disjoint(self, oof_result):
@@ -102,6 +111,7 @@ class TestFoldDisjointness:
 # ---------------------------------------------------------------------------
 # Approaches 1+3 — singleton-class canary
 # ---------------------------------------------------------------------------
+
 
 class TestCanary:
     """Approaches 1+3: singleton-class dataset proves the test is sensitive.
@@ -131,7 +141,9 @@ class TestCanary:
         defs = [ClassDefinition(f"C{i}", "shared description for all classes") for i in range(n)]
         # Each item has class-exclusive tokens; no token appears in any description.
         items = [
-            LabeledItem(f"excl_{i}_p{i*31+7} excl_{i}_q{i*17+3} excl_{i}_r{i*13+11}", f"C{i}")
+            LabeledItem(
+                f"excl_{i}_p{i * 31 + 7} excl_{i}_q{i * 17 + 3} excl_{i}_r{i * 13 + 11}", f"C{i}"
+            )
             for i in range(n)
         ]
         return LabelSpace(defs), items
@@ -144,6 +156,7 @@ class TestCanary:
         assembler = FeatureAssembler(label_space, CandidatePolicy(cfg.candidate_top_n))
         all_idx = np.arange(len(items))
         import pandas as pd
+
         parts = []
         for i in all_idx:
             tr = all_idx if include_self else all_idx[all_idx != i]
@@ -152,8 +165,13 @@ class TestCanary:
             lexical = LexicalRetrieverAdapter.build(tr_texts, y[tr], label_space, cfg.retrieval)
             q_emb = enc.encode([texts[i]])
             feats = assembler.assemble(
-                [texts[i]], q_emb, dense, lexical, cfg.retrieval.k_neighbors,
-                query_ids=[int(i)], query_labels=y[[i]],
+                [texts[i]],
+                q_emb,
+                dense,
+                lexical,
+                cfg.retrieval.k_neighbors,
+                query_ids=[int(i)],
+                query_labels=y[[i]],
             )
             parts.append(feats)
         return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
@@ -191,6 +209,7 @@ class TestCanary:
 # ---------------------------------------------------------------------------
 # Approach 4 — role separation
 # ---------------------------------------------------------------------------
+
 
 class TestRoleSeparation:
     @pytest.mark.parametrize("n_folds", [3, 4, 5])

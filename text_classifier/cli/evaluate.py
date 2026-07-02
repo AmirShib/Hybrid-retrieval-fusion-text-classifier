@@ -11,6 +11,7 @@ Reports coverage, accuracy on accepted, calibration (Brier / ECE), a
 risk-coverage curve, and a per-class breakdown. Use it to validate a model on a
 held-out set, or to monitor a deployed model for drift over time.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -32,7 +33,9 @@ def _num(x) -> str:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("--model", required=True)
     p.add_argument("--input", required=True, help="labeled CSV with text + label columns")
     p.add_argument("--output", default=None, help="optional path to write the full JSON report")
@@ -69,20 +72,28 @@ def main() -> None:
     true_idx = np.array([key_to_idx[tk] for tk in true_keys], dtype=np.intp)
 
     evaluation = evaluate_decisions(
-        confidence=confidence, correct=correct, accepted=accepted,
-        pred_idx=pred_idx, true_idx=true_idx, keys=keys,
+        confidence=confidence,
+        correct=correct,
+        accepted=accepted,
+        pred_idx=pred_idx,
+        true_idx=true_idx,
+        keys=keys,
     )
     manifest = build_manifest(
-        n_training_items=len(items), n_classes=label_space.size,
-        config=pipeline.config, n_evaluated=len(items),
+        n_training_items=len(items),
+        n_classes=label_space.size,
+        config=pipeline.config,
+        n_evaluated=len(items),
     )
 
     o = evaluation["overall"]
     cal = evaluation["calibration"]
     print("\n=== evaluation ===")
     print(f"items evaluated       : {o['n_items']}")
-    print(f"coverage              : {_pct(o['coverage'])} "
-          f"({o['n_accepted']} accepted, {o['n_abstained']} abstained)")
+    print(
+        f"coverage              : {_pct(o['coverage'])} "
+        f"({o['n_accepted']} accepted, {o['n_abstained']} abstained)"
+    )
     print(f"accuracy on accepted  : {_pct(o['accuracy_on_accepted'])}")
     print(f"accuracy if no abstain: {_pct(o['accuracy_if_no_abstain'])}")
     print(f"expected calib. error : {_num(cal['expected_calibration_error'])}")
@@ -90,13 +101,15 @@ def main() -> None:
 
     worst = sorted(
         (r for r in evaluation["per_class"] if r["support"] > 0),
-        key=lambda r: (r["coverage"] if r["coverage"] is not None else 1.0),
+        key=lambda r: r["coverage"] if r["coverage"] is not None else 1.0,
     )[:5]
     if worst:
         print("\nlowest-coverage classes (support>0):")
         for r in worst:
-            print(f"  {r['key']:>12}  support={r['support']:<5} "
-                  f"coverage={_pct(r['coverage'])}  precision={_pct(r['precision_on_accepted'])}")
+            print(
+                f"  {r['key']:>12}  support={r['support']:<5} "
+                f"coverage={_pct(r['coverage'])}  precision={_pct(r['precision_on_accepted'])}"
+            )
 
     if args.output:
         with open(args.output, "w") as fh:

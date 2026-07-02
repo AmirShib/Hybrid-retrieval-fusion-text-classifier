@@ -5,6 +5,7 @@ duplicated between ``pyproject.toml`` and the source. Falls back to the
 in-tree default when the package is imported from a source checkout that was
 never installed (e.g. ``PYTHONPATH=.`` during development).
 """
+
 from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version

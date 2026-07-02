@@ -4,6 +4,7 @@ adapters implement these; the domain never imports a concrete ML library.
 All array shapes are documented as (rows, cols). `b` = query batch size,
 `C` = number of classes, `k` = neighbors, `d` = embedding dim, `n` = pool size.
 """
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -18,6 +19,12 @@ class TextEncoder(ABC):
     @abstractmethod
     def encode(self, texts: Sequence[str]) -> np.ndarray:  # (n, d) float32
         ...
+
+    @abstractmethod
+    def save(self, directory: str) -> None:
+        """Persist to a directory (encoders may write several files). The
+        matching loader is registered per kind (see ``EncoderSpec.load``);
+        FusionModel/ConfidenceCalibrator declare the same contract."""
 
 
 class DenseRetriever(ABC):
@@ -45,7 +52,9 @@ class LexicalRetriever(ABC):
     """Lexical signals from BM25 over the same example pool + class descriptions."""
 
     @abstractmethod
-    def knn_example_labels(self, query_texts: Sequence[str], k: int) -> Tuple[np.ndarray, np.ndarray]:
+    def knn_example_labels(
+        self, query_texts: Sequence[str], k: int
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """Return (neighbor_class_indices (b, k) int with -1 padding,
         scores (b, k) float with NaN padding)."""
 

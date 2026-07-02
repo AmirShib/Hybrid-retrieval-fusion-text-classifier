@@ -4,6 +4,7 @@ Runs fully offline via the torch-free tfidf encoder: train writes the model plus
 `evaluation.json` and `model_card.md`, and the evaluate CLI scores a labeled CSV
 and emits a JSON report.
 """
+
 from __future__ import annotations
 
 import json
@@ -23,12 +24,12 @@ def _write_csvs(tmp_path) -> tuple[str, str]:
     label_space, items = make_synthetic(n_classes=4, per_class=9, seed=23)
     items_csv = tmp_path / "items.csv"
     classes_csv = tmp_path / "classes.csv"
-    pd.DataFrame(
-        {"text": [it.text for it in items], "label": [it.label for it in items]}
-    ).to_csv(items_csv, index=False)
-    pd.DataFrame(
-        {"key": label_space.keys, "description": label_space.descriptions}
-    ).to_csv(classes_csv, index=False)
+    pd.DataFrame({"text": [it.text for it in items], "label": [it.label for it in items]}).to_csv(
+        items_csv, index=False
+    )
+    pd.DataFrame({"key": label_space.keys, "description": label_space.descriptions}).to_csv(
+        classes_csv, index=False
+    )
     return str(items_csv), str(classes_csv)
 
 
@@ -40,9 +41,28 @@ def _run(module, argv) -> None:
 def _train_model(tmp_path) -> tuple[str, str]:
     items_csv, classes_csv = _write_csvs(tmp_path)
     out = str(tmp_path / "model")
-    _run(train_cli, ["train", "--items", items_csv, "--classes", classes_csv, "--out", out,
-                     "--encoder-kind", "tfidf", "--folds", "3",
-                     "--target-precision", "0.5", "--candidate-top-n", "8", "--k-neighbors", "10"])
+    _run(
+        train_cli,
+        [
+            "train",
+            "--items",
+            items_csv,
+            "--classes",
+            classes_csv,
+            "--out",
+            out,
+            "--encoder-kind",
+            "tfidf",
+            "--folds",
+            "3",
+            "--target-precision",
+            "0.5",
+            "--candidate-top-n",
+            "8",
+            "--k-neighbors",
+            "10",
+        ],
+    )
     return out, items_csv
 
 
@@ -53,8 +73,14 @@ def test_training_writes_evaluation_and_model_card(tmp_path):
 
     with open(os.path.join(out, "evaluation.json")) as fh:
         report = json.load(fh)
-    assert set(report) >= {"manifest", "overall", "calibration", "risk_coverage_curve",
-                           "per_class", "abstention"}
+    assert set(report) >= {
+        "manifest",
+        "overall",
+        "calibration",
+        "risk_coverage_curve",
+        "per_class",
+        "abstention",
+    }
     assert report["manifest"]["package_version"]
     assert report["manifest"]["n_classes"] == 4
     assert report["overall"]["n_items"] > 0
@@ -90,7 +116,9 @@ def test_evaluate_cli_scores_and_writes_report(tmp_path, capsys):
 def test_evaluate_cli_rejects_unknown_labels(tmp_path):
     out, _ = _train_model(tmp_path)
     bad_csv = tmp_path / "bad.csv"
-    pd.DataFrame({"text": ["some words here"], "label": ["NOT_A_REAL_CLASS"]}).to_csv(bad_csv, index=False)
+    pd.DataFrame({"text": ["some words here"], "label": ["NOT_A_REAL_CLASS"]}).to_csv(
+        bad_csv, index=False
+    )
     with pytest.raises(SystemExit) as exc:
         _run(evaluate_cli, ["eval", "--model", out, "--input", str(bad_csv)])
     assert "not in the model" in str(exc.value)

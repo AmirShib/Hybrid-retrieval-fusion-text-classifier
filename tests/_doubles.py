@@ -8,6 +8,7 @@ existing test imports keep working unchanged. The ``"hashing"`` encoder kind is
 registered as a built-in by the package registry, so no registration happens
 here.
 """
+
 from __future__ import annotations
 
 from text_classifier.datasets import make_synthetic

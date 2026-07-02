@@ -5,6 +5,30 @@ on:
   pull_request:
 
 jobs:
+  lint:
+    # ruff (lint + format) and mypy (T51). mypy needs the real dependencies
+    # installed to resolve numpy/pandas imports, hence the full install.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package + lint tooling
+        run: pip install -e .[dev]
+
+      - name: ruff check
+        run: ruff check text_classifier/ scripts/ tests/
+
+      - name: ruff format --check
+        run: ruff format --check text_classifier/ scripts/ tests/
+
+      - name: mypy
+        run: python -m mypy text_classifier
+
   test:
     runs-on: ubuntu-latest
     strategy:

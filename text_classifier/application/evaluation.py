@@ -19,6 +19,7 @@ training pipeline's held-out test fold and the standalone ``evaluate`` use case
 on a freshly labeled set. Outputs are JSON-clean (NaN/inf -> ``None``) so they
 persist next to a model directory and round-trip through standard JSON.
 """
+
 from __future__ import annotations
 
 import datetime
@@ -71,8 +72,9 @@ def brier_score(confidence: np.ndarray, correct: np.ndarray) -> Optional[float]:
     return float(np.mean((confidence - correct) ** 2))
 
 
-def reliability_table(confidence: np.ndarray, correct: np.ndarray,
-                      n_bins: int = 10) -> List[Dict[str, Any]]:
+def reliability_table(
+    confidence: np.ndarray, correct: np.ndarray, n_bins: int = 10
+) -> List[Dict[str, Any]]:
     """Bin items by confidence and report mean confidence vs. observed accuracy.
 
     A well-calibrated model has ``mean_confidence ≈ accuracy`` in every bin.
@@ -92,19 +94,22 @@ def reliability_table(confidence: np.ndarray, correct: np.ndarray,
             continue
         mean_conf = float(confidence[m].mean())
         acc = float(correct[m].mean())
-        rows.append({
-            "bin_lower": float(edges[b]),
-            "bin_upper": float(edges[b + 1]),
-            "count": count,
-            "mean_confidence": mean_conf,
-            "accuracy": acc,
-            "gap": acc - mean_conf,
-        })
+        rows.append(
+            {
+                "bin_lower": float(edges[b]),
+                "bin_upper": float(edges[b + 1]),
+                "count": count,
+                "mean_confidence": mean_conf,
+                "accuracy": acc,
+                "gap": acc - mean_conf,
+            }
+        )
     return rows
 
 
-def expected_calibration_error(confidence: np.ndarray, correct: np.ndarray,
-                               n_bins: int = 10) -> Optional[float]:
+def expected_calibration_error(
+    confidence: np.ndarray, correct: np.ndarray, n_bins: int = 10
+) -> Optional[float]:
     """Support-weighted mean absolute gap between confidence and accuracy.
 
     The standard ECE: bin by confidence, take ``|accuracy - mean_confidence|``
@@ -122,8 +127,9 @@ def expected_calibration_error(confidence: np.ndarray, correct: np.ndarray,
 # --------------------------------------------------------------------------- #
 # Risk-coverage trade-off
 # --------------------------------------------------------------------------- #
-def risk_coverage_curve(confidence: np.ndarray, correct: np.ndarray,
-                        n_points: int = 20) -> List[Dict[str, float]]:
+def risk_coverage_curve(
+    confidence: np.ndarray, correct: np.ndarray, n_points: int = 20
+) -> List[Dict[str, float]]:
     """Accuracy on accepted items as a function of coverage.
 
     Sort items by descending confidence; accepting the most confident ``m`` of
@@ -156,9 +162,13 @@ def risk_coverage_curve(confidence: np.ndarray, correct: np.ndarray,
 # --------------------------------------------------------------------------- #
 # Per-class breakdown
 # --------------------------------------------------------------------------- #
-def per_class_table(pred_idx: np.ndarray, true_idx: np.ndarray,
-                    accepted: np.ndarray, correct: np.ndarray,
-                    keys: Sequence[str]) -> List[Dict[str, Any]]:
+def per_class_table(
+    pred_idx: np.ndarray,
+    true_idx: np.ndarray,
+    accepted: np.ndarray,
+    correct: np.ndarray,
+    keys: Sequence[str],
+) -> List[Dict[str, Any]]:
     """Per-class precision / recall / coverage over the accepted decisions.
 
     Parameters
@@ -208,15 +218,17 @@ def per_class_table(pred_idx: np.ndarray, true_idx: np.ndarray,
             coverage = None
             recall = None
 
-        rows.append({
-            "key": key,
-            "support": support,
-            "n_predicted": n_pred,
-            "n_accepted_as_class": n_pred_acc,
-            "precision_on_accepted": precision,
-            "recall_on_accepted": recall,
-            "coverage": coverage,
-        })
+        rows.append(
+            {
+                "key": key,
+                "support": support,
+                "n_predicted": n_pred,
+                "n_accepted_as_class": n_pred_acc,
+                "precision_on_accepted": precision,
+                "recall_on_accepted": recall,
+                "coverage": coverage,
+            }
+        )
     rows.sort(key=lambda r: r["support"], reverse=True)
     return rows
 
@@ -270,8 +282,9 @@ def evaluate_decisions(
     }
 
 
-def build_manifest(n_training_items: int, n_classes: int, config: Any,
-                   n_evaluated: Optional[int] = None) -> Dict[str, Any]:
+def build_manifest(
+    n_training_items: int, n_classes: int, config: Any, n_evaluated: Optional[int] = None
+) -> Dict[str, Any]:
     """A provenance record: package version, timestamp, data shape, and config.
 
     Persisted alongside the metrics so a trained model can be audited later —
@@ -343,8 +356,9 @@ def render_model_card(manifest: Dict[str, Any], evaluation: Dict[str, Any]) -> s
     return "\n".join(lines)
 
 
-def write_evaluation_artifacts(directory: str, evaluation: Dict[str, Any],
-                               manifest: Dict[str, Any]) -> None:
+def write_evaluation_artifacts(
+    directory: str, evaluation: Dict[str, Any], manifest: Dict[str, Any]
+) -> None:
     """Write ``evaluation.json`` and ``model_card.md`` into a model directory."""
     os.makedirs(directory, exist_ok=True)
     payload = {"manifest": manifest, **evaluation}

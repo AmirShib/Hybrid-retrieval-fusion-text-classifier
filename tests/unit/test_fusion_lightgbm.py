@@ -6,6 +6,7 @@ exact save/load round-trip via LightGBM's native text format.
 
 Skipped entirely when lightgbm is not installed (it is an optional dependency).
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -134,8 +135,12 @@ def test_unseeded_fits_deterministic():
     """random_state absent from params -> setdefault seeds it; two fits agree."""
     X, y = _separable_xy(n=200, nan_frac=0.1)
     unseeded = {
-        "n_estimators": 30, "max_depth": 3, "verbosity": -1,
-        "bagging_fraction": 0.5, "bagging_freq": 1, "feature_fraction": 0.5,
+        "n_estimators": 30,
+        "max_depth": 3,
+        "verbosity": -1,
+        "bagging_fraction": 0.5,
+        "bagging_freq": 1,
+        "feature_fraction": 0.5,
     }
     runs = []
     for _ in range(2):
