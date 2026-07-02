@@ -23,6 +23,24 @@ air-gapped/torch-free claim and what `pip install .` actually delivers, and T68
 for adopters. Tier 7 added T74 (`--config`) — the cheapest unlock in the
 backlog — and T75 (DataFrame API + streaming).
 
+## Suggested execution order (2026-07 roadmap review)
+
+Ordering logic: correctness-of-measurement first (nothing can be evaluated until
+runs are reproducible), then cheap user-facing wins, then the big refactors last —
+by which point the safety nets exist. Phases 0 and 3 are internally ordered;
+items within the other phases are parallelizable. The one non-negotiable edge:
+**T52 lands before T34** — the benchmark floors + golden-output tests are what
+make the signal-provider refactor a safe refactor instead of a rewrite-and-pray.
+
+| Phase | Theme | Order |
+|-------|-------|-------|
+| 0 | Foundations (strictly ordered) | T26 → T27 → T52 → T51 → T50 |
+| 1 | Cheap unlocks | T74, T65, T64 → T35 (changelog before the behavior change), T28 |
+| 2 | Trust & packaging | T63, T67, T08 (docs after the Phase-1 surface settles) |
+| 3 | Operational capabilities (strictly ordered) | T66 → T43 → T68 → T69, then T29 |
+| 4 | Architecture & retrieval | T34 (phase 1 → 2) → T31, T33; T32 when corpus size demands |
+| 5 | Science & long-tail | T45, T40; T70 → T71; T72, T75; T76 last (gated, measure-first) |
+
 ## Tier 1 — Tests (detailed, do first)
 
 | ID  | Title                                              | Status | Depends on |
