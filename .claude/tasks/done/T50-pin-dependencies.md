@@ -1,6 +1,6 @@
 # T50 — Pin dependencies for air-gapped reproducibility
 
-status: todo
+status: done
 tier: 5
 depends_on: —
 
