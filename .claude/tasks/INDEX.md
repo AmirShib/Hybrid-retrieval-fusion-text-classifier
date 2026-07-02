@@ -8,12 +8,16 @@ When you start a ticket, set its `status:` field (top of the file) and update th
 When a ticket reaches `done` and the work is merged: move its file from `.claude/tasks/` into
 `.claude/tasks/done/` — the row stays in this table for history.
 
-Priority is top-down. **Tiers 1–2 are done** (lone remaining Tier-1 item: T08,
-docs). **Tier 3 (T30–T33) is the active tier — do these next**; all four are now
-fully specified as self-contained tickets. Tier 4–5 remain stubs, except T41,
-T42, and T44 (done); T50 and T51 are now fully specified. **Tier 6 is the
+Priority is top-down. **Tier 1 has one open item (T08, docs). Tier 2 gained two
+new hardening tickets from the 2026-07 roadmap review: T26 (seed the fusion
+backends) and T27 (config validation) — both small, both prerequisites for
+trusting any A/B numbers, do them first.** Tier 3 (T30–T33) is the active
+feature tier; all four are fully specified. Tier 4–5 remain stubs, except T41,
+T42, and T44 (done); T50, T51, and T52 are fully specified. **Tier 6 is the
 packaging / production-readiness tier**: T60–T62 are done (the package is now
-`pip install`-able with persisted evaluation); T63–T64 remain.
+`pip install`-able with persisted evaluation); T63–T67 remain — T63 (torch-
+optional install) is the priority item, it closes the gap between the README's
+air-gapped/torch-free claim and what `pip install .` actually delivers.
 
 ## Tier 1 — Tests (detailed, do first)
 
@@ -29,7 +33,7 @@ packaging / production-readiness tier**: T60–T62 are done (the package is now
 
 | T08 | Code comments and professional documentation       | todo   | T01        |
 
-## Tier 2 — Hardening + pluggability (complete)
+## Tier 2 — Hardening + pluggability (T20–T25 complete; T26–T27 open)
 
 | ID  | Title                                                                    | Status | Depends on       |
 |-----|--------------------------------------------------------------------------|--------|------------------|
@@ -39,6 +43,8 @@ packaging / production-readiness tier**: T60–T62 are done (the package is now
 | T23 | Pluggable component registry + factory DI (encoder/fusion/calibrator)      | done | T01, T07        |
 | T24 | Pluggable encoder backends behind `TextEncoder` (e.g. TF-IDF, torch-free)  | done | T23             |
 | T25 | Expose `--encoder-kind` in the train CLI (reach the torch-free backend)    | done | T23, T24        |
+| T26 | Seed the fusion backends: identical runs → identical models               | todo | T01             |
+| T27 | Validate the config at pipeline entry (n_folds ≥ 3 and friends)            | todo | T01             |
 
 **Pluggability chain:** T23 is the prerequisite seam — it makes encoder, fusion,
 and calibrator selectable by config. Once it lands, T24 (alt encoders), T41
@@ -71,12 +77,17 @@ system is byte-for-byte identical to today. T33 does NOT depend on T23.
 | T45 | 4    | Per-class calibration behind `ConfidenceCalibrator` port (needs T42)           | todo |
 | T50 | 5    | Pin requirements for air-gapped reproducibility (hash-locked) — *specified*    | todo |
 | T51 | 5    | ruff + mypy + pre-commit; type-clean the package — *specified*                 | todo |
+| T52 | 5    | Offline quality-regression benchmark in CI (metric floors) — *specified*       | todo |
 
 ## Tier 6 — Packaging & production readiness
 
 What turns a good repo into a package a domain expert can install and trust.
 T60–T62 landed together (installable CLIs, persisted evaluation, version
-provenance). T63–T64 are the remaining essentials.
+provenance). T63–T64 are the remaining install/release essentials; the 2026-07
+roadmap review added three operational tickets: T65 (top-k for the human review
+queue — cheapest user-facing value in the backlog), T66 (re-tune thresholds
+without retraining — the drift response), and T67 (pickle-free artifacts —
+loading a shipped model dir must not execute code).
 
 | ID  | Title                                                                          | Status | Depends on   |
 |-----|--------------------------------------------------------------------------------|--------|--------------|
@@ -85,6 +96,9 @@ provenance). T63–T64 are the remaining essentials.
 | T62 | Package version provenance (`__version__`, recorded in meta.json)               | done   | T07          |
 | T63 | Torch-optional install via extras (core torch-free)                             | todo   | T24, T60     |
 | T64 | Release process + project hygiene (CHANGELOG/CONTRIBUTING/SECURITY, versioning) | todo   | T60          |
+| T65 | Top-k suggestions: populate `runner_up_key` + `--top-k` in the infer CLI        | todo   | T30          |
+| T66 | Re-tune calibration + abstention thresholds on a trained model (tune CLI)       | todo   | T61          |
+| T67 | Pickle-free model artifacts (npz/json state; legacy `.pkl` fallback)            | todo   | T60          |
 
 ## Tier 7 — Extensibility & architecture (forward-looking)
 
