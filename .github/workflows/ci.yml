@@ -25,8 +25,31 @@ jobs:
       - name: Run tests
         # No PYTHONHASHSEED pinning needed: HashingEncoder hashes tokens with
         # hashlib.sha256 (T21), so embeddings are deterministic across processes,
-        # Python versions, and platforms.
-        run: pytest -q --cov=text_classifier
+        # Python versions, and platforms. The quality-benchmark marker runs in
+        # its own job below, not here.
+        run: pytest -q -m "not quality" --cov=text_classifier
+
+  quality-benchmark:
+    # Trains the full pipeline on a fixed synthetic task and asserts metric
+    # floors (T52): catches changes that are correct code but a worse model
+    # (candidate-generation or decision-path regressions the unit suite cannot
+    # see). Torch-free subset so it stays fast and offline.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install torch-free runtime subset + pytest
+        run: |
+          pip install -e . --no-deps
+          pip install numpy pandas scipy scikit-learn xgboost pytest
+
+      - name: Run the quality benchmark
+        run: pytest -q -m quality
 
   package-smoke:
     # Build the wheel, install it into a clean environment, and drive the
