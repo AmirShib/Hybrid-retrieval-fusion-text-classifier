@@ -137,3 +137,28 @@ def test_registry_builds_xgbranker():
     model = build_fusion(FusionConfig(kind="xgbranker", params=dict(_FAST)))
     assert isinstance(model, XGBRankerFusionModel)
     assert isinstance(model, FusionModel)
+
+
+# ---------------------------------------------------------------------------
+# Determinism (T26)
+# ---------------------------------------------------------------------------
+
+
+def test_unseeded_fits_deterministic():
+    """random_state absent from params -> setdefault seeds it; two fits agree."""
+    X, y, g = _grouped_data(nan_frac=0.1)
+    unseeded = {"n_estimators": 30, "max_depth": 3, "subsample": 0.5, "n_jobs": 1}
+    runs = []
+    for _ in range(2):
+        m = XGBRankerFusionModel(dict(unseeded))
+        m.fit(X, y, groups=g)
+        runs.append(m.predict_proba(X))
+    np.testing.assert_array_equal(runs[0], runs[1])
+    assert m._model.get_params()["random_state"] == 0
+
+
+def test_explicit_seed_wins_ranker():
+    X, y, g = _grouped_data()
+    m = XGBRankerFusionModel({"n_estimators": 10, "random_state": 123})
+    m.fit(X, y, groups=g)
+    assert m._model.get_params()["random_state"] == 123

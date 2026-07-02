@@ -437,3 +437,32 @@ class TestVectorizedPredict:
             assert forward[i].predicted_key == mirror.predicted_key
             assert forward[i].abstained == mirror.abstained
             assert abs(forward[i].confidence - mirror.confidence) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Determinism (T26)
+# ---------------------------------------------------------------------------
+
+
+def test_training_is_deterministic_end_to_end():
+    """Two identical runs produce identical thresholds and coverage numbers.
+
+    xgb_params deliberately omit random_state and engage subsampling: the
+    backend's seed default is what has to make the runs reproducible.
+    """
+    label_space, items = make_synthetic(n_classes=8, per_class=20, seed=7)
+
+    def run():
+        cfg = _e2e_cfg()
+        cfg.fusion = FusionConfig(xgb_params={
+            "n_estimators": 30, "max_depth": 3, "subsample": 0.5,
+            "colsample_bytree": 0.5, "n_jobs": 1,
+        })
+        enc = HashingEncoder(dim=64)
+        return TrainingPipeline(cfg, shared_encoder=enc).run(items, label_space)
+
+    (art1, rep1), (art2, rep2) = run(), run()
+    assert art1.abstention.global_threshold == art2.abstention.global_threshold
+    assert art1.abstention.per_class == art2.abstention.per_class
+    # NaN-tolerant field-wise equality (accuracy fields may be NaN by contract)
+    np.testing.assert_equal(dataclasses.asdict(rep1), dataclasses.asdict(rep2))

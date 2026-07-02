@@ -181,3 +181,45 @@ class TestIsotonicCalibrator:
         loaded = cal2.transform(scores)
 
         np.testing.assert_array_equal(original, loaded)
+
+
+# ---------------------------------------------------------------------------
+# Part C — Determinism (T26)
+# ---------------------------------------------------------------------------
+
+# Row/column subsampling engages the RNG; random_state deliberately absent so
+# the backend's setdefault is what makes the runs reproducible.
+_UNSEEDED_STOCHASTIC = {
+    "n_estimators": 30, "max_depth": 3,
+    "subsample": 0.5, "colsample_bytree": 0.5, "n_jobs": 1,
+}
+
+
+class TestDeterminism:
+    def test_unseeded_params_default_to_seed_zero(self):
+        X, y = _separable_xy(n=200)
+        m = XGBoostFusionModel(dict(_UNSEEDED_STOCHASTIC))
+        m.fit(X, y)
+        assert m._model.get_params()["random_state"] == 0
+
+    def test_two_unseeded_fits_are_exactly_equal(self):
+        X, y = _separable_xy(n=200, nan_frac=0.1)
+        runs = []
+        for _ in range(2):
+            m = XGBoostFusionModel(dict(_UNSEEDED_STOCHASTIC))
+            m.fit(X, y)
+            runs.append(m.predict_proba(X))
+        np.testing.assert_array_equal(runs[0], runs[1])
+
+    def test_explicit_user_seed_wins(self):
+        X, y = _separable_xy(n=200)
+        m = XGBoostFusionModel({**_UNSEEDED_STOCHASTIC, "random_state": 123})
+        m.fit(X, y)
+        assert m._model.get_params()["random_state"] == 123
+
+    def test_fit_does_not_mutate_caller_params(self):
+        params = dict(_UNSEEDED_STOCHASTIC)
+        X, y = _separable_xy(n=100)
+        XGBoostFusionModel(params).fit(X, y)
+        assert "random_state" not in params
+        assert "scale_pos_weight" not in params
