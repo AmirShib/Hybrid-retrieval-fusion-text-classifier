@@ -34,10 +34,11 @@ class SentenceTransformerEncoder(TextEncoder):
         self._batch_size = batch_size
 
     @classmethod
-    def load(cls, model_name_or_path: str, batch_size: int = 64, device=None) -> "SentenceTransformerEncoder":
+    def load(cls, model_name_or_path: str, batch_size: int = 64, device=None,
+             **kwargs) -> "SentenceTransformerEncoder":
         from sentence_transformers import SentenceTransformer
 
-        return cls(SentenceTransformer(model_name_or_path, device=device), batch_size)
+        return cls(SentenceTransformer(model_name_or_path, device=device, **kwargs), batch_size)
 
     @property
     def model(self):
@@ -192,7 +193,7 @@ def train_encoder(
     from sentence_transformers import InputExample, SentenceTransformer, losses
     from sentence_transformers.datasets import NoDuplicatesDataLoader
 
-    model = SentenceTransformer(config.model_name_or_path, device=config.device)
+    model = SentenceTransformer(config.model_name_or_path, device=config.device, **config.params)
     examples = [
         InputExample(texts=[it.text, label_space.descriptions[label_space.index_of(it.label)]])
         for it in items

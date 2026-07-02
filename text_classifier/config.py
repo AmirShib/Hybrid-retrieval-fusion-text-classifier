@@ -17,9 +17,11 @@ class EncoderConfig:
     train_epochs: int = 1
     train_batch_size: int = 64
     warmup_ratio: float = 0.1
-    # Backend-specific kwargs read by non-ST encoders. For kind="tfidf" these are
-    # passed straight to sklearn's TfidfVectorizer (e.g. {"ngram_range": [1, 2],
-    # "max_features": 50000, "stop_words": "english"}).
+    # Backend-specific kwargs. For kind="tfidf" these pass straight to sklearn's
+    # TfidfVectorizer (e.g. {"ngram_range": [1, 2], "max_features": 50000}). For
+    # kind="sentence-transformers" these pass straight to the SentenceTransformer
+    # constructor (e.g. {"trust_remote_code": True, "revision": ..., "token": ...}) --
+    # anything sentence_transformers.SentenceTransformer.__init__ accepts.
     params: Dict[str, Any] = field(default_factory=dict)
 
 
