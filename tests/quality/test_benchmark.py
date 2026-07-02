@@ -26,6 +26,7 @@ Runs fully offline (hashing/tfidf encoders, no torch, no network) in a few
 seconds. Excluded from the default CI test job via ``-m "not quality"``; the
 dedicated CI quality job runs ``-m quality``.
 """
+
 from __future__ import annotations
 
 import json
@@ -57,11 +58,15 @@ def _benchmark_task():
 def _benchmark_config(encoder_kind: str) -> PipelineConfig:
     cfg = PipelineConfig(candidate_top_n=8)
     cfg.encoder.kind = encoder_kind
-    cfg.training = TrainingConfig(n_folds=4, target_precision=0.85,
-                                  per_class_min_support=100)
-    cfg.fusion = FusionConfig(xgb_params={
-        "n_estimators": 60, "max_depth": 4, "n_jobs": 1, "random_state": 0,
-    })
+    cfg.training = TrainingConfig(n_folds=4, target_precision=0.85, per_class_min_support=100)
+    cfg.fusion = FusionConfig(
+        xgb_params={
+            "n_estimators": 60,
+            "max_depth": 4,
+            "n_jobs": 1,
+            "random_state": 0,
+        }
+    )
     cfg.retrieval = RetrievalConfig(k_neighbors=10)
     return cfg
 

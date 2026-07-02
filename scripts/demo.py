@@ -13,6 +13,7 @@ trivial) — only that every component fits together and runs.
 
 Requires: numpy, pandas, scikit-learn, scipy, xgboost (no network, no torch).
 """
+
 from __future__ import annotations
 
 import logging

@@ -9,6 +9,7 @@ Covers:
     and yields a finite CoverageReport;
   - InferencePipeline.predict([]) returns [] (re-confirmed after T22 changes).
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -28,12 +29,20 @@ from tests._doubles import HashingEncoder, make_synthetic
 def _cfg() -> PipelineConfig:
     cfg = PipelineConfig()
     cfg.training = TrainingConfig(
-        n_folds=3, random_state=0, use_per_fold_encoder=False,
-        target_precision=0.5, per_class_min_support=1,
+        n_folds=3,
+        random_state=0,
+        use_per_fold_encoder=False,
+        target_precision=0.5,
+        per_class_min_support=1,
     )
-    cfg.fusion = FusionConfig(xgb_params={
-        "n_estimators": 30, "max_depth": 3, "random_state": 0, "n_jobs": 1,
-    })
+    cfg.fusion = FusionConfig(
+        xgb_params={
+            "n_estimators": 30,
+            "max_depth": 3,
+            "random_state": 0,
+            "n_jobs": 1,
+        }
+    )
     cfg.retrieval = RetrievalConfig(k_neighbors=10)
     return cfg
 

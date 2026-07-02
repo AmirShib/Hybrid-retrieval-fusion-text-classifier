@@ -7,6 +7,7 @@ All tests run fully offline via HashingEncoder; no network access needed.
 The encoder save/load is handled by patching SentenceTransformerEncoder in
 the persistence module with HashingEncoder (same interface).
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -18,7 +19,6 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from text_classifier import LabeledItem, LabelSpace
 from text_classifier.application.inference import InferencePipeline
 from text_classifier.application.training import TrainingPipeline
 from text_classifier.config import (
@@ -38,9 +38,10 @@ from tests._doubles import HashingEncoder, make_synthetic
 # Config + fixtures
 # ---------------------------------------------------------------------------
 
+
 def _e2e_cfg() -> PipelineConfig:
     cfg = PipelineConfig()
-    cfg.encoder.kind = "hashing"   # offline encoder via the registry seam (T23)
+    cfg.encoder.kind = "hashing"  # offline encoder via the registry seam (T23)
     cfg.training = TrainingConfig(
         n_folds=3,
         random_state=0,
@@ -48,9 +49,14 @@ def _e2e_cfg() -> PipelineConfig:
         target_precision=0.5,
         per_class_min_support=1,
     )
-    cfg.fusion = FusionConfig(xgb_params={
-        "n_estimators": 30, "max_depth": 3, "random_state": 0, "n_jobs": 1,
-    })
+    cfg.fusion = FusionConfig(
+        xgb_params={
+            "n_estimators": 30,
+            "max_depth": 3,
+            "random_state": 0,
+            "n_jobs": 1,
+        }
+    )
     cfg.retrieval = RetrievalConfig(k_neighbors=10)
     return cfg
 
@@ -85,6 +91,7 @@ def loaded_artifacts(saved_dir):
 # Train → report
 # ---------------------------------------------------------------------------
 
+
 class TestTrainReport:
     def test_coverage_in_unit_interval(self, trained):
         _, report, *_ = trained
@@ -116,7 +123,9 @@ class TestTrainReport:
     def test_abstention_does_not_hurt_accepted_accuracy(self, trained):
         """accuracy_on_accepted ≥ accuracy_if_no_abstain (abstention should help or be neutral)."""
         _, report, *_ = trained
-        if not np.isnan(report.accuracy_on_accepted) and not np.isnan(report.accuracy_if_no_abstain):
+        if not np.isnan(report.accuracy_on_accepted) and not np.isnan(
+            report.accuracy_if_no_abstain
+        ):
             assert report.accuracy_on_accepted >= report.accuracy_if_no_abstain - 1e-9
 
     def test_determinism(self):
@@ -133,6 +142,7 @@ class TestTrainReport:
 # ---------------------------------------------------------------------------
 # Persistence round-trip
 # ---------------------------------------------------------------------------
+
 
 class TestPersistence:
     def test_expected_files_exist(self, saved_dir):
@@ -182,15 +192,16 @@ class TestPersistence:
         sample_texts = [it.text for it in items[:10]]
         orig_preds = InferencePipeline(artifacts).predict(sample_texts)
         load_preds = InferencePipeline(loaded_artifacts).predict(sample_texts)
-        for o, l in zip(orig_preds, load_preds):
-            assert o.top_key == l.top_key
-            assert o.abstained == l.abstained
-            assert abs(o.confidence - l.confidence) < 1e-5
+        for orig, loaded in zip(orig_preds, load_preds):
+            assert orig.top_key == loaded.top_key
+            assert orig.abstained == loaded.abstained
+            assert abs(orig.confidence - loaded.confidence) < 1e-5
 
 
 # ---------------------------------------------------------------------------
 # Inference contract
 # ---------------------------------------------------------------------------
+
 
 class TestInferenceContract:
     def test_one_prediction_per_input(self, trained):
@@ -224,10 +235,12 @@ class TestInferenceContract:
         """When the feature assembler surfaces no candidates, predict returns abstained."""
         artifacts, *_ = trained
         import pandas as pd
+
         empty_df = pd.DataFrame(columns=FEATURE_NAMES)
         # Patch assemble to return an empty frame, forcing the no-candidate code path.
-        with patch("text_classifier.application.inference.FeatureAssembler.assemble",
-                   return_value=empty_df):
+        with patch(
+            "text_classifier.application.inference.FeatureAssembler.assemble", return_value=empty_df
+        ):
             preds = InferencePipeline(artifacts).predict(["any text"])
         assert len(preds) == 1
         assert preds[0].abstained is True
@@ -254,6 +267,7 @@ class TestInferenceContract:
 # ---------------------------------------------------------------------------
 # Config serialization
 # ---------------------------------------------------------------------------
+
 
 class TestEncoderBackends:
     """T24 — the whole pipeline trains/saves/loads/predicts over multiple
@@ -304,13 +318,24 @@ class TestFusionBackends:
         label_space, items = make_synthetic(n_classes=6, per_class=15, seed=13)
         cfg = _e2e_cfg()  # encoder kind="hashing"
         if fusion_kind == "lightgbm":
-            cfg.fusion = FusionConfig(kind="lightgbm", params={
-                "n_estimators": 20, "max_depth": 3, "random_state": 0, "verbosity": -1,
-            })
+            cfg.fusion = FusionConfig(
+                kind="lightgbm",
+                params={
+                    "n_estimators": 20,
+                    "max_depth": 3,
+                    "random_state": 0,
+                    "verbosity": -1,
+                },
+            )
         elif fusion_kind == "xgbranker":
-            cfg.fusion = FusionConfig(kind="xgbranker", params={
-                "n_estimators": 20, "max_depth": 3, "random_state": 0,
-            })
+            cfg.fusion = FusionConfig(
+                kind="xgbranker",
+                params={
+                    "n_estimators": 20,
+                    "max_depth": 3,
+                    "random_state": 0,
+                },
+            )
         # else: keep the default xgboost fusion from _e2e_cfg
 
         enc = HashingEncoder(dim=64)
@@ -454,10 +479,15 @@ def test_training_is_deterministic_end_to_end():
 
     def run():
         cfg = _e2e_cfg()
-        cfg.fusion = FusionConfig(xgb_params={
-            "n_estimators": 30, "max_depth": 3, "subsample": 0.5,
-            "colsample_bytree": 0.5, "n_jobs": 1,
-        })
+        cfg.fusion = FusionConfig(
+            xgb_params={
+                "n_estimators": 30,
+                "max_depth": 3,
+                "subsample": 0.5,
+                "colsample_bytree": 0.5,
+                "n_jobs": 1,
+            }
+        )
         enc = HashingEncoder(dim=64)
         return TrainingPipeline(cfg, shared_encoder=enc).run(items, label_space)
 

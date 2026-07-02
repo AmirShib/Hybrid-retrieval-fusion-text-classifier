@@ -6,6 +6,7 @@ round-trip, registry wiring, and the per-fold leakage rule for corpus fitting.
 
 All tests run offline (sklearn only, no torch, no download).
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -44,8 +45,8 @@ def test_encode_shape_dtype_and_unit_norm():
 def test_shared_tokens_score_higher_than_disjoint():
     enc = _fitted()
     a = enc.encode(["apple banana"])[0]
-    shared = enc.encode(["apple date"])[0]      # shares 'apple'
-    disjoint = enc.encode(["fig grape"])[0]      # no overlap
+    shared = enc.encode(["apple date"])[0]  # shares 'apple'
+    disjoint = enc.encode(["fig grape"])[0]  # no overlap
     assert float(a @ shared) > float(a @ disjoint)
 
 
@@ -86,7 +87,7 @@ def test_save_load_roundtrip_identical(tmp_path):
 # --------------------------------------------------------------------------- #
 def test_registered_under_tfidf_and_corpus_dependent():
     cfg = EncoderConfig(kind="tfidf")
-    built = build_encoder(cfg)            # unfitted instance from the registry
+    built = build_encoder(cfg)  # unfitted instance from the registry
     assert isinstance(built, TfidfEncoder)
     assert encoder_is_corpus_dependent(cfg) is True
 
@@ -112,7 +113,7 @@ def test_fold_vocabulary_excludes_held_out_tokens():
     held_out = LabeledItem("uniqueheldouttoken something", "b")
 
     enc = fit_encoder(cfg, train_items, ls)  # train rows only — held_out excluded
-    vocab = enc._vectorizer.vocabulary_       # type: ignore[attr-defined]
+    vocab = enc._vectorizer.vocabulary_  # type: ignore[attr-defined]
     assert "uniqueheldouttoken" not in vocab
     # The held-out item still encodes (to a finite vector) against the train vocab.
     v = enc.encode([held_out.text])[0]

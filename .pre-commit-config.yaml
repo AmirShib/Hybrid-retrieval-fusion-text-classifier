@@ -1,0 +1,20 @@
+# Lint + type gate (T51). Install with: pip install .[dev] && pre-commit install
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.8
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  # mypy runs from the project environment (language: system), not an isolated
+  # pre-commit env: it needs the real numpy/pandas/xgboost installed to resolve
+  # imports the same way CI does. `pip install .[dev]` provides mypy itself.
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (text_classifier)
+        entry: python -m mypy text_classifier
+        language: system
+        pass_filenames: false
+        types: [python]

@@ -12,6 +12,7 @@ Usage:
 directory plus `evaluation.json` and `model_card.md` summarizing held-out
 performance.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -23,25 +24,40 @@ from ._common import add_logging_arg, configure_logging, read_items, read_label_
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("--items", required=True)
     p.add_argument("--classes", required=True)
     p.add_argument("--out", required=True)
-    p.add_argument("--encoder-kind", default="sentence-transformers",
-                   help="encoder backend (registry key): 'sentence-transformers' "
-                        "(default), 'tfidf' (torch-free, air-gapped), or 'hashing' "
-                        "(dependency-free baseline / smoke test)")
-    p.add_argument("--encoder", default="sentence-transformers/all-MiniLM-L6-v2",
-                   help="model name/path for the sentence-transformers encoder; "
-                        "ignored by corpus-fitted encoders such as tfidf")
+    p.add_argument(
+        "--encoder-kind",
+        default="sentence-transformers",
+        help="encoder backend (registry key): 'sentence-transformers' "
+        "(default), 'tfidf' (torch-free, air-gapped), or 'hashing' "
+        "(dependency-free baseline / smoke test)",
+    )
+    p.add_argument(
+        "--encoder",
+        default="sentence-transformers/all-MiniLM-L6-v2",
+        help="model name/path for the sentence-transformers encoder; "
+        "ignored by corpus-fitted encoders such as tfidf",
+    )
     p.add_argument("--folds", type=int, default=5)
-    p.add_argument("--target-precision", type=float, default=0.95,
-                   help="target accuracy on accepted items; the threshold is tuned "
-                        "for max coverage subject to this")
+    p.add_argument(
+        "--target-precision",
+        type=float,
+        default=0.95,
+        help="target accuracy on accepted items; the threshold is tuned "
+        "for max coverage subject to this",
+    )
     p.add_argument("--candidate-top-n", type=int, default=10)
     p.add_argument("--k-neighbors", type=int, default=20)
-    p.add_argument("--per-fold-encoder", action="store_true",
-                   help="rigorous (expensive): fine-tune a fresh encoder per fold")
+    p.add_argument(
+        "--per-fold-encoder",
+        action="store_true",
+        help="rigorous (expensive): fine-tune a fresh encoder per fold",
+    )
     p.add_argument("--text-col", default="text", help="items.csv text column")
     p.add_argument("--label-col", default="label", help="items.csv label column")
     p.add_argument("--key-col", default="key", help="classes.csv key column")
@@ -64,8 +80,11 @@ def main() -> None:
     cfg.encoder.kind = args.encoder_kind
     cfg.encoder.model_name_or_path = args.encoder
     if enc_spec.corpus_dependent:
-        logging.info("encoder kind %r is corpus-fitted; --encoder=%r is ignored",
-                     args.encoder_kind, args.encoder)
+        logging.info(
+            "encoder kind %r is corpus-fitted; --encoder=%r is ignored",
+            args.encoder_kind,
+            args.encoder,
+        )
     cfg.retrieval.k_neighbors = args.k_neighbors
     cfg.training.n_folds = args.folds
     cfg.training.target_precision = args.target_precision

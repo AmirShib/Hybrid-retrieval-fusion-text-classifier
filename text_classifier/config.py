@@ -1,6 +1,7 @@
 """Configuration objects. Plain dataclasses so they serialize cleanly to JSON
 and can be version-controlled alongside a trained model directory.
 """
+
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
@@ -9,7 +10,7 @@ from typing import Any, Dict, List, Optional
 
 @dataclass
 class EncoderConfig:
-    kind: str = "sentence-transformers"   # registry key (see infrastructure/registry.py)
+    kind: str = "sentence-transformers"  # registry key (see infrastructure/registry.py)
     model_name_or_path: str = "sentence-transformers/all-MiniLM-L6-v2"
     encode_batch_size: int = 64
     device: Optional[str] = None
@@ -31,36 +32,38 @@ class RetrievalConfig:
     k1: float = 1.5
     b: float = 0.75
     bm25_token_kwargs: Dict[str, Any] = field(default_factory=lambda: {"stop_words": "english"})
-    dense_chunk: int = 256       # query chunking for kNN matmuls
-    feature_chunk: int = 4096    # query chunking for feature assembly
+    dense_chunk: int = 256  # query chunking for kNN matmuls
+    feature_chunk: int = 4096  # query chunking for feature assembly
 
 
 @dataclass
 class FusionConfig:
-    kind: str = "xgboost"   # registry key (see infrastructure/registry.py)
-    xgb_params: Dict[str, Any] = field(default_factory=lambda: {
-        "n_estimators": 600,
-        "max_depth": 6,
-        "learning_rate": 0.05,
-        "subsample": 0.8,
-        "colsample_bytree": 0.8,
-        "min_child_weight": 5.0,
-        "reg_lambda": 1.0,
-        "tree_method": "hist",
-        "eval_metric": "logloss",
-        "n_jobs": -1,
-        # Row/column subsampling draws from an RNG; an explicit seed keeps two
-        # identical training runs identical (scores, thresholds, coverage).
-        "random_state": 0,
-    })
-    auto_scale_pos_weight: bool = True   # set scale_pos_weight = n_neg / n_pos at fit time
+    kind: str = "xgboost"  # registry key (see infrastructure/registry.py)
+    xgb_params: Dict[str, Any] = field(
+        default_factory=lambda: {
+            "n_estimators": 600,
+            "max_depth": 6,
+            "learning_rate": 0.05,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "min_child_weight": 5.0,
+            "reg_lambda": 1.0,
+            "tree_method": "hist",
+            "eval_metric": "logloss",
+            "n_jobs": -1,
+            # Row/column subsampling draws from an RNG; an explicit seed keeps two
+            # identical training runs identical (scores, thresholds, coverage).
+            "random_state": 0,
+        }
+    )
+    auto_scale_pos_weight: bool = True  # set scale_pos_weight = n_neg / n_pos at fit time
     # Generic params block read by non-xgboost backends (e.g. LightGBM in T41).
     params: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class CalibrationConfig:
-    kind: str = "isotonic"   # registry key: "isotonic" | "platt" | "beta"
+    kind: str = "isotonic"  # registry key: "isotonic" | "platt" | "beta"
     params: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -69,7 +72,7 @@ class TrainingConfig:
     n_folds: int = 5
     target_precision: float = 0.95
     per_class_min_support: int = 100
-    use_per_fold_encoder: bool = False   # True = rigorous (refit encoder per fold), expensive
+    use_per_fold_encoder: bool = False  # True = rigorous (refit encoder per fold), expensive
     random_state: int = 0
 
     def fold_roles(self) -> Dict[str, List[int]]:
@@ -99,25 +102,54 @@ class PipelineConfig:
         checks = [
             # fold_roles() needs >=1 train fold + 1 calibration + 1 test; with
             # n_folds=2 the fusion training set is silently empty.
-            ("training.n_folds", self.training.n_folds, self.training.n_folds >= 3,
-             ">= 3 (one train fold + one calibration fold + one test fold)"),
-            ("training.target_precision", self.training.target_precision,
-             0.0 < self.training.target_precision <= 1.0, "in (0, 1]"),
-            ("training.per_class_min_support", self.training.per_class_min_support,
-             self.training.per_class_min_support >= 1, ">= 1"),
+            (
+                "training.n_folds",
+                self.training.n_folds,
+                self.training.n_folds >= 3,
+                ">= 3 (one train fold + one calibration fold + one test fold)",
+            ),
+            (
+                "training.target_precision",
+                self.training.target_precision,
+                0.0 < self.training.target_precision <= 1.0,
+                "in (0, 1]",
+            ),
+            (
+                "training.per_class_min_support",
+                self.training.per_class_min_support,
+                self.training.per_class_min_support >= 1,
+                ">= 1",
+            ),
             ("candidate_top_n", self.candidate_top_n, self.candidate_top_n >= 1, ">= 1"),
-            ("retrieval.k_neighbors", self.retrieval.k_neighbors,
-             self.retrieval.k_neighbors >= 1, ">= 1"),
-            ("retrieval.dense_chunk", self.retrieval.dense_chunk,
-             self.retrieval.dense_chunk >= 1, ">= 1 (a zero chunk never advances)"),
-            ("retrieval.feature_chunk", self.retrieval.feature_chunk,
-             self.retrieval.feature_chunk >= 1, ">= 1 (a zero chunk never advances)"),
-            ("encoder.encode_batch_size", self.encoder.encode_batch_size,
-             self.encoder.encode_batch_size >= 1, ">= 1"),
+            (
+                "retrieval.k_neighbors",
+                self.retrieval.k_neighbors,
+                self.retrieval.k_neighbors >= 1,
+                ">= 1",
+            ),
+            (
+                "retrieval.dense_chunk",
+                self.retrieval.dense_chunk,
+                self.retrieval.dense_chunk >= 1,
+                ">= 1 (a zero chunk never advances)",
+            ),
+            (
+                "retrieval.feature_chunk",
+                self.retrieval.feature_chunk,
+                self.retrieval.feature_chunk >= 1,
+                ">= 1 (a zero chunk never advances)",
+            ),
+            (
+                "encoder.encode_batch_size",
+                self.encoder.encode_batch_size,
+                self.encoder.encode_batch_size >= 1,
+                ">= 1",
+            ),
         ]
         problems = [
             f"{name} must be {constraint}; got {value!r}"
-            for name, value, ok, constraint in checks if not ok
+            for name, value, ok, constraint in checks
+            if not ok
         ]
         if problems:
             raise ValueError("invalid PipelineConfig: " + "; ".join(problems))

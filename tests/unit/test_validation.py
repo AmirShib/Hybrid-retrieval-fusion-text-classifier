@@ -12,6 +12,7 @@ sklearn traceback from deep inside the pipeline. This module pins that contract:
 All tests run fully offline: the validation under test fires *before* any
 encoder, index, or model work, so no real model or network access is needed.
 """
+
 from __future__ import annotations
 
 import json

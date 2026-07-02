@@ -5,6 +5,7 @@ a wrong/missing column and a malformed value — into a clear, single-line error
 at the boundary, instead of a deep pandas/numpy traceback from inside the
 pipeline.
 """
+
 from __future__ import annotations
 
 import logging
@@ -25,7 +26,8 @@ def configure_logging(level: str = "INFO") -> None:
 
 def add_logging_arg(parser) -> None:
     parser.add_argument(
-        "--log-level", default="INFO",
+        "--log-level",
+        default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="logging verbosity (default: INFO)",
     )
@@ -54,10 +56,12 @@ def read_label_space(path: str, key_col: str = "key", desc_col: str = "descripti
     df = _read_csv(path, "classes")
     _require_columns(df, [key_col, desc_col], path, "classes")
     try:
-        return LabelSpace([
-            ClassDefinition(str(k), str(d))
-            for k, d in zip(df[key_col].tolist(), df[desc_col].tolist())
-        ])
+        return LabelSpace(
+            [
+                ClassDefinition(str(k), str(d))
+                for k, d in zip(df[key_col].tolist(), df[desc_col].tolist())
+            ]
+        )
     except ValueError as exc:  # empty/duplicate keys, empty descriptions
         raise SystemExit(f"error: invalid classes in {path!r}: {exc}")
 
@@ -68,8 +72,8 @@ def read_items(path: str, text_col: str = "text", label_col: str = "label") -> L
     _require_columns(df, [text_col, label_col], path, "items")
     try:
         return [
-            LabeledItem(str(t), str(l))
-            for t, l in zip(df[text_col].tolist(), df[label_col].tolist())
+            LabeledItem(str(text), str(label))
+            for text, label in zip(df[text_col].tolist(), df[label_col].tolist())
         ]
     except ValueError as exc:  # empty text/label
         raise SystemExit(f"error: invalid items in {path!r}: {exc}")

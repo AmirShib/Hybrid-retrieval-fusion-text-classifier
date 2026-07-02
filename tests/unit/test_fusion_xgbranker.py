@@ -6,6 +6,7 @@ T05 contract plus the groups plumbing and the widened fit signature.
 
 xgboost is a hard dependency, so these always run.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -78,8 +79,8 @@ def test_ranks_positive_above_half_of_negatives_in_group():
     wins, total = 0, 0
     start = 0
     for size in g:
-        block = raw[start:start + size]
-        labels = y[start:start + size]
+        block = raw[start : start + size]
+        labels = y[start : start + size]
         pos_score = block[labels == 1][0]
         negs = block[labels == 0]
         wins += int((pos_score > negs).sum())

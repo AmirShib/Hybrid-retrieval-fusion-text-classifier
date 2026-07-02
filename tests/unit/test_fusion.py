@@ -2,6 +2,7 @@
 
 Covers XGBoostFusionModel and IsotonicCalibrator in infrastructure/fusion.py.
 """
+
 import numpy as np
 import pytest
 
@@ -65,10 +66,12 @@ class TestXGBoostFusionModel:
     def test_auto_scale_pos_weight_set(self):
         """With imbalanced data (1:20), scale_pos_weight ≈ 20."""
         n_pos, n_neg = 10, 200
-        X = np.vstack([
-            np.ones((n_pos, 2), dtype=np.float32),
-            np.zeros((n_neg, 2), dtype=np.float32),
-        ])
+        X = np.vstack(
+            [
+                np.ones((n_pos, 2), dtype=np.float32),
+                np.zeros((n_neg, 2), dtype=np.float32),
+            ]
+        )
         y = np.array([1] * n_pos + [0] * n_neg, dtype=np.int32)
         m = XGBoostFusionModel(_FAST_PARAMS, auto_scale_pos_weight=True)
         m.fit(X, y)
@@ -190,8 +193,11 @@ class TestIsotonicCalibrator:
 # Row/column subsampling engages the RNG; random_state deliberately absent so
 # the backend's setdefault is what makes the runs reproducible.
 _UNSEEDED_STOCHASTIC = {
-    "n_estimators": 30, "max_depth": 3,
-    "subsample": 0.5, "colsample_bytree": 0.5, "n_jobs": 1,
+    "n_estimators": 30,
+    "max_depth": 3,
+    "subsample": 0.5,
+    "colsample_bytree": 0.5,
+    "n_jobs": 1,
 }
 
 

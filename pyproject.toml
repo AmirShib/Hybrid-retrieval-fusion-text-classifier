@@ -23,6 +23,8 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest", "pytest-cov"]
+# Lint + type tooling (T51); versions match .pre-commit-config.yaml / CI.
+dev = ["ruff==0.15.8", "mypy==1.19.1", "pre-commit"]
 # Optional alternative fusion backend (FusionConfig.kind="lightgbm"). Not a hard
 # dependency: air-gapped hosts may not have it, and the suite skips its tests when
 # it is absent.
@@ -45,3 +47,29 @@ text_classifier = ["py.typed"]
 markers = [
     "quality: quality-regression benchmark (metric floors); CI runs these in a dedicated job",
 ]
+
+[tool.ruff]
+# Matches the codebase's established style; ruff's default rule set (E4/E7/E9/F)
+# keeps the gate about correctness, not taste.
+line-length = 100
+
+[tool.mypy]
+python_version = "3.10"
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
+
+# The ML backends ship no type stubs; silence only the import errors, not the
+# checking of our own code that uses them.
+[[tool.mypy.overrides]]
+module = [
+    "xgboost.*",
+    "lightgbm.*",
+    "sentence_transformers.*",
+    "sklearn.*",
+    "scipy.*",
+    "joblib.*",
+    "pandas.*",
+]
+ignore_missing_imports = true

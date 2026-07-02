@@ -1,4 +1,5 @@
 """Infrastructure layer: concrete adapters implementing the domain ports."""
+
 from .encoder import (
     HashingEncoder,
     SentenceTransformerEncoder,
@@ -36,14 +37,32 @@ from .retrieval import (
 )
 
 __all__ = [
-    "SentenceTransformerEncoder", "TfidfEncoder", "HashingEncoder",
-    "train_encoder", "fit_tfidf_encoder",
-    "BM25Index", "DenseRetrieverAdapter", "DenseState", "LexicalRetrieverAdapter",
-    "XGBoostFusionModel", "LightGBMFusionModel", "XGBRankerFusionModel",
-    "IsotonicCalibrator", "PlattCalibrator", "BetaCalibrator",
-    "ArtifactRepository", "DeployedArtifacts",
-    "EncoderSpec", "FusionSpec", "CalibratorSpec",
-    "build_encoder", "build_fusion", "build_calibrator",
-    "encoder_is_corpus_dependent", "fit_encoder",
-    "register_encoder", "register_fusion", "register_calibrator",
+    "SentenceTransformerEncoder",
+    "TfidfEncoder",
+    "HashingEncoder",
+    "train_encoder",
+    "fit_tfidf_encoder",
+    "BM25Index",
+    "DenseRetrieverAdapter",
+    "DenseState",
+    "LexicalRetrieverAdapter",
+    "XGBoostFusionModel",
+    "LightGBMFusionModel",
+    "XGBRankerFusionModel",
+    "IsotonicCalibrator",
+    "PlattCalibrator",
+    "BetaCalibrator",
+    "ArtifactRepository",
+    "DeployedArtifacts",
+    "EncoderSpec",
+    "FusionSpec",
+    "CalibratorSpec",
+    "build_encoder",
+    "build_fusion",
+    "build_calibrator",
+    "encoder_is_corpus_dependent",
+    "fit_encoder",
+    "register_encoder",
+    "register_fusion",
+    "register_calibrator",
 ]

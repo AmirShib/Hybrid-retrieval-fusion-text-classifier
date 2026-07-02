@@ -8,6 +8,7 @@ index-out-of-bounds crash.
 
 All tests run offline via HashingEncoder.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -73,8 +74,13 @@ class TestSingleClass:
 
     def _assemble(self, q):
         return _assembler(self.ls).assemble(
-            self.texts, q, self.dense, self.lex, _cfg().k_neighbors,
-            query_ids=[0, 1], query_labels=self.labels,
+            self.texts,
+            q,
+            self.dense,
+            self.lex,
+            _cfg().k_neighbors,
+            query_ids=[0, 1],
+            query_labels=self.labels,
         )
 
     def test_training_with_single_class_raises_clear_error(self):
@@ -93,11 +99,13 @@ class TestSingleClass:
 class TestZeroExampleClass:
     def setup_method(self):
         # class index 2 ("empty") is declared but has no examples.
-        self.ls = LabelSpace([
-            ClassDefinition("a", "alpha apple"),
-            ClassDefinition("b", "beta banana"),
-            ClassDefinition("empty", "gamma grape never seen"),
-        ])
+        self.ls = LabelSpace(
+            [
+                ClassDefinition("a", "alpha apple"),
+                ClassDefinition("b", "beta banana"),
+                ClassDefinition("empty", "gamma grape never seen"),
+            ]
+        )
         self.texts = ["apple", "apple fruit", "banana"]
         self.labels = np.array([0, 0, 1])
         self.dense = DenseRetrieverAdapter.build(_enc(), self.texts, self.labels, self.ls, _cfg())
@@ -118,8 +126,13 @@ class TestZeroExampleClass:
     def test_features_mark_empty_class_missing(self):
         q = _enc().encode(self.texts)
         feats = _assembler(self.ls).assemble(
-            self.texts, q, self.dense, self.lex, _cfg().k_neighbors,
-            query_ids=[0, 1, 2], query_labels=self.labels,
+            self.texts,
+            q,
+            self.dense,
+            self.lex,
+            _cfg().k_neighbors,
+            query_ids=[0, 1, 2],
+            query_labels=self.labels,
         )
         empty_rows = feats[feats["candidate"] == 2]
         assert len(empty_rows) > 0  # surfaces as a candidate via description sim
@@ -154,8 +167,13 @@ class TestKLargerThanCorpus:
         dense = DenseRetrieverAdapter.build(_enc(), texts, labels, ls, _cfg())
         lex = LexicalRetrieverAdapter.build(texts, labels, ls, _cfg())
         feats = _assembler(ls).assemble(
-            texts, _enc().encode(texts), dense, lex, k_neighbors=50,
-            query_ids=[0, 1, 2], query_labels=labels,
+            texts,
+            _enc().encode(texts),
+            dense,
+            lex,
+            k_neighbors=50,
+            query_ids=[0, 1, 2],
+            query_labels=labels,
         )
         assert len(feats) > 0
         assert not feats[FEATURE_NAMES].isnull().all().all()  # not an all-NaN frame
@@ -188,8 +206,13 @@ class TestEmptyBatch:
 
     def test_feature_assembler_empty_batch(self):
         feats = _assembler(self.ls).assemble(
-            [], np.zeros((0, DIM), dtype=np.float32), self.dense, self.lex,
-            _cfg().k_neighbors, query_ids=[], query_labels=None,
+            [],
+            np.zeros((0, DIM), dtype=np.float32),
+            self.dense,
+            self.lex,
+            _cfg().k_neighbors,
+            query_ids=[],
+            query_labels=None,
         )
         assert len(feats) == 0
         assert list(feats.columns) == FEATURE_NAMES

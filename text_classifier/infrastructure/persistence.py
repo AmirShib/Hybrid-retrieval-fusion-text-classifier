@@ -10,6 +10,7 @@ Layout:
     <dir>/calibrator.pkl   calibrator (isotonic | platt | beta)
     <dir>/meta.json        label space, thresholds, config, feature schema
 """
+
 from __future__ import annotations
 
 import json
@@ -51,6 +52,7 @@ class DeployedArtifacts:
     """Everything the inference pipeline needs, in memory. Component fields are
     typed against the ports, not concrete classes, so any registered backend
     fits."""
+
     config: PipelineConfig
     label_space: LabelSpace
     encoder: TextEncoder
@@ -79,8 +81,11 @@ class ArtifactRepository:
         s = artifacts.dense.state
         np.savez_compressed(
             os.path.join(directory, "dense.npz"),
-            example_emb=s.example_emb, example_labels=s.example_labels,
-            prototypes=s.prototypes, description_emb=s.description_emb, class_freq=s.class_freq,
+            example_emb=s.example_emb,
+            example_labels=s.example_labels,
+            prototypes=s.prototypes,
+            description_emb=s.description_emb,
+            class_freq=s.class_freq,
         )
         with open(os.path.join(directory, "lexical.pkl"), "wb") as fh:
             pickle.dump(artifacts.lexical, fh)
@@ -115,8 +120,7 @@ class ArtifactRepository:
         meta_path = os.path.join(directory, "meta.json")
         if not os.path.isfile(meta_path):
             raise FileNotFoundError(
-                f"meta.json not found in model directory {directory!r} "
-                f"(expected at {meta_path!r})"
+                f"meta.json not found in model directory {directory!r} (expected at {meta_path!r})"
             )
         with open(meta_path) as fh:
             meta = json.load(fh)
@@ -125,7 +129,9 @@ class ArtifactRepository:
         self._check_package_version(meta.get("package_version"))
 
         config = PipelineConfig.from_dict(meta["config"])
-        label_space = LabelSpace([ClassDefinition(c["key"], c["description"]) for c in meta["classes"]])
+        label_space = LabelSpace(
+            [ClassDefinition(c["key"], c["description"]) for c in meta["classes"]]
+        )
 
         # Dispatch each swappable component through the registry by its recorded
         # kind (defaulting for legacy dirs that predate the `components` block).
@@ -138,8 +144,13 @@ class ArtifactRepository:
 
         npz = np.load(os.path.join(directory, "dense.npz"))
         dense = DenseRetrieverAdapter(
-            DenseState(npz["example_emb"], npz["example_labels"], npz["prototypes"],
-                       npz["description_emb"], npz["class_freq"]),
+            DenseState(
+                npz["example_emb"],
+                npz["example_labels"],
+                npz["prototypes"],
+                npz["description_emb"],
+                npz["class_freq"],
+            ),
             chunk=config.retrieval.dense_chunk,
         )
         with open(os.path.join(directory, "lexical.pkl"), "rb") as fh:
@@ -152,7 +163,9 @@ class ArtifactRepository:
             global_threshold=float(meta["abstention"]["global_threshold"]),
             per_class={int(k): float(v) for k, v in meta["abstention"]["per_class"].items()},
         )
-        return DeployedArtifacts(config, label_space, encoder, dense, lexical, fusion, calibrator, abstention)
+        return DeployedArtifacts(
+            config, label_space, encoder, dense, lexical, fusion, calibrator, abstention
+        )
 
     @staticmethod
     def _components_from_meta(meta: Dict) -> Dict[str, str]:
@@ -190,7 +203,8 @@ class ArtifactRepository:
                 "model was trained with text-classifier %s but the current "
                 "version is %s; behavior should be unchanged (the feature schema "
                 "is checked separately), but verify if results look off.",
-                saved_version, __version__,
+                saved_version,
+                __version__,
             )
 
     @staticmethod

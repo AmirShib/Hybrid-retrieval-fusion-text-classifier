@@ -5,6 +5,7 @@ demo, the CI wheel-install smoke test, and anyone evaluating the package can
 generate a small, reproducible, deliberately imbalanced dataset without a real
 corpus or any network access.
 """
+
 from __future__ import annotations
 
 from typing import List, Tuple
@@ -49,10 +50,12 @@ def make_synthetic(
     items: List[LabeledItem] = []
     for c in range(n_classes):
         theme = rng.choice(vocab, size=8, replace=False)
-        definitions.append(ClassDefinition(
-            key=f"CLS{c:03d}",
-            description=f"class about {' '.join(theme[:4])} and related {' '.join(theme[4:])}",
-        ))
+        definitions.append(
+            ClassDefinition(
+                key=f"CLS{c:03d}",
+                description=f"class about {' '.join(theme[:4])} and related {' '.join(theme[4:])}",
+            )
+        )
         count = per_class if c % 7 else max(8, per_class // 5)
         for _ in range(count):
             k = int(rng.integers(4, 9))
