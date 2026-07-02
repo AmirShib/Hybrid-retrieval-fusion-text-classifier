@@ -200,3 +200,84 @@ class TestArtifactRepositoryValidation:
         (tmp_path / "meta.json").write_text(json.dumps(meta))
         with pytest.raises(ValueError, match="column order differs"):
             ArtifactRepository().load(str(tmp_path))
+
+
+# --------------------------------------------------------------------------- #
+# Part E — PipelineConfig.validate (T27)
+# --------------------------------------------------------------------------- #
+class TestConfigValidation:
+    def test_default_config_is_valid(self):
+        PipelineConfig().validate()  # must not raise
+
+    @pytest.mark.parametrize("n_folds", [1, 2])
+    def test_too_few_folds_rejected(self, n_folds):
+        cfg = PipelineConfig()
+        cfg.training.n_folds = n_folds
+        with pytest.raises(ValueError, match="n_folds") as exc:
+            cfg.validate()
+        # The message explains the three fold roles, not just the bound.
+        assert "calibration" in str(exc.value) and "test" in str(exc.value)
+
+    def test_three_folds_is_the_boundary(self):
+        cfg = PipelineConfig()
+        cfg.training.n_folds = 3
+        cfg.validate()  # must not raise
+
+    @pytest.mark.parametrize(
+        "mutate, field_name",
+        [
+            (lambda c: setattr(c.training, "target_precision", 0.0), "target_precision"),
+            (lambda c: setattr(c.training, "target_precision", 1.5), "target_precision"),
+            (lambda c: setattr(c.training, "per_class_min_support", 0), "per_class_min_support"),
+            (lambda c: setattr(c, "candidate_top_n", 0), "candidate_top_n"),
+            (lambda c: setattr(c.retrieval, "k_neighbors", 0), "k_neighbors"),
+            (lambda c: setattr(c.retrieval, "dense_chunk", 0), "dense_chunk"),
+            (lambda c: setattr(c.retrieval, "feature_chunk", 0), "feature_chunk"),
+            (lambda c: setattr(c.encoder, "encode_batch_size", 0), "encode_batch_size"),
+        ],
+    )
+    def test_each_bound_rejected_naming_the_field(self, mutate, field_name):
+        cfg = PipelineConfig()
+        mutate(cfg)
+        with pytest.raises(ValueError, match=field_name) as exc:
+            cfg.validate()
+        assert "got" in str(exc.value)  # the received value is echoed back
+
+    @pytest.mark.parametrize(
+        "mutate",
+        [
+            lambda c: setattr(c.training, "target_precision", 1.0),
+            lambda c: setattr(c.training, "per_class_min_support", 1),
+            lambda c: setattr(c, "candidate_top_n", 1),
+            lambda c: setattr(c.retrieval, "k_neighbors", 1),
+            lambda c: setattr(c.retrieval, "dense_chunk", 1),
+            lambda c: setattr(c.retrieval, "feature_chunk", 1),
+            lambda c: setattr(c.encoder, "encode_batch_size", 1),
+        ],
+    )
+    def test_boundary_values_pass(self, mutate):
+        cfg = PipelineConfig()
+        mutate(cfg)
+        cfg.validate()  # must not raise
+
+    def test_multiple_problems_reported_together(self):
+        cfg = PipelineConfig()
+        cfg.training.n_folds = 2
+        cfg.retrieval.k_neighbors = 0
+        with pytest.raises(ValueError) as exc:
+            cfg.validate()
+        msg = str(exc.value)
+        assert "n_folds" in msg and "k_neighbors" in msg
+
+    def test_pipeline_rejects_bad_config_before_touching_the_encoder(self):
+        class _ExplodingEncoder:
+            def encode(self, texts):
+                raise AssertionError("encoder must not be reached with a bad config")
+
+        cfg = PipelineConfig()
+        cfg.training.n_folds = 2
+        pipe = TrainingPipeline(cfg, shared_encoder=_ExplodingEncoder())
+        items = [LabeledItem(f"item {i}", "a") for i in range(10)]
+        space = LabelSpace.from_pairs([("a", "class a"), ("b", "class b")])
+        with pytest.raises(ValueError, match="n_folds"):
+            pipe.run(items, space)

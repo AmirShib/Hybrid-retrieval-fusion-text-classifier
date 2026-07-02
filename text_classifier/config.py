@@ -87,6 +87,41 @@ class PipelineConfig:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     candidate_top_n: int = 10
 
+    def validate(self) -> None:
+        """Reject config values that produce silently broken runs or deep
+        framework tracebacks. Raises ``ValueError`` naming the field, the
+        received value, and the constraint.
+
+        Registry-key existence (encoder/fusion/calibrator ``kind``) is *not*
+        checked here: the registry already raises a good error at build time,
+        and this module must stay import-free of infrastructure.
+        """
+        checks = [
+            # fold_roles() needs >=1 train fold + 1 calibration + 1 test; with
+            # n_folds=2 the fusion training set is silently empty.
+            ("training.n_folds", self.training.n_folds, self.training.n_folds >= 3,
+             ">= 3 (one train fold + one calibration fold + one test fold)"),
+            ("training.target_precision", self.training.target_precision,
+             0.0 < self.training.target_precision <= 1.0, "in (0, 1]"),
+            ("training.per_class_min_support", self.training.per_class_min_support,
+             self.training.per_class_min_support >= 1, ">= 1"),
+            ("candidate_top_n", self.candidate_top_n, self.candidate_top_n >= 1, ">= 1"),
+            ("retrieval.k_neighbors", self.retrieval.k_neighbors,
+             self.retrieval.k_neighbors >= 1, ">= 1"),
+            ("retrieval.dense_chunk", self.retrieval.dense_chunk,
+             self.retrieval.dense_chunk >= 1, ">= 1 (a zero chunk never advances)"),
+            ("retrieval.feature_chunk", self.retrieval.feature_chunk,
+             self.retrieval.feature_chunk >= 1, ">= 1 (a zero chunk never advances)"),
+            ("encoder.encode_batch_size", self.encoder.encode_batch_size,
+             self.encoder.encode_batch_size >= 1, ">= 1"),
+        ]
+        problems = [
+            f"{name} must be {constraint}; got {value!r}"
+            for name, value, ok, constraint in checks if not ok
+        ]
+        if problems:
+            raise ValueError("invalid PipelineConfig: " + "; ".join(problems))
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
