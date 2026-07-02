@@ -102,6 +102,8 @@ class TrainingPipeline:
         surface as a cryptic numpy/pandas/sklearn traceback deep in the pipeline.
 
         Checks, in order:
+          0. the config itself is coherent (``PipelineConfig.validate``) — before
+             any data work, so a bad ``n_folds`` never reaches StratifiedKFold;
           1. the item list is non-empty;
           2. the label space has at least two classes (fusion needs negatives);
           3. every item label is defined in ``label_space``;
@@ -119,6 +121,8 @@ class TrainingPipeline:
         StratifiedKFold cannot do is split a class with fewer than ``n_folds``
         members, so that is the boundary we guard.
         """
+        self.cfg.validate()
+
         if not items:
             raise ValueError("TrainingPipeline.run requires a non-empty list of items")
 
