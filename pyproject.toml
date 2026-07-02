@@ -40,3 +40,8 @@ include = ["text_classifier*"]
 [tool.setuptools.package-data]
 # Ship the PEP 561 marker so downstream consumers get the package's type hints.
 text_classifier = ["py.typed"]
+
+[tool.pytest.ini_options]
+markers = [
+    "quality: quality-regression benchmark (metric floors); CI runs these in a dedicated job",
+]
