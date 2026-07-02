@@ -34,6 +34,9 @@ class XGBoostFusionModel(FusionModel):
         from xgboost import XGBClassifier
 
         params = dict(self._params)
+        # Deterministic by default: subsample/colsample draw from an RNG, and an
+        # unseeded run cannot be reproduced. An explicit user seed always wins.
+        params.setdefault("random_state", 0)
         if self._auto_spw:
             pos = float((y == 1).sum())
             neg = float((y == 0).sum())
@@ -80,6 +83,7 @@ class LightGBMFusionModel(FusionModel):
 
         params = dict(self._params)
         params.setdefault("verbosity", -1)
+        params.setdefault("random_state", 0)
         if self._auto_spw:
             pos = float((y == 1).sum())
             neg = float((y == 0).sum())
@@ -147,6 +151,7 @@ class XGBRankerFusionModel(FusionModel):
         X = np.asarray(X, dtype=np.float32)
         params = dict(self._params)
         params.setdefault("objective", "rank:pairwise")
+        params.setdefault("random_state", 0)
         self._model = XGBRanker(**params)
         self._model.fit(X, np.asarray(y), group=groups)
 

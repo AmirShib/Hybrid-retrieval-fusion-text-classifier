@@ -123,3 +123,23 @@ def test_fit_ignores_groups_kwarg():
     widened FusionModel.fit signature."""
     X, y = _separable_xy(n=100)
     LightGBMFusionModel(_FAST).fit(X, y, groups=None)  # no error
+
+
+# ---------------------------------------------------------------------------
+# Determinism (T26)
+# ---------------------------------------------------------------------------
+
+
+def test_unseeded_fits_deterministic():
+    """random_state absent from params -> setdefault seeds it; two fits agree."""
+    X, y = _separable_xy(n=200, nan_frac=0.1)
+    unseeded = {
+        "n_estimators": 30, "max_depth": 3, "verbosity": -1,
+        "bagging_fraction": 0.5, "bagging_freq": 1, "feature_fraction": 0.5,
+    }
+    runs = []
+    for _ in range(2):
+        m = LightGBMFusionModel(dict(unseeded))
+        m.fit(X, y)
+        runs.append(m.predict_proba(X))
+    np.testing.assert_array_equal(runs[0], runs[1])

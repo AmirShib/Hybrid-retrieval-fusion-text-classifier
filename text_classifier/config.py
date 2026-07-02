@@ -49,6 +49,9 @@ class FusionConfig:
         "tree_method": "hist",
         "eval_metric": "logloss",
         "n_jobs": -1,
+        # Row/column subsampling draws from an RNG; an explicit seed keeps two
+        # identical training runs identical (scores, thresholds, coverage).
+        "random_state": 0,
     })
     auto_scale_pos_weight: bool = True   # set scale_pos_weight = n_neg / n_pos at fit time
     # Generic params block read by non-xgboost backends (e.g. LightGBM in T41).
