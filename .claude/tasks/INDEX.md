@@ -127,4 +127,5 @@ existing one. T70 is the high-value capability; T71 is a design spike gated on i
 | T72 | Pluggable input/output formats (Parquet/JSONL/SQL/cloud) behind a `RecordSource`/`RecordSink` port | todo | T23 |
 | T73 | Richer labeled-evaluation analytics (confusion, aggregate scores, abstention quality, bootstrap CIs) | todo | T61 |
 | T74 | `--config` file for the CLIs: reach the full PipelineConfig without Python      | todo   | T60          |
-| T75 | DataFrame-native API (`predict_df`/`train_df`) + streaming infer (`--chunksize`) | todo  | T30          |
+| T75 | Frame-native API (interchange protocols, iterables) + streaming infer (`--chunksize`) | todo | T30    |
+| T76 | Numpy-only inference path: drop pandas from the hot loop — *gated on T34*       | todo   | T34, T75     |

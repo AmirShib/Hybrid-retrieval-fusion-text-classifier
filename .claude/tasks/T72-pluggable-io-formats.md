@@ -89,6 +89,9 @@ keyed off the output extension.
 
 ## Out of scope
 A generic connector framework (lazy datasets, schema registry). Streaming/chunked reads —
-training loads all items in memory to build indices anyway; chunked *inference* is a
-separate follow-up if a user needs it. Writing back to a DB table (read-from-DB,
-write-to-file is the v1 asymmetry; add a SQL sink later if asked).
+training loads all items in memory to build indices anyway; chunked *inference* is
+**T75** (`--chunksize`). In-memory framework interop (polars / HF datasets / torch
+datasets / Arrow interchange objects) is also **T75** — this ticket owns *files and
+storage*, T75 owns *objects already in memory*; together they cover "not everyone
+hands us a CSV". Writing back to a DB table (read-from-DB, write-to-file is the v1
+asymmetry; add a SQL sink later if asked).
