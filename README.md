@@ -89,6 +89,41 @@ Installing exposes three console commands — `text-classifier-train`,
 can equivalently run `python -m scripts.train` / `scripts.infer` /
 `text_classifier.cli.evaluate`.
 
+### Air-gapped / reproducible install
+
+`requirements.lock` pins the full transitive dependency tree (torch included)
+with sha256 hashes, resolved for the reference platform: **Linux x86_64,
+CPython 3.11**. On a connected host, build a wheelhouse:
+
+```bash
+pip download --require-hashes -r requirements.lock -d wheelhouse/
+pip wheel . --no-deps -w wheelhouse/     # the package itself
+```
+
+Move `wheelhouse/` to the air-gapped host, then install with no index access —
+`--require-hashes` guarantees the installed wheels are byte-identical to the
+ones that were tested:
+
+```bash
+pip install --no-index --find-links wheelhouse/ --require-hashes -r requirements.lock
+pip install --no-index --find-links wheelhouse/ --no-deps text-classifier
+```
+
+**Refresh policy.** The lock is refreshed deliberately, never implicitly:
+
+```bash
+uv pip compile pyproject.toml --generate-hashes --python-version 3.11 -o requirements.lock
+```
+
+then re-run the test suite and the quality benchmark before committing the
+diff. Heavy ML wheels (torch, xgboost) therefore only change versions when
+revalidated. The default resolution locks the standard (GPU-enabled) torch
+build; for a CPU-only deployment, compile with
+`--extra-index-url https://download.pytorch.org/whl/cpu` to lock the much
+smaller CPU wheels instead. A scheduled CI workflow (`lockfile.yml`) rebuilds
+the wheelhouse and performs the offline install monthly, so a yanked or
+re-uploaded wheel is noticed before deployment day.
+
 ## Usage
 
 Train (writes the model directory plus `evaluation.json` and `model_card.md`):
