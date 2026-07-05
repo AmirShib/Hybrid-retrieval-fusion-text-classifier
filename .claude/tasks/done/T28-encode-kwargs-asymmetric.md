@@ -1,6 +1,6 @@
 # T28 — Encode-time kwargs + asymmetric query/document encoding
 
-status: todo
+status: done
 tier: 2
 depends_on: T24
 

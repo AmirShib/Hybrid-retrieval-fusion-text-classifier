@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import pickle
-from typing import TYPE_CHECKING, Any, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -29,34 +30,110 @@ from ..domain import LabeledItem, LabelSpace, TextEncoder
 if TYPE_CHECKING:  # torch-free at runtime; the type is only for checkers
     from sentence_transformers import SentenceTransformer
 
+logger = logging.getLogger(__name__)
+
+
+def _encode_options(config: Optional[EncoderConfig]) -> Dict[str, Any]:
+    """Extract the encode-time settings an ``EncoderConfig`` carries, as the
+    keyword arguments ``SentenceTransformerEncoder`` accepts."""
+    if config is None:
+        return {}
+    return {
+        "encode_kwargs": config.encode_kwargs,
+        "query_prompt": config.query_prompt,
+        "document_prompt": config.document_prompt,
+        "query_prompt_name": config.query_prompt_name,
+        "document_prompt_name": config.document_prompt_name,
+    }
+
 
 class SentenceTransformerEncoder(TextEncoder):
-    """Adapter producing L2-normalized float32 embeddings."""
+    """Adapter producing L2-normalized float32 embeddings.
 
-    def __init__(self, model: "SentenceTransformer", batch_size: int = 64):
+    Supports asymmetric query/document encoding for instruction-tuned models
+    (E5/BGE/GTE...): a ``query_prompt``/``document_prompt`` literal prefix is
+    prepended per role, or a ``*_prompt_name`` selects a model-card prompt
+    (an explicit prompt wins over its prompt_name). ``encode_kwargs`` merge
+    into every ``model.encode(...)`` call, with user keys winning over our
+    defaults — except ``normalize_embeddings``/``convert_to_numpy``, which are
+    forced ``True``: L2-normalized numpy output (dot == cosine) is a
+    package-wide invariant and cannot be configured away.
+    """
+
+    _PROTECTED_ENCODE_KWARGS = ("normalize_embeddings", "convert_to_numpy")
+
+    def __init__(
+        self,
+        model: "SentenceTransformer",
+        batch_size: int = 64,
+        *,
+        encode_kwargs: Optional[Dict[str, Any]] = None,
+        query_prompt: Optional[str] = None,
+        document_prompt: Optional[str] = None,
+        query_prompt_name: Optional[str] = None,
+        document_prompt_name: Optional[str] = None,
+    ):
         self._model = model
         self._batch_size = batch_size
+        cleaned = dict(encode_kwargs or {})
+        for key in self._PROTECTED_ENCODE_KWARGS:
+            if key in cleaned:
+                logger.warning(
+                    "encode_kwargs[%r]=%r is ignored: %s=True is required so "
+                    "embeddings stay L2-normalized numpy arrays (dot == cosine)",
+                    key,
+                    cleaned.pop(key),
+                    key,
+                )
+        self._encode_kwargs = cleaned
+        self._query_prompt = query_prompt
+        self._document_prompt = document_prompt
+        self._query_prompt_name = query_prompt_name
+        self._document_prompt_name = document_prompt_name
 
     @classmethod
     def load(
-        cls, model_name_or_path: str, batch_size: int = 64, device=None, **kwargs
+        cls,
+        model_name_or_path: str,
+        batch_size: int = 64,
+        device=None,
+        config: Optional[EncoderConfig] = None,
+        **kwargs,
     ) -> "SentenceTransformerEncoder":
         from sentence_transformers import SentenceTransformer
 
-        return cls(SentenceTransformer(model_name_or_path, device=device, **kwargs), batch_size)
+        return cls(
+            SentenceTransformer(model_name_or_path, device=device, **kwargs),
+            batch_size,
+            **_encode_options(config),
+        )
 
     @property
     def model(self):
         return self._model
 
     def encode(self, texts: Sequence[str]) -> np.ndarray:
-        emb = self._model.encode(
-            list(texts),
-            batch_size=self._batch_size,
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-            show_progress_bar=False,
-        )
+        return self._encode(texts, prompt=None, prompt_name=None)
+
+    def encode_queries(self, texts: Sequence[str]) -> np.ndarray:
+        return self._encode(texts, self._query_prompt, self._query_prompt_name)
+
+    def encode_documents(self, texts: Sequence[str]) -> np.ndarray:
+        return self._encode(texts, self._document_prompt, self._document_prompt_name)
+
+    def _encode(
+        self, texts: Sequence[str], prompt: Optional[str], prompt_name: Optional[str]
+    ) -> np.ndarray:
+        texts = list(texts)
+        kwargs: Dict[str, Any] = {"batch_size": self._batch_size, "show_progress_bar": False}
+        kwargs.update(self._encode_kwargs)  # user keys win over the two defaults above
+        if prompt:  # explicit literal prefix wins over a named prompt
+            texts = [prompt + t for t in texts]
+        elif prompt_name:
+            kwargs["prompt_name"] = prompt_name
+        kwargs["convert_to_numpy"] = True
+        kwargs["normalize_embeddings"] = True
+        emb = self._model.encode(texts, **kwargs)
         return np.ascontiguousarray(emb, dtype=np.float32)
 
     def save(self, directory: str) -> None:
@@ -214,4 +291,4 @@ def train_encoder(
         output_path=output_path,
         show_progress_bar=False,
     )
-    return SentenceTransformerEncoder(model, config.encode_batch_size)
+    return SentenceTransformerEncoder(model, config.encode_batch_size, **_encode_options(config))

@@ -26,6 +26,23 @@ class EncoderConfig:
     # constructor (e.g. {"trust_remote_code": True, "revision": ..., "token": ...}) --
     # anything sentence_transformers.SentenceTransformer.__init__ accepts.
     params: Dict[str, Any] = field(default_factory=dict)
+    # Encode-time kwargs merged into every SentenceTransformer.encode(...) call
+    # (e.g. {"truncate_dim": 256, "precision": "float32"}). User keys win over
+    # our defaults EXCEPT normalize_embeddings/convert_to_numpy, which are forced
+    # (the L2-norm invariant: dot product == cosine) -- overriding them is
+    # ignored with a warning.
+    encode_kwargs: Dict[str, Any] = field(default_factory=dict)
+    # Asymmetric encoding for instruction-tuned models (E5/BGE/GTE...). A
+    # *_prompt is a literal prefix prepended to each text ("query: " /
+    # "passage: "); a *_prompt_name selects a named prompt from the model's own
+    # config (newer sentence-transformers). An explicit prompt wins over its
+    # prompt_name. All None (the default) == symmetric encoding, byte-identical
+    # to previous behaviour. Queries = the items being classified; documents =
+    # the example pool + class descriptions they are matched against.
+    query_prompt: Optional[str] = None
+    document_prompt: Optional[str] = None
+    query_prompt_name: Optional[str] = None
+    document_prompt_name: Optional[str] = None
 
 
 @dataclass

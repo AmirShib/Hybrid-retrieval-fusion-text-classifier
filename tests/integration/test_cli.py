@@ -112,7 +112,9 @@ class TestBm25StopWordsFlag:
 
     def test_flag_none_clears_stop_words_from_config_file(self, tmp_path, capsys):
         cfg_path = tmp_path / "cfg.json"
-        cfg_path.write_text(json.dumps({"retrieval": {"bm25_token_kwargs": {"stop_words": "english"}}}))
+        cfg_path.write_text(
+            json.dumps({"retrieval": {"bm25_token_kwargs": {"stop_words": "english"}}})
+        )
         _run(["train", "--config", str(cfg_path), "--dump-config", "--bm25-stop-words", "none"])
         dumped = json.loads(capsys.readouterr().out)
         assert "stop_words" not in dumped["retrieval"]["bm25_token_kwargs"]
@@ -280,7 +282,17 @@ class TestInferCliTopK:
         _run_infer(["infer", "--model", model_dir, "--input", items_csv, "--output", out_default])
         out_topk1 = str(tmp_path / "preds_topk1.csv")
         _run_infer(
-            ["infer", "--model", model_dir, "--input", items_csv, "--output", out_topk1, "--top-k", "1"]
+            [
+                "infer",
+                "--model",
+                model_dir,
+                "--input",
+                items_csv,
+                "--output",
+                out_topk1,
+                "--top-k",
+                "1",
+            ]
         )
         pd.testing.assert_frame_equal(pd.read_csv(out_default), pd.read_csv(out_topk1))
 
@@ -290,7 +302,17 @@ class TestInferCliTopK:
         pd.DataFrame({"text": ["a sample query", "another query"]}).to_csv(items_csv, index=False)
         out_csv = str(tmp_path / "preds.csv")
         _run_infer(
-            ["infer", "--model", model_dir, "--input", items_csv, "--output", out_csv, "--top-k", "3"]
+            [
+                "infer",
+                "--model",
+                model_dir,
+                "--input",
+                items_csv,
+                "--output",
+                out_csv,
+                "--top-k",
+                "3",
+            ]
         )
 
         out = pd.read_csv(out_csv)

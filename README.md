@@ -179,6 +179,28 @@ dense/description-similarity signals, pick a multilingual sentence-transformer
 model via `--encoder` — see `examples/coicop_hebrew/` for a worked
 cross-lingual example.
 
+**Instruction-tuned encoders (E5/BGE/GTE...):** these models expect role
+prefixes — queries and documents encoded differently. Configure them via
+`--config`; the prompts persist into the model dir, so inference applies them
+automatically:
+
+```json
+{
+  "encoder": {
+    "model_name_or_path": "intfloat/multilingual-e5-base",
+    "query_prompt": "query: ",
+    "document_prompt": "passage: "
+  }
+}
+```
+
+Items being classified get the query prompt; the example pool and class
+descriptions get the document prompt. `encoder.encode_kwargs` passes extra
+options to `SentenceTransformer.encode` (e.g. `{"truncate_dim": 256}`);
+`normalize_embeddings`/`convert_to_numpy` are always forced so embeddings stay
+L2-normalized (dot product == cosine). Omit all of it and encoding is
+symmetric, exactly as before.
+
 Predict:
 
 ```bash

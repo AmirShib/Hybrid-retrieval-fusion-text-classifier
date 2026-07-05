@@ -20,6 +20,20 @@ class TextEncoder(ABC):
     def encode(self, texts: Sequence[str]) -> np.ndarray:  # (n, d) float32
         ...
 
+    def encode_queries(self, texts: Sequence[str]) -> np.ndarray:  # (n, d) float32
+        """Encode texts in the *query* role (the items being classified).
+
+        Defaults to symmetric ``encode``, so existing adapters need no change;
+        instruction-tuned adapters (E5/BGE-style prompts) override this. The
+        pipelines route every encode call by role."""
+        return self.encode(texts)
+
+    def encode_documents(self, texts: Sequence[str]) -> np.ndarray:  # (n, d) float32
+        """Encode texts in the *document* role (the example pool + class
+        descriptions queries are matched against). Defaults to symmetric
+        ``encode``; see ``encode_queries``."""
+        return self.encode(texts)
+
     @abstractmethod
     def save(self, directory: str) -> None:
         """Persist to a directory (encoders may write several files). The

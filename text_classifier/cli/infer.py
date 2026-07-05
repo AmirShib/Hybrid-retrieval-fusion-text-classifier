@@ -65,9 +65,7 @@ def main() -> None:
     if args.top_k > 1:
         topk = pipeline.predict_topk(texts, args.top_k)
         for rank in range(2, args.top_k + 1):
-            out[f"top{rank}_key"] = [
-                t[rank - 1][0] if len(t) >= rank else "" for t in topk
-            ]
+            out[f"top{rank}_key"] = [t[rank - 1][0] if len(t) >= rank else "" for t in topk]
             out[f"top{rank}_conf"] = [
                 t[rank - 1][1] if len(t) >= rank else float("nan") for t in topk
             ]

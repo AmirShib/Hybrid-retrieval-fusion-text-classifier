@@ -153,11 +153,11 @@ register_encoder(
     "sentence-transformers",
     EncoderSpec(
         build=lambda cfg: SentenceTransformerEncoder.load(
-            cfg.model_name_or_path, cfg.encode_batch_size, cfg.device, **cfg.params
+            cfg.model_name_or_path, cfg.encode_batch_size, cfg.device, config=cfg, **cfg.params
         ),
         dirname="encoder",
         load=lambda path, cfg: SentenceTransformerEncoder.load(
-            path, cfg.encode_batch_size, cfg.device, **cfg.params
+            path, cfg.encode_batch_size, cfg.device, config=cfg, **cfg.params
         ),
         corpus_dependent=False,  # pretrained weights are data-independent
         fit=lambda items, ls, cfg: train_encoder(items, ls, cfg),  # optional fine-tune

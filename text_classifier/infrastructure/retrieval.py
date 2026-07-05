@@ -172,7 +172,10 @@ class DenseRetrieverAdapter(DenseRetriever):
         label_space: LabelSpace,
         cfg: RetrievalConfig,
     ) -> "DenseRetrieverAdapter":
-        emb = encoder.encode(texts)
+        # The example pool and class descriptions are the *document* side of
+        # retrieval; asymmetric encoders (E5/BGE prompts) encode them with the
+        # document prompt so query embeddings land in the matching space.
+        emb = encoder.encode_documents(texts)
         dim = emb.shape[1]
         C = label_space.size
         proto = np.full((C, dim), np.nan, dtype=np.float32)
@@ -186,7 +189,7 @@ class DenseRetrieverAdapter(DenseRetriever):
                 norm = np.linalg.norm(v)
                 if norm > 0:
                     proto[c] = (v / norm).astype(np.float32)
-        desc = encoder.encode(label_space.descriptions)
+        desc = encoder.encode_documents(label_space.descriptions)
         return cls(DenseState(emb, labels.astype(np.int64), proto, desc, freq), cfg.dense_chunk)
 
     @property

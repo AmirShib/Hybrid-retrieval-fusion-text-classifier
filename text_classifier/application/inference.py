@@ -48,7 +48,7 @@ class InferencePipeline:
         texts = list(texts)
         self._validate_texts(texts)
         a = self._a
-        q_emb = a.encoder.encode(texts)
+        q_emb = a.encoder.encode_queries(texts)
         feats = self._assembler.assemble(
             texts,
             q_emb,
@@ -104,7 +104,7 @@ class InferencePipeline:
         texts = list(texts)
         self._validate_texts(texts)
         a = self._a
-        q_emb = a.encoder.encode(texts)
+        q_emb = a.encoder.encode_queries(texts)
         feats = self._assembler.assemble(
             texts,
             q_emb,

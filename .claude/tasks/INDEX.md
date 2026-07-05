@@ -10,10 +10,10 @@ When a ticket reaches `done` and the work is merged: move its file from `.claude
 
 Priority is top-down. **Phase 0 of the execution order is complete** (T26, T27,
 T52, T51, T50 — determinism, config validation, the quality-benchmark net, lint/
-type gates, hash-locked pins). **Tier 1 has one open item (T08, docs). Tier 2's
-remaining items are T28 (encode-time kwargs / asymmetric prompts) and T29
-(plugin discovery), which unblock modern encoders and cross-host custom
-backends.** Tier 3 (T30–T35) is the active feature tier; T30 and T35 are done,
+type gates, hash-locked pins). **Phase 1 (cheap unlocks) is complete: T74, T65,
+T64, T35, T28 all landed 2026-07-05. Tier 1 has one open item (T08, docs).
+Tier 2's remaining item is T29 (plugin discovery), which unblocks cross-host
+custom backends.** Tier 3 (T30–T35) is the active feature tier; T30 and T35 are done,
 T31–T34 remain. Tier 4 remains stubs
 except T41/T42/T44 (done). **Tier 6 is the packaging / production-readiness
 tier**: T60–T62, T64 (release process + project hygiene), and T65 (top-k
@@ -56,7 +56,7 @@ make the signal-provider refactor a safe refactor instead of a rewrite-and-pray.
 
 | T08 | Code comments and professional documentation       | todo   | T01        |
 
-## Tier 2 — Hardening + pluggability (T20–T27 complete; T28–T29 open)
+## Tier 2 — Hardening + pluggability (T20–T28 complete; T29 open)
 
 | ID  | Title                                                                    | Status | Depends on       |
 |-----|--------------------------------------------------------------------------|--------|------------------|
@@ -68,7 +68,7 @@ make the signal-provider refactor a safe refactor instead of a rewrite-and-pray.
 | T25 | Expose `--encoder-kind` in the train CLI (reach the torch-free backend)    | done | T23, T24        |
 | T26 | Seed the fusion backends: identical runs → identical models               | done | T01             |
 | T27 | Validate the config at pipeline entry (n_folds ≥ 3 and friends)            | done | T01             |
-| T28 | Encode-time kwargs + asymmetric query/document encoding (E5/BGE prompts)   | todo | T24             |
+| T28 | Encode-time kwargs + asymmetric query/document encoding (E5/BGE prompts)   | done | T24             |
 | T29 | Plugin discovery via entry points (custom kinds load on any host)          | todo | T23             |
 
 **Pluggability chain:** T23 is the prerequisite seam — it makes encoder, fusion,

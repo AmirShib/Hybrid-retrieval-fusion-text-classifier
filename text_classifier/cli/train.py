@@ -127,7 +127,11 @@ def main() -> None:
 
     missing = [
         name
-        for name, value in [("--items", args.items), ("--classes", args.classes), ("--out", args.out)]
+        for name, value in [
+            ("--items", args.items),
+            ("--classes", args.classes),
+            ("--out", args.out),
+        ]
         if value is None
     ]
     if missing:

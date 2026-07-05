@@ -24,6 +24,15 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
   reads it via `[tool.setuptools.dynamic]` instead of duplicating the string.
 - `--bm25-stop-words` on the train CLI to opt into stopword filtering (e.g.
   `english`) or explicitly disable it (`none`).
+- Asymmetric query/document encoding for instruction-tuned embedding models
+  (E5/BGE/GTE...): `EncoderConfig` gains `query_prompt`/`document_prompt`
+  (literal prefixes), `query_prompt_name`/`document_prompt_name` (model-card
+  prompts), and `encode_kwargs` (merged into every
+  `SentenceTransformer.encode` call; `normalize_embeddings`/`convert_to_numpy`
+  stay forced so embeddings remain L2-normalized). The `TextEncoder` port
+  gains default `encode_queries`/`encode_documents` methods and the pipelines
+  route every encode call by role — existing encoders and configs are
+  unaffected (defaults are byte-identical to previous behavior).
 
 ### Changed
 - **Behavior change:** `RetrievalConfig.bm25_token_kwargs` now defaults to

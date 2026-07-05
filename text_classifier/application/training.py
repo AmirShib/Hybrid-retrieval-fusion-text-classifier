@@ -192,7 +192,7 @@ class TrainingPipeline:
             )
 
             va_texts = [texts[i] for i in va]
-            q_emb = enc.encode(va_texts)
+            q_emb = enc.encode_queries(va_texts)
             feats = self.assembler.assemble(
                 va_texts,
                 q_emb,
