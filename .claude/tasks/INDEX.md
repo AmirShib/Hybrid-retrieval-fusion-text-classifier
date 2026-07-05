@@ -13,7 +13,8 @@ T52, T51, T50 — determinism, config validation, the quality-benchmark net, lin
 type gates, hash-locked pins). **Tier 1 has one open item (T08, docs). Tier 2's
 remaining items are T28 (encode-time kwargs / asymmetric prompts) and T29
 (plugin discovery), which unblock modern encoders and cross-host custom
-backends.** Tier 3 (T30–T35) is the active feature tier. Tier 4 remains stubs
+backends.** Tier 3 (T30–T35) is the active feature tier; T30 and T35 are done,
+T31–T34 remain. Tier 4 remains stubs
 except T41/T42/T44 (done). **Tier 6 is the packaging / production-readiness
 tier**: T60–T62, T64 (release process + project hygiene), and T65 (top-k
 suggestions) are done; T63, T66–T69 remain — T63 (torch-optional install) is
@@ -93,7 +94,7 @@ signal once T34 phase 2 lands.
 | T32 | 3    | BM25 memory profile for large corpora; chunk/sparsify as needed               | todo |
 | T33 | 3    | Optional cross-encoder reranker as 6th retrieval signal (needs T03, optional)  | todo |
 | T34 | 3    | Pluggable retrieval signals + retrievers behind the registry (needs T23, T03)  | todo |
-| T35 | 3    | Language-neutral BM25 defaults (drop hidden English stopwords)                | todo |
+| T35 | 3    | Language-neutral BM25 defaults (drop hidden English stopwords)                | done |
 
 ## Tier 4+ — Stubs (T41/T42/T44 done; rest expand when picked up)
 

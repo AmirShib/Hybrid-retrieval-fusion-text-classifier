@@ -33,7 +33,11 @@ class RetrievalConfig:
     k_neighbors: int = 20
     k1: float = 1.5
     b: float = 0.75
-    bm25_token_kwargs: Dict[str, Any] = field(default_factory=lambda: {"stop_words": "english"})
+    # No stopword removal by default: a language-specific filter is an opt-in
+    # (train CLI: --bm25-stop-words english), not a hidden assumption that
+    # degrades BM25 on non-English corpora. Any sklearn CountVectorizer kwarg
+    # is accepted here (stop_words, token_pattern, ...).
+    bm25_token_kwargs: Dict[str, Any] = field(default_factory=dict)
     dense_chunk: int = 256  # query chunking for kNN matmuls
     feature_chunk: int = 4096  # query chunking for feature assembly
 

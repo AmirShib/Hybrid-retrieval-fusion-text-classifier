@@ -69,6 +69,14 @@ def main() -> None:
     p.add_argument("--candidate-top-n", type=int, default=None, help="default: 10")
     p.add_argument("--k-neighbors", type=int, default=None, help="default: 20")
     p.add_argument(
+        "--bm25-stop-words",
+        default=None,
+        help="stop_words value for BM25's tokenizer (any value sklearn's "
+        "CountVectorizer accepts, e.g. 'english'); 'none' explicitly disables "
+        "stopword filtering. Default: no stopword removal (language-neutral) "
+        "-- use 'english' to restore the pre-T35 behaviour.",
+    )
+    p.add_argument(
         "--per-fold-encoder",
         action="store_true",
         default=None,
@@ -100,6 +108,11 @@ def main() -> None:
         cfg.candidate_top_n = args.candidate_top_n
     if args.k_neighbors is not None:
         cfg.retrieval.k_neighbors = args.k_neighbors
+    if args.bm25_stop_words is not None:
+        if args.bm25_stop_words.lower() == "none":
+            cfg.retrieval.bm25_token_kwargs.pop("stop_words", None)
+        else:
+            cfg.retrieval.bm25_token_kwargs["stop_words"] = args.bm25_stop_words
     if args.per_fold_encoder:
         cfg.training.use_per_fold_encoder = True
 

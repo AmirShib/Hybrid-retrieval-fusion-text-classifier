@@ -1,6 +1,6 @@
 # T35 — Language-neutral BM25 defaults (stop treating English as the default language)
 
-status: todo
+status: done
 tier: 3
 depends_on: —
 

@@ -22,6 +22,18 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
   templates.
 - Single-sourced package version (`text_classifier/_version.py`); `pyproject.toml`
   reads it via `[tool.setuptools.dynamic]` instead of duplicating the string.
+- `--bm25-stop-words` on the train CLI to opt into stopword filtering (e.g.
+  `english`) or explicitly disable it (`none`).
+
+### Changed
+- **Behavior change:** `RetrievalConfig.bm25_token_kwargs` now defaults to
+  `{}` (no stopword removal) instead of `{"stop_words": "english"}`. BM25
+  silently applied English stopword removal to every corpus regardless of
+  language; that filter is now opt-in via `--bm25-stop-words english` or
+  `--config`. This shifts BM25 scores slightly for English corpora trained
+  from now on; retraining existing model directories is not required (the
+  fitted vectorizer is already persisted, so only new training runs are
+  affected).
 
 ## [0.1.0] - 2026-07
 

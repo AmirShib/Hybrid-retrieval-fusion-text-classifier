@@ -168,6 +168,17 @@ text-classifier-train --config config.json --items items.csv \
 text-classifier-train --config config.json --dump-config  # inspect, don't train
 ```
 
+**Non-English / multilingual corpora:** BM25 applies no stopword filtering by
+default — `stop_words` is an explicit opt-in
+(`--bm25-stop-words english`/`--config` with `{"retrieval": {"bm25_token_kwargs":
+{"stop_words": "english"}}}`), not a hidden assumption that would silently
+degrade BM25 on non-English text. Tokenization itself (`CountVectorizer`'s
+default `token_pattern`) is already Unicode-aware. `EncoderConfig.params`
+accepts the same idea for TF-IDF (`stop_words`, `token_pattern`, ...). For the
+dense/description-similarity signals, pick a multilingual sentence-transformer
+model via `--encoder` — see `examples/coicop_hebrew/` for a worked
+cross-lingual example.
+
 Predict:
 
 ```bash

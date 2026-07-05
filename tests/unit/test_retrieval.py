@@ -146,6 +146,42 @@ class TestBM25MathCorrectness:
         assert len(vocab) > 0
 
 
+class TestBM25LanguageNeutralDefaults:
+    """T35 — no hidden English-stopword assumption; it's opt-in."""
+
+    def test_retrieval_config_default_has_no_stop_words(self):
+        cfg = RetrievalConfig()
+        assert cfg.bm25_token_kwargs == {}
+
+    def test_default_config_keeps_stopwords_in_vocabulary(self):
+        """Wiring RetrievalConfig()'s default kwargs into BM25Index keeps
+        common English words -- the old behaviour must be an explicit opt-in."""
+        cfg = RetrievalConfig()
+        idx = BM25Index(cfg.k1, cfg.b, **cfg.bm25_token_kwargs)
+        idx.fit(["the quick brown fox"])
+        vocab = set(idx.vectorizer.vocabulary_.keys())
+        assert "the" in vocab
+
+    def test_old_behaviour_recoverable_via_kwarg(self):
+        """english stopwords can still be requested explicitly."""
+        cfg = RetrievalConfig(bm25_token_kwargs={"stop_words": "english"})
+        idx = BM25Index(cfg.k1, cfg.b, **cfg.bm25_token_kwargs)
+        idx.fit(["the quick brown fox"])
+        vocab = set(idx.vectorizer.vocabulary_.keys())
+        assert "the" not in vocab
+
+    def test_hebrew_unicode_corpus_retrieves_under_default(self):
+        """A non-English/Unicode micro-corpus scores correctly with no
+        stopword filtering and the default (Unicode-aware) token pattern."""
+        cfg = RetrievalConfig()
+        idx = BM25Index(cfg.k1, cfg.b, **cfg.bm25_token_kwargs)
+        idx.fit(["חלב טרי", "לחם אחיד", "גבינה צהובה"])
+        sm = idx.score_matrix(["חלב"])
+        # matches the milk document, not the bread or cheese ones
+        assert float(sm[0, 0]) > float(sm[0, 1])
+        assert float(sm[0, 0]) > float(sm[0, 2])
+
+
 class TestBM25TopK:
     @pytest.fixture
     def idx4(self):

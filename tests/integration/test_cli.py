@@ -97,6 +97,51 @@ def test_train_cli_default_encoder_kind_is_sentence_transformers(capsys):
     assert dumped["encoder"]["kind"] == "sentence-transformers"
 
 
+class TestBm25StopWordsFlag:
+    """T35 — no hidden English-stopword default; --bm25-stop-words opts in."""
+
+    def test_default_has_no_stop_words_key(self, capsys):
+        _run(["train", "--dump-config"])
+        dumped = json.loads(capsys.readouterr().out)
+        assert "stop_words" not in dumped["retrieval"]["bm25_token_kwargs"]
+
+    def test_flag_sets_stop_words(self, capsys):
+        _run(["train", "--dump-config", "--bm25-stop-words", "english"])
+        dumped = json.loads(capsys.readouterr().out)
+        assert dumped["retrieval"]["bm25_token_kwargs"]["stop_words"] == "english"
+
+    def test_flag_none_clears_stop_words_from_config_file(self, tmp_path, capsys):
+        cfg_path = tmp_path / "cfg.json"
+        cfg_path.write_text(json.dumps({"retrieval": {"bm25_token_kwargs": {"stop_words": "english"}}}))
+        _run(["train", "--config", str(cfg_path), "--dump-config", "--bm25-stop-words", "none"])
+        dumped = json.loads(capsys.readouterr().out)
+        assert "stop_words" not in dumped["retrieval"]["bm25_token_kwargs"]
+
+    def test_round_trips_into_meta_json(self, tmp_path):
+        items_csv, classes_csv = _write_csvs(tmp_path)
+        out = str(tmp_path / "model")
+        _run(
+            [
+                "train",
+                "--items",
+                items_csv,
+                "--classes",
+                classes_csv,
+                "--out",
+                out,
+                "--encoder-kind",
+                "tfidf",
+                "--folds",
+                "3",
+                "--bm25-stop-words",
+                "english",
+            ]
+        )
+        with open(os.path.join(out, "meta.json")) as fh:
+            meta = json.load(fh)
+        assert meta["config"]["retrieval"]["bm25_token_kwargs"]["stop_words"] == "english"
+
+
 class TestConfigFileFlag:
     def test_dump_config_reflects_flag_overrides(self, capsys):
         _run(["train", "--dump-config", "--folds", "7", "--candidate-top-n", "3"])
