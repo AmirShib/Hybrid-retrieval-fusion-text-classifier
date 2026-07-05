@@ -40,7 +40,7 @@ jupyter notebook examples/coicop_hebrew/coicop_hebrew_classification.ipynb
 |---|---|
 | `prepare.py` | Downloads the UN SD **COICOP 2018 hierarchies & mappings** workbook and writes `build/classes.csv` (`key,description`) for one level of the hierarchy. |
 | `items.csv` | The items to classify — a single **`name`** column of short Hebrew product names. Replace it with your own export (keep the `name` column). |
-| `data.csv` | ~160k Hebrew item names labelled into a **COICOP-like Hebrew retail taxonomy** (186 categories; columns `lbcItemName,label`). Real supervision, used in the second half of the notebook to train the full pipeline. |
+| `_data.csv` | ~160k Hebrew item names labelled into a **COICOP-like Hebrew retail taxonomy** (81 categories; columns `lbcItemName,label`). Real supervision, used in the second half of the notebook to train the full pipeline. |
 | `coicop_hebrew_classification.ipynb` | The walkthrough. |
 
 ### Building the classes from the command line
@@ -76,7 +76,7 @@ these items. Set `MODEL_NAME` in the encoder cell to swap it:
 ## From zero-shot to the full pipeline
 
 Zero-shot description similarity is the **floor**. The notebook's second half
-shows the ceiling: it trains the full `TrainingPipeline` on `data.csv` — real
+shows the ceiling: it trains the full `TrainingPipeline` on `_data.csv` — real
 Hebrew items labelled into a COICOP-like Hebrew taxonomy — lighting up class
 prototypes, dense/BM25 kNN, the XGBoost fusion model, isotonic calibration, and a
 threshold tuned for a target accuracy. On the held-out split it reaches ~0.82
@@ -93,5 +93,5 @@ encoder on these `(item, description)` pairs to sharpen the zero-shot COICOP ste
 COICOP 2018 structure is taken from the UN Statistics Division's COICOP 2018 /
 COICOP 1999 correspondence workbook (its `COICOP 2018` worksheet carries the full
 hierarchy). See <https://unstats.un.org/unsd/classifications/Econ>. The workbook
-is downloaded into `build/` and is git-ignored. `data.csv` (the labelled Hebrew
+is downloaded into `build/` and is git-ignored. `_data.csv` (the labelled Hebrew
 retail sample) is committed alongside the example.

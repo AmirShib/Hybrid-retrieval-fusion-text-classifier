@@ -1,6 +1,7 @@
 # Downloaded workbook and generated artifacts — never commit these.
 build/
 *.xlsx
-# Purged from git history 2026-07-05 (contained sensitive data); regenerate
-# locally with prepare.py and never commit it again.
+# The original data.csv was purged from git history 2026-07-05 (contained
+# sensitive data) and its name stays banned so it cannot resurface from an old
+# clone. The sanitized replacement is committed as `_data.csv`.
 data.csv
