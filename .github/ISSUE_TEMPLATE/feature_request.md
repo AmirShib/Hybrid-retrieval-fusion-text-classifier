@@ -17,5 +17,5 @@ port implementation, etc.
 Any workarounds you're using today, and why they fall short.
 
 **Related backlog items**
-Check `.claude/tasks/INDEX.md` — this may already be a planned ticket
-(open one if it names a related, unimplemented item).
+Check open issues and `CHANGELOG.md`'s `[Unreleased]` section — this may
+already be planned or in progress.

@@ -262,8 +262,8 @@ preds = InferencePipeline.from_directory("model_dir/").predict(["where is my ref
 
 ## Contributing / releasing
 
-See `CONTRIBUTING.md` for dev setup, the test/lint/type gates, and the
-`.claude/tasks/` ticket workflow. See `CHANGELOG.md` for what changed between
-versions, and `RELEASING.md` for how a version is cut and built. Report
-security issues per `SECURITY.md` rather than as a public issue.
+See `CONTRIBUTING.md` for dev setup and the test/lint/type gates. See
+`CHANGELOG.md` for what changed between versions, and `RELEASING.md` for how
+a version is cut and built. Report security issues per `SECURITY.md` rather
+than as a public issue.
 

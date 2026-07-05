@@ -1,6 +1,6 @@
 ## Summary
 
-<!-- What changed, and why. Link the ticket in .claude/tasks/ if applicable. -->
+<!-- What changed, and why. Link the related issue if applicable. -->
 
 ## Test plan
 
@@ -14,5 +14,3 @@
 
 - [ ] `CHANGELOG.md` updated under `[Unreleased]` (for user-facing changes)
 - [ ] Docs updated (`README.md` / docstrings) if behavior or the CLI changed
-- [ ] If this closes a `.claude/tasks/` ticket: file moved to `done/` and
-      `INDEX.md` updated

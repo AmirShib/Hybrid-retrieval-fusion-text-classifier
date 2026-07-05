@@ -24,11 +24,9 @@ is a small open-source project rather than a commercially supported product.
 
 - A trained model directory is loaded with `ArtifactRepository.load()`. Model
   directories are currently persisted with stdlib `pickle` for some
-  components (see `CLAUDE.md`'s "model directory must be portable"
-  invariant and ticket T67, "pickle-free artifacts") — **only load model
-  directories you trust**, the same caution that applies to any pickle-based
-  ML artifact format. Loading an untrusted model directory can execute
-  arbitrary code.
+  components — **only load model directories you trust**, the same caution
+  that applies to any pickle-based ML artifact format. Loading an untrusted
+  model directory can execute arbitrary code.
 - The CLIs read CSV/JSON files supplied by the user running them; they are
   not designed to process untrusted input from an unauthenticated remote
   party without additional sandboxing.

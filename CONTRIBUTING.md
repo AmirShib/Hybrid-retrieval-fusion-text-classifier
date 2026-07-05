@@ -26,27 +26,26 @@ must run **offline** — tests use the `HashingEncoder`/`tfidf` backends rather
 than downloading a real sentence-transformers model; don't add a test that
 needs network access.
 
-## Working on a ticket
-
-Open work lives in `.claude/tasks/`; `.claude/tasks/INDEX.md` is the backlog
-and priority order. To pick one up:
-
-1. Read the ticket file top to bottom — each is self-contained (goal, design,
-   files to change, tests, acceptance criteria).
-2. Set its `status:` field to `in-progress`.
-3. Implement, keeping to the ticket's stated scope — the "Out of scope"
-   section is there to stop drift into adjacent, unrelated work.
-4. Add/update tests per the ticket's "Tests" section; all suites (`pytest -q`)
-   and lint/type gates must stay green.
-5. When done: set `status: done`, move the file into `.claude/tasks/done/`,
-   and update its row in `INDEX.md`'s table (the row stays for history).
-
 ## Code conventions
 
-See `CLAUDE.md` for the architectural invariants (hexagonal layering, the
-NaN-means-"no retrieval" contract, out-of-fold leakage rules, feature-column
-ordering, model-directory portability) — these are load-bearing and any
-change touching them needs to preserve them explicitly, not incidentally.
+This is a hexagonal/DDD codebase: `text_classifier/domain/` is framework-free
+(models, ports, services), `text_classifier/infrastructure/` holds the
+concrete adapters (encoder, retrieval, fusion, persistence), and
+`text_classifier/application/` orchestrates use cases through the domain
+ports. A few invariants are load-bearing and any change touching them needs
+to preserve them explicitly, not incidentally:
+
+- `NaN` means "signal did not retrieve this class" and is distinct from a
+  true `0` — never impute it away.
+- `domain/services.py::FEATURE_NAMES` is the single source of truth for
+  feature-column order; adding/removing/reordering a feature touches it,
+  `application/features.py`, and the persisted `meta.json` schema together.
+- An item's features must be scored against indices/prototypes built from
+  *other* folds only (no leakage), and embeddings are L2-normalized so dot
+  product equals cosine similarity.
+- A trained model directory must stay portable (stdlib pickle + numpy + json
+  + native XGBoost/SentenceTransformer formats only) so it can ship to an
+  air-gapped host.
 
 ## Commits and pull requests
 
