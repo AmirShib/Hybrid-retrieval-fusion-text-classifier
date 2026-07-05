@@ -79,8 +79,8 @@ Zero-shot description similarity is the **floor**. The notebook's second half
 shows the ceiling: it trains the full `TrainingPipeline` on `_data.csv` — real
 Hebrew items labelled into a COICOP-like Hebrew taxonomy — lighting up class
 prototypes, dense/BM25 kNN, the XGBoost fusion model, isotonic calibration, and a
-threshold tuned for a target accuracy. On the held-out split it reaches ~0.82
-coverage at ~0.89 accuracy-on-accepted, and the transliterated pasta/candy names
+threshold tuned for a target accuracy. On the held-out split it reaches ~0.61
+coverage at ~0.90 accuracy-on-accepted, and the transliterated pasta/candy names
 that *abstained* zero-shot now classify confidently. The trainable section uses
 the lighter `MiniLM` encoder for speed (the OOF loop re-encodes per fold).
 
