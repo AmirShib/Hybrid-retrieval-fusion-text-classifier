@@ -8,11 +8,13 @@ pipeline.
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import List, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import pandas as pd
 
+from ..config import PipelineConfig
 from ..domain import ClassDefinition, LabeledItem, LabelSpace
 
 
@@ -31,6 +33,45 @@ def add_logging_arg(parser) -> None:
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="logging verbosity (default: INFO)",
     )
+
+
+def add_config_args(parser) -> None:
+    """``--config``/``--dump-config``, shared by every CLI that builds a
+    ``PipelineConfig``. Precedence is defaults < ``--config`` file < explicit
+    flags (flags are applied on top by the caller after ``load_pipeline_config``)."""
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="JSON file with a (partial) PipelineConfig; same shape as meta.json's "
+        "'config' block. Precedence: built-in defaults < --config < explicit flags.",
+    )
+    parser.add_argument(
+        "--dump-config",
+        action="store_true",
+        help="print the effective PipelineConfig as JSON and exit (no training/inference)",
+    )
+
+
+def load_pipeline_config(config_path: Optional[str]) -> PipelineConfig:
+    """Load a ``PipelineConfig`` from an optional ``--config`` JSON file,
+    falling back to all-defaults when none is given. Errors are reported as a
+    single-line ``SystemExit`` naming the file and the problem, not a raw
+    traceback from deep inside ``PipelineConfig.from_dict``."""
+    if config_path is None:
+        return PipelineConfig()
+    try:
+        with open(config_path) as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        raise SystemExit(f"error: config file not found: {config_path!r}")
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"error: could not parse config file {config_path!r}: {exc}")
+    if not isinstance(data, dict):
+        raise SystemExit(f"error: config file {config_path!r} must contain a JSON object")
+    try:
+        return PipelineConfig.from_dict(data)
+    except ValueError as exc:
+        raise SystemExit(f"error: invalid config file {config_path!r}: {exc}")
 
 
 def _read_csv(path: str, kind: str) -> pd.DataFrame:

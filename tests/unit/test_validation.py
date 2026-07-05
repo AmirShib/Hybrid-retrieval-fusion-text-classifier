@@ -282,3 +282,39 @@ class TestConfigValidation:
         space = LabelSpace.from_pairs([("a", "class a"), ("b", "class b")])
         with pytest.raises(ValueError, match="n_folds"):
             pipe.run(items, space)
+
+
+# --------------------------------------------------------------------------- #
+# Part F — PipelineConfig.from_dict (T74)
+# --------------------------------------------------------------------------- #
+class TestPipelineConfigFromDict:
+    def test_empty_dict_yields_all_defaults(self):
+        assert PipelineConfig.from_dict({}) == PipelineConfig()
+
+    def test_partial_single_section_merges_over_defaults(self):
+        cfg = PipelineConfig.from_dict({"fusion": {"kind": "lightgbm"}})
+        assert cfg.fusion.kind == "lightgbm"
+        assert cfg.encoder == PipelineConfig().encoder
+        assert cfg.training == PipelineConfig().training
+
+    def test_round_trip_through_to_dict(self):
+        original = PipelineConfig()
+        original.training.n_folds = 4
+        original.fusion.kind = "lightgbm"
+        restored = PipelineConfig.from_dict(original.to_dict())
+        assert restored == original
+
+    def test_unknown_key_in_nested_section_names_key_section_and_valid_keys(self):
+        with pytest.raises(ValueError, match="xgb_parms") as exc:
+            PipelineConfig.from_dict({"fusion": {"xgb_parms": {}}})
+        msg = str(exc.value)
+        assert "'fusion'" in msg
+        assert "xgb_params" in msg  # the valid-keys list names the real field
+
+    def test_unknown_top_level_key_errors(self):
+        with pytest.raises(ValueError, match="bogus_section"):
+            PipelineConfig.from_dict({"bogus_section": {}})
+
+    def test_non_dict_section_errors(self):
+        with pytest.raises(ValueError, match="'fusion'"):
+            PipelineConfig.from_dict({"fusion": "lightgbm"})

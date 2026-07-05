@@ -4,8 +4,10 @@ and can be version-controlled alongside a trained model directory.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional
+from dataclasses import asdict, dataclass, field, fields
+from typing import Any, Dict, List, Optional, Type, TypeVar
+
+_T = TypeVar("_T")
 
 
 @dataclass
@@ -159,13 +161,42 @@ class PipelineConfig:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "PipelineConfig":
-        # `.get` with defaults keeps older serialized configs (written before a
-        # field existed) loadable — new fields fall back to their defaults.
+        # Every section is optional (`.get` with a default of `{}`), so a
+        # *partial* config file — e.g. `{"fusion": {"kind": "lightgbm"}}` —
+        # loads fine and everything else falls back to its dataclass default.
+        # Unknown keys are a typo, not a feature: they raise rather than
+        # silently vanish, naming the offending key, the section, and the
+        # valid keys for that section.
+        valid_top = {f.name for f in fields(cls)}
+        unknown_top = sorted(set(data) - valid_top)
+        if unknown_top:
+            raise ValueError(
+                f"invalid PipelineConfig: unknown key(s) {unknown_top} in section "
+                f"'PipelineConfig'; valid keys: {sorted(valid_top)}"
+            )
         return cls(
-            encoder=EncoderConfig(**data["encoder"]),
-            retrieval=RetrievalConfig(**data["retrieval"]),
-            fusion=FusionConfig(**data["fusion"]),
-            calibration=CalibrationConfig(**data.get("calibration", {})),
-            training=TrainingConfig(**data["training"]),
-            candidate_top_n=data["candidate_top_n"],
+            encoder=_build_section(EncoderConfig, data, "encoder"),
+            retrieval=_build_section(RetrievalConfig, data, "retrieval"),
+            fusion=_build_section(FusionConfig, data, "fusion"),
+            calibration=_build_section(CalibrationConfig, data, "calibration"),
+            training=_build_section(TrainingConfig, data, "training"),
+            candidate_top_n=data.get("candidate_top_n", cls().candidate_top_n),
         )
+
+
+def _build_section(dc_cls: Type[_T], data: Dict[str, Any], section_name: str) -> _T:
+    """Build one nested config dataclass from ``data[section_name]``, tolerating
+    a missing section (defaults apply) but rejecting unknown keys by name."""
+    sub = data.get(section_name) or {}
+    if not isinstance(sub, dict):
+        raise ValueError(
+            f"invalid PipelineConfig: section {section_name!r} must be an object; got {sub!r}"
+        )
+    valid = {f.name for f in fields(dc_cls)}  # type: ignore[arg-type]
+    unknown = sorted(set(sub) - valid)
+    if unknown:
+        raise ValueError(
+            f"invalid PipelineConfig: unknown key(s) {unknown} in section {section_name!r}; "
+            f"valid keys: {sorted(valid)}"
+        )
+    return dc_cls(**sub)

@@ -1,6 +1,6 @@
 # T74 — `--config`: reach the full PipelineConfig from the CLI
 
-status: todo
+status: done
 tier: 7
 depends_on: T60
 

@@ -87,24 +87,87 @@ def test_train_cli_unknown_encoder_kind_exits(tmp_path, capsys):
     assert "tfidf" in err and "sentence-transformers" in err
 
 
-def test_train_cli_default_encoder_kind_is_sentence_transformers(tmp_path):
+def test_train_cli_default_encoder_kind_is_sentence_transformers(capsys):
     """Omitting --encoder-kind keeps the default, so existing invocations are
-    unchanged. (Validation only; we don't build the ST encoder here — that needs
-    torch — but argparse must carry the default through.)"""
-    parser_argv = ["train", "--items", "i.csv", "--classes", "c.csv", "--out", "o"]
-    with patch.object(sys, "argv", parser_argv):
-        # parse just the args by short-circuiting before any file IO would run.
-        import argparse
+    unchanged. --dump-config lets us inspect the resolved PipelineConfig
+    without needing --items/--classes/--out or touching torch."""
+    _run(["train", "--dump-config"])
+    dumped = json.loads(capsys.readouterr().out)
+    assert dumped["encoder"]["kind"] == "sentence-transformers"
 
-        captured = {}
-        real_parse = argparse.ArgumentParser.parse_args
 
-        def _capture(self, *a, **k):
-            ns = real_parse(self, *a, **k)
-            captured["kind"] = ns.encoder_kind
-            raise SystemExit(0)  # stop before reading CSVs
+class TestConfigFileFlag:
+    def test_dump_config_reflects_flag_overrides(self, capsys):
+        _run(["train", "--dump-config", "--folds", "7", "--candidate-top-n", "3"])
+        dumped = json.loads(capsys.readouterr().out)
+        assert dumped["training"]["n_folds"] == 7
+        assert dumped["candidate_top_n"] == 3
 
-        with patch.object(argparse.ArgumentParser, "parse_args", _capture):
-            with pytest.raises(SystemExit):
-                train_cli.main()
-    assert captured["kind"] == "sentence-transformers"
+    def test_config_file_sets_a_field_flags_dont_touch(self, tmp_path, capsys):
+        cfg_path = tmp_path / "cfg.json"
+        cfg_path.write_text(json.dumps({"fusion": {"kind": "lightgbm"}}))
+        _run(["train", "--config", str(cfg_path), "--dump-config"])
+        dumped = json.loads(capsys.readouterr().out)
+        assert dumped["fusion"]["kind"] == "lightgbm"
+        # untouched sections keep their built-in defaults
+        assert dumped["encoder"]["kind"] == "sentence-transformers"
+
+    def test_explicit_flag_overrides_config_file(self, tmp_path, capsys):
+        cfg_path = tmp_path / "cfg.json"
+        cfg_path.write_text(json.dumps({"training": {"n_folds": 7}}))
+        _run(["train", "--config", str(cfg_path), "--dump-config", "--folds", "4"])
+        dumped = json.loads(capsys.readouterr().out)
+        assert dumped["training"]["n_folds"] == 4
+
+    def test_meta_json_config_block_is_a_valid_config_file(self, tmp_path):
+        """A previous run's meta.json 'config' block round-trips as --config input."""
+        items_csv, classes_csv = _write_csvs(tmp_path)
+        out = str(tmp_path / "model")
+        _run(
+            [
+                "train",
+                "--items",
+                items_csv,
+                "--classes",
+                classes_csv,
+                "--out",
+                out,
+                "--encoder-kind",
+                "tfidf",
+                "--folds",
+                "3",
+            ]
+        )
+        with open(os.path.join(out, "meta.json")) as fh:
+            meta = json.load(fh)
+        cfg_path = tmp_path / "reused_cfg.json"
+        cfg_path.write_text(json.dumps(meta["config"]))
+
+        out2 = str(tmp_path / "model2")
+        _run(
+            [
+                "train",
+                "--config",
+                str(cfg_path),
+                "--items",
+                items_csv,
+                "--classes",
+                classes_csv,
+                "--out",
+                out2,
+            ]
+        )
+        assert os.path.isfile(os.path.join(out2, "meta.json"))
+
+    def test_unknown_key_in_config_file_errors_naming_key_and_section(self, tmp_path):
+        cfg_path = tmp_path / "cfg.json"
+        cfg_path.write_text(json.dumps({"fusion": {"xgb_parms": {}}}))
+        with pytest.raises(SystemExit) as exc:
+            _run(["train", "--config", str(cfg_path), "--dump-config"])
+        assert "xgb_parms" in str(exc.value)
+        assert "fusion" in str(exc.value)
+
+    def test_config_file_not_found_errors_clearly(self):
+        with pytest.raises(SystemExit) as exc:
+            _run(["train", "--config", "/nonexistent/cfg.json", "--dump-config"])
+        assert "/nonexistent/cfg.json" in str(exc.value)

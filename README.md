@@ -146,6 +146,28 @@ text-classifier-train --items items.csv --classes classes.csv \
     --out model_dir/ --encoder-kind tfidf
 ```
 
+Every `PipelineConfig` field (fusion kind + `xgb_params`, calibration kind,
+BM25 token kwargs, encoder params, ...) is reachable from the CLI via
+`--config`, without writing Python. Precedence is defaults < `--config` file <
+explicit flags, and `--dump-config` prints the effective config and exits — a
+trained model dir's `meta.json` `config` block is itself a valid `--config`
+input, so you can inspect or replay a previous run's settings:
+
+```json
+// config.json — a partial config; unspecified fields keep their defaults
+{
+  "fusion": {"kind": "lightgbm"},
+  "calibration": {"kind": "beta"},
+  "retrieval": {"bm25_token_kwargs": {"stop_words": null}}
+}
+```
+
+```bash
+text-classifier-train --config config.json --items items.csv \
+    --classes classes.csv --out model_dir/ --folds 3   # --folds wins over the file
+text-classifier-train --config config.json --dump-config  # inspect, don't train
+```
+
 Predict:
 
 ```bash
