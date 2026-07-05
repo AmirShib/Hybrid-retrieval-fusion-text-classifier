@@ -1,3 +1,6 @@
 # Downloaded workbook and generated artifacts — never commit these.
 build/
 *.xlsx
+# Purged from git history 2026-07-05 (contained sensitive data); regenerate
+# locally with prepare.py and never commit it again.
+data.csv
