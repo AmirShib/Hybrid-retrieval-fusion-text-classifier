@@ -15,11 +15,11 @@ remaining items are T28 (encode-time kwargs / asymmetric prompts) and T29
 (plugin discovery), which unblock modern encoders and cross-host custom
 backends.** Tier 3 (T30–T35) is the active feature tier. Tier 4 remains stubs
 except T41/T42/T44 (done). **Tier 6 is the packaging / production-readiness
-tier**: T60–T62 and T65 (top-k suggestions) are done; T63–T64, T66–T69 remain —
-T63 (torch-optional install) is the priority item, it closes the gap between
-the README's air-gapped/torch-free claim and what `pip install .` actually
-delivers, and T68 (taxonomy update without retrain) is the highest-value
-operational capability for adopters.
+tier**: T60–T62, T64 (release process + project hygiene), and T65 (top-k
+suggestions) are done; T63, T66–T69 remain — T63 (torch-optional install) is
+the priority item, it closes the gap between the README's air-gapped/torch-free
+claim and what `pip install .` actually delivers, and T68 (taxonomy update
+without retrain) is the highest-value operational capability for adopters.
 Tier 7's T74 (`--config`) is done — the cheapest unlock in the backlog; T75
 (DataFrame API + streaming) remains.
 
@@ -125,7 +125,7 @@ loading a shipped model dir must not execute code).
 | T61 | Evaluation metrics + persisted evaluation.json/model_card + `eval` CLI          | done   | T07          |
 | T62 | Package version provenance (`__version__`, recorded in meta.json)               | done   | T07          |
 | T63 | Torch-optional install via extras (core torch-free)                             | todo   | T24, T60     |
-| T64 | Release process + project hygiene (CHANGELOG/CONTRIBUTING/SECURITY, versioning) | todo   | T60          |
+| T64 | Release process + project hygiene (CHANGELOG/CONTRIBUTING/SECURITY, versioning) | done   | T60          |
 | T65 | Top-k suggestions: populate `runner_up_key` + `--top-k` in the infer CLI        | done   | T30          |
 | T66 | Re-tune calibration + abstention thresholds on a trained model (tune CLI)       | todo   | T61          |
 | T67 | Pickle-free model artifacts (npz/json state; legacy `.pkl` fallback)            | todo   | T60          |

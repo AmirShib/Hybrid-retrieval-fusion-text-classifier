@@ -1,0 +1,46 @@
+name: Release
+
+# Builds the wheel + sdist and attaches them to the GitHub release for the
+# pushed tag. Does not publish to any package index (see RELEASING.md) --
+# that remains a deliberate, separate step.
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build wheel + sdist
+        run: |
+          pip install build
+          python -m build
+
+      - name: Verify the tag matches the package version
+        run: |
+          set -euo pipefail
+          pip install -e . --no-deps
+          pkg_version="$(python -c 'import text_classifier; print(text_classifier.__version__)')"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$pkg_version" != "$tag_version" ]; then
+            echo "::error::tag v$tag_version does not match package version $pkg_version (bump text_classifier/_version.py first)"
+            exit 1
+          fi
+
+      - name: Create GitHub release with the built artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+          generate_release_notes: true

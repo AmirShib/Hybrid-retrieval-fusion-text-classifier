@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "text-classifier"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Hybrid retrieval-fusion text classifier with calibrated abstention"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -42,6 +42,10 @@ include = ["text_classifier*"]
 [tool.setuptools.package-data]
 # Ship the PEP 561 marker so downstream consumers get the package's type hints.
 text_classifier = ["py.typed"]
+
+[tool.setuptools.dynamic]
+# Single-sourced from text_classifier/_version.py -- see RELEASING.md.
+version = { attr = "text_classifier._version.__version__" }
 
 [tool.pytest.ini_options]
 markers = [

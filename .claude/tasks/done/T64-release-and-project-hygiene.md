@@ -1,6 +1,6 @@
 # T64 — Release process + project hygiene
 
-status: todo
+status: done
 tier: 6
 depends_on: T60
 
