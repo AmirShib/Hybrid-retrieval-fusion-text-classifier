@@ -1,6 +1,6 @@
 # T65 — Top-k suggestions: populate `runner_up_key` and expose `--top-k` in infer
 
-status: todo
+status: done
 tier: 6
 depends_on: T30
 
