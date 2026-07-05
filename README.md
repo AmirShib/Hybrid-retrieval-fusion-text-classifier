@@ -76,12 +76,60 @@ public entry points.
   `Q_binary @ W.T`.
 * kNN and feature assembly are query-chunked to bound peak memory.
 
-## Usage
-
-Train:
+## Install
 
 ```bash
-python -m scripts.train \
+pip install .                 # core (includes sentence-transformers)
+pip install .[lightgbm]       # + optional LightGBM fusion backend
+pip install .[test]           # + pytest for the test suite
+```
+
+Installing exposes three console commands — `text-classifier-train`,
+`text-classifier-infer`, and `text-classifier-eval`. From a source checkout you
+can equivalently run `python -m scripts.train` / `scripts.infer` /
+`text_classifier.cli.evaluate`.
+
+### Air-gapped / reproducible install
+
+`requirements.lock` pins the full transitive dependency tree (torch included)
+with sha256 hashes, resolved for the reference platform: **Linux x86_64,
+CPython 3.11**. On a connected host, build a wheelhouse:
+
+```bash
+pip download --require-hashes -r requirements.lock -d wheelhouse/
+pip wheel . --no-deps -w wheelhouse/     # the package itself
+```
+
+Move `wheelhouse/` to the air-gapped host, then install with no index access —
+`--require-hashes` guarantees the installed wheels are byte-identical to the
+ones that were tested:
+
+```bash
+pip install --no-index --find-links wheelhouse/ --require-hashes -r requirements.lock
+pip install --no-index --find-links wheelhouse/ --no-deps text-classifier
+```
+
+**Refresh policy.** The lock is refreshed deliberately, never implicitly:
+
+```bash
+uv pip compile pyproject.toml --generate-hashes --python-version 3.11 -o requirements.lock
+```
+
+then re-run the test suite and the quality benchmark before committing the
+diff. Heavy ML wheels (torch, xgboost) therefore only change versions when
+revalidated. The default resolution locks the standard (GPU-enabled) torch
+build; for a CPU-only deployment, compile with
+`--extra-index-url https://download.pytorch.org/whl/cpu` to lock the much
+smaller CPU wheels instead. A scheduled CI workflow (`lockfile.yml`) rebuilds
+the wheelhouse and performs the offline install monthly, so a yanked or
+re-uploaded wheel is noticed before deployment day.
+
+## Usage
+
+Train (writes the model directory plus `evaluation.json` and `model_card.md`):
+
+```bash
+text-classifier-train \
     --items items.csv \        # columns: text,label
     --classes classes.csv \    # columns: key,description
     --out model_dir/ \
@@ -89,11 +137,113 @@ python -m scripts.train \
 # add --per-fold-encoder for the rigorous (expensive) encoder path
 ```
 
+For a torch-free, air-gapped run (no torch, no model download) use the TF-IDF
+encoder backend (corpus-fitted, so `--encoder` is ignored). For a
+dependency-free smoke test there is also a non-semantic `hashing` encoder:
+
+```bash
+text-classifier-train --items items.csv --classes classes.csv \
+    --out model_dir/ --encoder-kind tfidf
+```
+
+Every `PipelineConfig` field (fusion kind + `xgb_params`, calibration kind,
+BM25 token kwargs, encoder params, ...) is reachable from the CLI via
+`--config`, without writing Python. Precedence is defaults < `--config` file <
+explicit flags, and `--dump-config` prints the effective config and exits — a
+trained model dir's `meta.json` `config` block is itself a valid `--config`
+input, so you can inspect or replay a previous run's settings:
+
+```json
+// config.json — a partial config; unspecified fields keep their defaults
+{
+  "fusion": {"kind": "lightgbm"},
+  "calibration": {"kind": "beta"},
+  "retrieval": {"bm25_token_kwargs": {"stop_words": null}}
+}
+```
+
+```bash
+text-classifier-train --config config.json --items items.csv \
+    --classes classes.csv --out model_dir/ --folds 3   # --folds wins over the file
+text-classifier-train --config config.json --dump-config  # inspect, don't train
+```
+
+**Non-English / multilingual corpora:** BM25 applies no stopword filtering by
+default — `stop_words` is an explicit opt-in
+(`--bm25-stop-words english`/`--config` with `{"retrieval": {"bm25_token_kwargs":
+{"stop_words": "english"}}}`), not a hidden assumption that would silently
+degrade BM25 on non-English text. Tokenization itself (`CountVectorizer`'s
+default `token_pattern`) is already Unicode-aware. `EncoderConfig.params`
+accepts the same idea for TF-IDF (`stop_words`, `token_pattern`, ...). For the
+dense/description-similarity signals, pick a multilingual sentence-transformer
+model via `--encoder` — see `examples/coicop_hebrew/` for a worked
+cross-lingual example.
+
+**Instruction-tuned encoders (E5/BGE/GTE...):** these models expect role
+prefixes — queries and documents encoded differently. Configure them via
+`--config`; the prompts persist into the model dir, so inference applies them
+automatically:
+
+```json
+{
+  "encoder": {
+    "model_name_or_path": "intfloat/multilingual-e5-base",
+    "query_prompt": "query: ",
+    "document_prompt": "passage: "
+  }
+}
+```
+
+Items being classified get the query prompt; the example pool and class
+descriptions get the document prompt. `encoder.encode_kwargs` passes extra
+options to `SentenceTransformer.encode` (e.g. `{"truncate_dim": 256}`);
+`normalize_embeddings`/`convert_to_numpy` are always forced so embeddings stay
+L2-normalized (dot product == cosine). Omit all of it and encoding is
+symmetric, exactly as before.
+
 Predict:
 
 ```bash
-python -m scripts.infer --model model_dir/ --input new_items.csv --output preds.csv
+text-classifier-infer --model model_dir/ --input new_items.csv --output preds.csv
 ```
+
+For a human-review queue, `--top-k N` adds the next-best suggestions as wide
+columns (`top2_key`, `top2_conf`, … `topN_key`, `topN_conf`) alongside the
+usual top-1 `predicted_key`/`top_key`/`confidence`/`abstained` columns, which
+are unchanged — abstention stays a top-1 decision, the extra columns are just
+candidates for a reviewer to pick from:
+
+```bash
+text-classifier-infer --model model_dir/ --input new_items.csv --output preds.csv --top-k 3
+```
+
+Evaluate a trained model on a labeled set (coverage, accuracy-on-accepted,
+calibration — Brier/ECE — a risk-coverage curve, and a per-class breakdown).
+Use it to validate before deploying, or to watch for drift over time:
+
+```bash
+text-classifier-eval --model model_dir/ --input labeled.csv --output report.json
+```
+
+Each trained model directory carries its own evidence: `evaluation.json` (the
+full held-out report) and `model_card.md` (a human-readable summary with the
+package version, dataset shape, headline metrics, and the abstention thresholds).
+
+### Worked examples
+
+`examples/clinc150/` is a runnable, fully offline demo on CLINC150 (150 intents +
+an out-of-scope set). It shows the abstention knob in action — raising the
+confidence bar routes more out-of-scope queries to a human while keeping in-scope
+accuracy high. Start with the notebook walkthrough,
+`examples/clinc150/clinc150_abstention_demo.ipynb` (cell-by-cell, with charts);
+`examples/clinc150/README.md` has the command-line equivalent.
+
+`examples/coicop_hebrew/` is a cross-lingual, **zero-shot** demo: short Hebrew
+grocery names classified into the international COICOP 2018 taxonomy (English
+labels) with a multilingual encoder and no labeled training data. It shows the
+encoder + description-similarity signal carrying the easy cases and abstaining on
+the noisy ones, and how the full pipeline takes over once labels exist. See
+`examples/coicop_hebrew/coicop_hebrew_classification.ipynb`.
 
 Library:
 
@@ -109,4 +259,11 @@ print(report)  # coverage / accuracy-on-accepted / candidate recall
 
 preds = InferencePipeline.from_directory("model_dir/").predict(["where is my refund"])
 ```
+
+## Contributing / releasing
+
+See `CONTRIBUTING.md` for dev setup, the test/lint/type gates, and the
+`.claude/tasks/` ticket workflow. See `CHANGELOG.md` for what changed between
+versions, and `RELEASING.md` for how a version is cut and built. Report
+security issues per `SECURITY.md` rather than as a public issue.
 

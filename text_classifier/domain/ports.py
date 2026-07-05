@@ -4,10 +4,11 @@ adapters implement these; the domain never imports a concrete ML library.
 All array shapes are documented as (rows, cols). `b` = query batch size,
 `C` = number of classes, `k` = neighbors, `d` = embedding dim, `n` = pool size.
 """
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -18,6 +19,26 @@ class TextEncoder(ABC):
     @abstractmethod
     def encode(self, texts: Sequence[str]) -> np.ndarray:  # (n, d) float32
         ...
+
+    def encode_queries(self, texts: Sequence[str]) -> np.ndarray:  # (n, d) float32
+        """Encode texts in the *query* role (the items being classified).
+
+        Defaults to symmetric ``encode``, so existing adapters need no change;
+        instruction-tuned adapters (E5/BGE-style prompts) override this. The
+        pipelines route every encode call by role."""
+        return self.encode(texts)
+
+    def encode_documents(self, texts: Sequence[str]) -> np.ndarray:  # (n, d) float32
+        """Encode texts in the *document* role (the example pool + class
+        descriptions queries are matched against). Defaults to symmetric
+        ``encode``; see ``encode_queries``."""
+        return self.encode(texts)
+
+    @abstractmethod
+    def save(self, directory: str) -> None:
+        """Persist to a directory (encoders may write several files). The
+        matching loader is registered per kind (see ``EncoderSpec.load``);
+        FusionModel/ConfidenceCalibrator declare the same contract."""
 
 
 class DenseRetriever(ABC):
@@ -45,7 +66,9 @@ class LexicalRetriever(ABC):
     """Lexical signals from BM25 over the same example pool + class descriptions."""
 
     @abstractmethod
-    def knn_example_labels(self, query_texts: Sequence[str], k: int) -> Tuple[np.ndarray, np.ndarray]:
+    def knn_example_labels(
+        self, query_texts: Sequence[str], k: int
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """Return (neighbor_class_indices (b, k) int with -1 padding,
         scores (b, k) float with NaN padding)."""
 
@@ -55,11 +78,21 @@ class LexicalRetriever(ABC):
 
 
 class FusionModel(ABC):
-    """Pointwise model scoring P(candidate is the true class). Must tolerate NaN
-    features (the 'not retrieved' encoding)."""
+    """Model scoring P(candidate is the true class). Must tolerate NaN features
+    (the 'not retrieved' encoding).
+
+    ``NEEDS_GROUPS`` flags learning-to-rank backends (e.g. XGBRanker) that need a
+    per-query ``groups`` array at fit time. Pointwise backends leave it False and
+    ignore ``groups``; the training pipeline only computes/passes groups when a
+    model declares it needs them, so existing call sites stay ``fit(X, y)``."""
+
+    NEEDS_GROUPS: bool = False
 
     @abstractmethod
-    def fit(self, X: np.ndarray, y: np.ndarray) -> None: ...
+    def fit(self, X: np.ndarray, y: np.ndarray, *, groups: Optional[np.ndarray] = None) -> None:
+        """Fit on features ``X`` and binary labels ``y``. ``groups`` (one count
+        per query, summing to ``len(X)``) is required only when
+        ``NEEDS_GROUPS`` is True; pointwise models ignore it."""
 
     @abstractmethod
     def predict_proba(self, X: np.ndarray) -> np.ndarray:  # (n,) P(class==1)

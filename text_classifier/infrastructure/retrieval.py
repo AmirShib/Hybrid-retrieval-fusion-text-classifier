@@ -9,10 +9,11 @@ DenseRetrieverAdapter holds example embeddings, class prototypes (mean of
 example embeddings), and class-description embeddings, and answers kNN via a
 query-chunked cosine mat-mul.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Sequence, Tuple
+from typing import Any, Sequence, Tuple
 
 import numpy as np
 from scipy import sparse
@@ -58,7 +59,9 @@ class BM25Index:
         """Dense (b, n_docs) score block. Use for small doc sets (descriptions)."""
         return np.asarray((self._query_incidence(texts) @ self._Wt).todense(), dtype=np.float32)
 
-    def top_k(self, texts: Sequence[str], k: int, chunk: int = 256) -> Tuple[np.ndarray, np.ndarray]:
+    def top_k(
+        self, texts: Sequence[str], k: int, chunk: int = 256
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """(idx (b, k) int with -1 pad, score (b, k) float with NaN pad). Only
         strictly-positive scores are returned; the rest is padding."""
         b = len(texts)
@@ -67,7 +70,7 @@ class BM25Index:
         out_score = np.full((b, k), np.nan, dtype=np.float32)
         Qbin = self._query_incidence(texts)
         for s in range(0, b, chunk):
-            S = np.asarray((Qbin[s:s + chunk] @ self._Wt).todense(), dtype=np.float32)
+            S = np.asarray((Qbin[s : s + chunk] @ self._Wt).todense(), dtype=np.float32)
             part = np.argpartition(-S, kk - 1, axis=1)[:, :kk]
             rows = np.arange(part.shape[0])[:, None]
             part_s = S[rows, part]
@@ -77,27 +80,36 @@ class BM25Index:
             bad = sc <= 0
             idx = np.where(bad, -1, idx)
             sc = np.where(bad, np.nan, sc)
-            out_idx[s:s + chunk, :kk] = idx
-            out_score[s:s + chunk, :kk] = sc
+            out_idx[s : s + chunk, :kk] = idx
+            out_score[s : s + chunk, :kk] = sc
         return out_idx, out_score
 
 
 # ----------------------------------------------------------------- lexical adapter
 class LexicalRetrieverAdapter(LexicalRetriever):
-    def __init__(self, example_bm25: BM25Index, example_labels: np.ndarray, desc_bm25: BM25Index, k_chunk: int = 256):
+    def __init__(
+        self,
+        example_bm25: BM25Index,
+        example_labels: np.ndarray,
+        desc_bm25: BM25Index,
+        k_chunk: int = 256,
+    ):
         self._examples = example_bm25
         self._labels = example_labels.astype(np.int64)
         self._descriptions = desc_bm25
         self._k_chunk = k_chunk
 
     @classmethod
-    def build(cls, texts: Sequence[str], labels: np.ndarray, label_space: LabelSpace,
-              cfg: RetrievalConfig) -> "LexicalRetrieverAdapter":
+    def build(
+        cls, texts: Sequence[str], labels: np.ndarray, label_space: LabelSpace, cfg: RetrievalConfig
+    ) -> "LexicalRetrieverAdapter":
         ex = BM25Index(cfg.k1, cfg.b, **cfg.bm25_token_kwargs).fit(texts)
         desc = BM25Index(cfg.k1, cfg.b, **cfg.bm25_token_kwargs).fit(label_space.descriptions)
         return cls(ex, np.asarray(labels), desc, cfg.dense_chunk)
 
-    def knn_example_labels(self, query_texts: Sequence[str], k: int) -> Tuple[np.ndarray, np.ndarray]:
+    def knn_example_labels(
+        self, query_texts: Sequence[str], k: int
+    ) -> Tuple[np.ndarray, np.ndarray]:
         idx, score = self._examples.top_k(query_texts, k, self._k_chunk)
         labels = np.where(idx >= 0, self._labels[np.clip(idx, 0, None)], -1)
         return labels.astype(np.int64), score
@@ -107,26 +119,38 @@ class LexicalRetrieverAdapter(LexicalRetriever):
 
 
 # ------------------------------------------------------------------- dense adapter
-def _dense_topk(Q: np.ndarray, X: np.ndarray, k: int, chunk: int = 256) -> Tuple[np.ndarray, np.ndarray]:
+def _dense_topk(
+    Q: np.ndarray, X: np.ndarray, k: int, chunk: int = 256
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Top-k nearest examples by dot product, always shaped ``(n_queries, k)``.
+
+    The result is padded to the requested ``k`` even when the corpus is smaller
+    (``k > n_examples``): the first ``min(k, n)`` columns hold real neighbours in
+    descending-similarity order and the remainder are ``-1`` / ``NaN`` padding,
+    mirroring ``BM25Index.top_k``. An empty query batch returns ``(0, k)`` arrays.
+    """
     n = X.shape[0]
-    k = min(k, n)
-    out_idx = np.empty((Q.shape[0], k), dtype=np.int64)
-    out_sim = np.empty((Q.shape[0], k), dtype=np.float32)
+    k_eff = min(k, n)
+    out_idx = np.full((Q.shape[0], k), -1, dtype=np.int64)
+    out_sim = np.full((Q.shape[0], k), np.nan, dtype=np.float32)
+    if Q.shape[0] == 0 or k_eff == 0:
+        return out_idx, out_sim
     Xt = np.ascontiguousarray(X.T)
     for s in range(0, Q.shape[0], chunk):
-        sims = Q[s:s + chunk] @ Xt
-        part = np.argpartition(sims, -k, axis=1)[:, -k:]
+        sims = Q[s : s + chunk] @ Xt
+        part = np.argpartition(sims, -k_eff, axis=1)[:, -k_eff:]
         rows = np.arange(part.shape[0])[:, None]
         part_sims = sims[rows, part]
         order = np.argsort(-part_sims, axis=1)
-        out_idx[s:s + chunk] = np.take_along_axis(part, order, axis=1)
-        out_sim[s:s + chunk] = np.take_along_axis(part_sims, order, axis=1)
+        out_idx[s : s + chunk, :k_eff] = np.take_along_axis(part, order, axis=1)
+        out_sim[s : s + chunk, :k_eff] = np.take_along_axis(part_sims, order, axis=1)
     return out_idx, out_sim
 
 
 @dataclass
 class DenseState:
     """Serializable numeric state of the dense retriever."""
+
     example_emb: np.ndarray
     example_labels: np.ndarray
     prototypes: np.ndarray
@@ -140,9 +164,18 @@ class DenseRetrieverAdapter(DenseRetriever):
         self._chunk = chunk
 
     @classmethod
-    def build(cls, encoder: TextEncoder, texts: Sequence[str], labels: np.ndarray,
-              label_space: LabelSpace, cfg: RetrievalConfig) -> "DenseRetrieverAdapter":
-        emb = encoder.encode(texts)
+    def build(
+        cls,
+        encoder: TextEncoder,
+        texts: Sequence[str],
+        labels: np.ndarray,
+        label_space: LabelSpace,
+        cfg: RetrievalConfig,
+    ) -> "DenseRetrieverAdapter":
+        # The example pool and class descriptions are the *document* side of
+        # retrieval; asymmetric encoders (E5/BGE prompts) encode them with the
+        # document prompt so query embeddings land in the matching space.
+        emb = encoder.encode_documents(texts)
         dim = emb.shape[1]
         C = label_space.size
         proto = np.full((C, dim), np.nan, dtype=np.float32)
@@ -156,7 +189,7 @@ class DenseRetrieverAdapter(DenseRetriever):
                 norm = np.linalg.norm(v)
                 if norm > 0:
                     proto[c] = (v / norm).astype(np.float32)
-        desc = encoder.encode(label_space.descriptions)
+        desc = encoder.encode_documents(label_space.descriptions)
         return cls(DenseState(emb, labels.astype(np.int64), proto, desc, freq), cfg.dense_chunk)
 
     @property
@@ -169,7 +202,10 @@ class DenseRetrieverAdapter(DenseRetriever):
 
     def knn_example_labels(self, query_emb: np.ndarray, k: int) -> Tuple[np.ndarray, np.ndarray]:
         idx, sim = _dense_topk(query_emb, self._s.example_emb, k, self._chunk)
-        return self._s.example_labels[idx], sim
+        # idx == -1 marks padding (k > n_examples); keep it as -1 rather than
+        # letting np indexing wrap around to a real label.
+        labels = np.where(idx >= 0, self._s.example_labels[np.clip(idx, 0, None)], -1)
+        return labels.astype(np.int64), sim
 
     def prototype_similarity(self, query_emb: np.ndarray) -> np.ndarray:
         return query_emb @ self._s.prototypes.T

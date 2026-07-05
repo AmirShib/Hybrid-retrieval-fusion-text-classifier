@@ -1,0 +1,45 @@
+name: lockfile
+
+# Proves requirements.lock still installs, offline, exactly as documented in
+# the README (T50): wheelhouse from the hash-locked pins, then a no-index
+# install and an offline smoke test. Scheduled monthly (catches yanked or
+# re-uploaded wheels before an air-gapped deployment day) and on demand.
+# Not part of per-push CI: the wheelhouse is multiple GB (torch + CUDA libs).
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 3 * *"   # monthly, 3rd day 04:17 UTC
+
+jobs:
+  offline-install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python (reference version)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Free disk space (the torch/CUDA wheelhouse is large)
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+
+      - name: Build the wheelhouse from the lock (hash-verified)
+        run: |
+          pip download --require-hashes -r requirements.lock -d wheelhouse/
+          pip wheel . --no-deps -w wheelhouse/
+
+      - name: Offline install into a clean venv
+        run: |
+          python -m venv /tmp/airgap
+          /tmp/airgap/bin/pip install --no-index --find-links wheelhouse/ \
+            --require-hashes -r requirements.lock
+          /tmp/airgap/bin/pip install --no-index --find-links wheelhouse/ \
+            --no-deps text-classifier
+
+      - name: Offline smoke test
+        run: |
+          cd "$(mktemp -d)"
+          /tmp/airgap/bin/python -c "import text_classifier; print(text_classifier.__version__)"
+          /tmp/airgap/bin/python -m text_classifier.cli.train --help > /dev/null

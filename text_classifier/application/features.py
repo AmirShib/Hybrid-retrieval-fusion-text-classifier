@@ -5,6 +5,7 @@ Everything is vectorized: each signal becomes a (batch, n_classes) matrix, the
 candidate set is a boolean mask, and feature columns are gathered with fancy
 indexing. Queries are processed in chunks to bound peak memory.
 """
+
 from __future__ import annotations
 
 from typing import Any, Optional, Sequence
@@ -112,11 +113,20 @@ class FeatureAssembler:
         ids = np.asarray(query_ids)
         for s in range(0, len(query_texts), chunk):
             sl = slice(s, s + chunk)
-            frames.append(self._assemble_chunk(
-                list(query_texts[sl]), query_emb[sl], dense, lexical, k_neighbors,
-                ids[sl], None if query_labels is None else np.asarray(query_labels)[sl],
-            ))
-        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=FEATURE_NAMES)
+            frames.append(
+                self._assemble_chunk(
+                    list(query_texts[sl]),
+                    query_emb[sl],
+                    dense,
+                    lexical,
+                    k_neighbors,
+                    ids[sl],
+                    None if query_labels is None else np.asarray(query_labels)[sl],
+                )
+            )
+        return (
+            pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=FEATURE_NAMES)
+        )
 
     def _assemble_chunk(self, texts, q_emb, dense, lexical, k, ids, labels) -> pd.DataFrame:
         C = self._space.size
@@ -130,7 +140,7 @@ class FeatureAssembler:
         d_sum, d_max, d_cnt = _scatter_knn(dn_lab, dn_sim, C)
 
         bdesc_raw = np.asarray(lexical.description_score(texts), dtype=np.float64)
-        bdesc = np.where(bdesc_raw > 0, bdesc_raw, np.nan)         # 0 overlap == missing
+        bdesc = np.where(bdesc_raw > 0, bdesc_raw, np.nan)  # 0 overlap == missing
         bn_lab, bn_sco = lexical.knn_example_labels(texts, k)
         b_sum, b_max, b_cnt = _scatter_knn(bn_lab, bn_sco, C)
 
@@ -159,7 +169,9 @@ class FeatureAssembler:
 
         argstack = np.stack([a_desc, a_proto, a_bdesc, a_dknn, a_bknn], axis=1)
         n_agree = np.fromiter(
-            (5 - len({v for v in r if v >= 0}) for r in argstack), dtype=np.float64, count=argstack.shape[0]
+            (5 - len({v for v in r if v >= 0}) for r in argstack),
+            dtype=np.float64,
+            count=argstack.shape[0],
         )
 
         # ---- ranks / norms over candidate sets ----

@@ -1,4 +1,5 @@
 """Domain layer: the framework-free core (models, ports, policies)."""
+
 from .models import (
     ClassDefinition,
     CoverageReport,
@@ -21,7 +22,18 @@ from .services import (
 )
 
 __all__ = [
-    "ClassDefinition", "LabeledItem", "LabelSpace", "Prediction", "CoverageReport",
-    "TextEncoder", "DenseRetriever", "LexicalRetriever", "FusionModel", "ConfidenceCalibrator",
-    "FEATURE_NAMES", "CandidatePolicy", "AbstentionPolicy", "ThresholdTuner",
+    "ClassDefinition",
+    "LabeledItem",
+    "LabelSpace",
+    "Prediction",
+    "CoverageReport",
+    "TextEncoder",
+    "DenseRetriever",
+    "LexicalRetriever",
+    "FusionModel",
+    "ConfidenceCalibrator",
+    "FEATURE_NAMES",
+    "CandidatePolicy",
+    "AbstentionPolicy",
+    "ThresholdTuner",
 ]

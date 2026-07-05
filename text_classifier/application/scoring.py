@@ -2,6 +2,7 @@
 turn a feature table into calibrated confidences and collapse to one decision
 per item.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -10,8 +11,9 @@ import pandas as pd
 from ..domain import FEATURE_NAMES, ConfidenceCalibrator, FusionModel
 
 
-def add_confidence(features: pd.DataFrame, fusion: FusionModel,
-                   calibrator: ConfidenceCalibrator) -> pd.DataFrame:
+def add_confidence(
+    features: pd.DataFrame, fusion: FusionModel, calibrator: ConfidenceCalibrator
+) -> pd.DataFrame:
     """Append a calibrated `conf` column = P(candidate is correct)."""
     X = features[FEATURE_NAMES].to_numpy(dtype=np.float32)
     raw = fusion.predict_proba(X)
@@ -21,13 +23,31 @@ def add_confidence(features: pd.DataFrame, fusion: FusionModel,
 
 
 def top_per_item(scored: pd.DataFrame) -> pd.DataFrame:
-    """One row per item: best candidate, its confidence, the runner-up margin,
-    and (if present) whether the top candidate was correct."""
+    """One row per item: best candidate, its confidence, the runner-up's
+    identity + margin, and (if present) whether the top candidate was correct.
+
+    ``second_candidate`` is NaN (not an int) for single-candidate items — the
+    merge is ``how="left"`` — so it stays a float column; consumers must check
+    for NaN before indexing into it.
+    """
     scored = scored.sort_values(["item_id", "conf"], ascending=[True, False])
     grp = scored.groupby("item_id", sort=False)
     top = grp.head(1).copy()
 
-    runner = grp.nth(1)[["item_id", "conf"]].rename(columns={"conf": "second_conf"})
+    runner = grp.nth(1)[["item_id", "candidate", "conf"]].rename(
+        columns={"candidate": "second_candidate", "conf": "second_conf"}
+    )
     top = top.merge(runner, on="item_id", how="left")
     top["margin"] = top["conf"] - top["second_conf"].fillna(0.0)
     return top.reset_index(drop=True)
+
+
+def top_k_per_item(scored: pd.DataFrame, k: int) -> pd.DataFrame:
+    """Long format: up to ``k`` rows per item, ranked by confidence descending.
+    Columns: ``item_id``, ``rank`` (1-based), ``candidate``, ``conf``. Items
+    with fewer than ``k`` scored candidates contribute fewer rows."""
+    scored = scored.sort_values(["item_id", "conf"], ascending=[True, False])
+    grp = scored.groupby("item_id", sort=False)
+    topk = grp.head(k).copy()
+    topk["rank"] = topk.groupby("item_id", sort=False).cumcount() + 1
+    return topk[["item_id", "rank", "candidate", "conf"]].reset_index(drop=True)
