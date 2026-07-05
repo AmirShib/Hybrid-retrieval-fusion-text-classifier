@@ -465,6 +465,78 @@ class TestVectorizedPredict:
 
 
 # ---------------------------------------------------------------------------
+# Top-k suggestions (T65)
+# ---------------------------------------------------------------------------
+
+
+class TestTopKPredictions:
+    def test_runner_up_key_set_when_multiple_candidates_accepted(self, trained):
+        artifacts, _, label_space, items, _ = trained
+        texts = [it.text for it in items[:20]]
+        preds = InferencePipeline(artifacts).predict(texts)
+        # At least one prediction on this multi-class synthetic set should
+        # have surfaced a runner-up (i.e. more than one candidate retrieved).
+        assert any(p.runner_up_key is not None for p in preds)
+        for p in preds:
+            if p.runner_up_key is not None:
+                assert p.runner_up_key in label_space.keys
+                assert p.runner_up_key != p.top_key
+
+    def test_no_candidate_item_has_no_runner_up(self, trained):
+        artifacts, *_ = trained
+        import pandas as pd
+
+        empty_df = pd.DataFrame(columns=FEATURE_NAMES)
+        with patch(
+            "text_classifier.application.inference.FeatureAssembler.assemble", return_value=empty_df
+        ):
+            preds = InferencePipeline(artifacts).predict(["any text"])
+        assert preds[0].runner_up_key is None
+
+    def test_predict_topk_ranks_by_confidence_descending(self, trained):
+        artifacts, _, label_space, items, _ = trained
+        texts = [it.text for it in items[:10]]
+        pipeline = InferencePipeline(artifacts)
+        topk = pipeline.predict_topk(texts, k=3)
+        assert len(topk) == len(texts)
+        for ranked in topk:
+            assert len(ranked) <= 3
+            confs = [c for _, c in ranked]
+            assert confs == sorted(confs, reverse=True)
+            keys = [k for k, _ in ranked]
+            assert len(keys) == len(set(keys))  # no duplicate class per item
+
+    def test_predict_topk_k_equals_one_agrees_with_predict(self, trained):
+        artifacts, _, _, items, _ = trained
+        texts = [it.text for it in items[:10]]
+        pipeline = InferencePipeline(artifacts)
+        preds = pipeline.predict(texts)
+        topk = pipeline.predict_topk(texts, k=1)
+        for pred, ranked in zip(preds, topk):
+            if pred.top_key == "":
+                assert ranked == []
+            else:
+                assert len(ranked) == 1
+                assert ranked[0][0] == pred.top_key
+                assert ranked[0][1] == pytest.approx(pred.confidence)
+
+    def test_predict_topk_empty_retrieval_item_is_empty_list(self, trained):
+        artifacts, *_ = trained
+        import pandas as pd
+
+        empty_df = pd.DataFrame(columns=FEATURE_NAMES)
+        with patch(
+            "text_classifier.application.inference.FeatureAssembler.assemble", return_value=empty_df
+        ):
+            topk = InferencePipeline(artifacts).predict_topk(["any text"], k=3)
+        assert topk == [[]]
+
+    def test_predict_topk_empty_input_returns_empty(self, trained):
+        artifacts, *_ = trained
+        assert InferencePipeline(artifacts).predict_topk([], k=3) == []
+
+
+# ---------------------------------------------------------------------------
 # Determinism (T26)
 # ---------------------------------------------------------------------------
 

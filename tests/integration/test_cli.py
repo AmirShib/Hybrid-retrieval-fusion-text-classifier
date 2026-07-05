@@ -14,6 +14,7 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 
+import scripts.infer as infer_cli
 import scripts.train as train_cli
 from tests._doubles import make_synthetic
 
@@ -171,3 +172,103 @@ class TestConfigFileFlag:
         with pytest.raises(SystemExit) as exc:
             _run(["train", "--config", "/nonexistent/cfg.json", "--dump-config"])
         assert "/nonexistent/cfg.json" in str(exc.value)
+
+
+# --------------------------------------------------------------------------- #
+# T65 — infer CLI --top-k
+# --------------------------------------------------------------------------- #
+def _run_infer(argv) -> None:
+    with patch.object(sys, "argv", argv):
+        infer_cli.main()
+
+
+def _trained_tfidf_model(tmp_path) -> str:
+    """Train a tfidf (torch-free) model dir once for the infer CLI tests."""
+    items_csv, classes_csv = _write_csvs(tmp_path)
+    out = str(tmp_path / "model")
+    _run(
+        [
+            "train",
+            "--items",
+            items_csv,
+            "--classes",
+            classes_csv,
+            "--out",
+            out,
+            "--encoder-kind",
+            "tfidf",
+            "--folds",
+            "3",
+            "--target-precision",
+            "0.5",
+            "--candidate-top-n",
+            "8",
+        ]
+    )
+    return out
+
+
+class TestInferCliTopK:
+    def test_default_output_columns_unchanged(self, tmp_path):
+        model_dir = _trained_tfidf_model(tmp_path)
+        items_csv = str(tmp_path / "items.csv")
+        pd.DataFrame({"text": ["a sample query", "another query"]}).to_csv(items_csv, index=False)
+        out_csv = str(tmp_path / "preds.csv")
+        _run_infer(["infer", "--model", model_dir, "--input", items_csv, "--output", out_csv])
+
+        out = pd.read_csv(out_csv)
+        assert list(out.columns) == [
+            "text",
+            "predicted_key",
+            "top_key",
+            "confidence",
+            "abstained",
+            "margin",
+        ]
+
+    def test_top_k_one_matches_default(self, tmp_path):
+        model_dir = _trained_tfidf_model(tmp_path)
+        items_csv = str(tmp_path / "items.csv")
+        pd.DataFrame({"text": ["a sample query", "another query"]}).to_csv(items_csv, index=False)
+
+        out_default = str(tmp_path / "preds_default.csv")
+        _run_infer(["infer", "--model", model_dir, "--input", items_csv, "--output", out_default])
+        out_topk1 = str(tmp_path / "preds_topk1.csv")
+        _run_infer(
+            ["infer", "--model", model_dir, "--input", items_csv, "--output", out_topk1, "--top-k", "1"]
+        )
+        pd.testing.assert_frame_equal(pd.read_csv(out_default), pd.read_csv(out_topk1))
+
+    def test_top_k_three_adds_expected_columns(self, tmp_path):
+        model_dir = _trained_tfidf_model(tmp_path)
+        items_csv = str(tmp_path / "items.csv")
+        pd.DataFrame({"text": ["a sample query", "another query"]}).to_csv(items_csv, index=False)
+        out_csv = str(tmp_path / "preds.csv")
+        _run_infer(
+            ["infer", "--model", model_dir, "--input", items_csv, "--output", out_csv, "--top-k", "3"]
+        )
+
+        out = pd.read_csv(out_csv)
+        for col in ["top2_key", "top2_conf", "top3_key", "top3_conf"]:
+            assert col in out.columns
+        # top-1 columns are untouched by the flag
+        assert "top4_key" not in out.columns
+
+    def test_top_k_less_than_one_errors(self, tmp_path):
+        model_dir = _trained_tfidf_model(tmp_path)
+        items_csv = str(tmp_path / "items.csv")
+        pd.DataFrame({"text": ["a sample query"]}).to_csv(items_csv, index=False)
+        with pytest.raises(SystemExit):
+            _run_infer(
+                [
+                    "infer",
+                    "--model",
+                    model_dir,
+                    "--input",
+                    items_csv,
+                    "--output",
+                    str(tmp_path / "preds.csv"),
+                    "--top-k",
+                    "0",
+                ]
+            )

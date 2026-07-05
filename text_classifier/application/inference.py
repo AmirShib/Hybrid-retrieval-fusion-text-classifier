@@ -6,7 +6,7 @@ construction: a genuinely new item has no self-match in the index.
 
 from __future__ import annotations
 
-from typing import List, Sequence
+from typing import List, Sequence, Tuple
 
 import numpy as np
 
@@ -14,7 +14,7 @@ from ..config import PipelineConfig
 from ..domain import CandidatePolicy, LabelSpace, Prediction
 from ..infrastructure import ArtifactRepository, DeployedArtifacts
 from .features import FeatureAssembler
-from .scoring import add_confidence, top_per_item
+from .scoring import add_confidence, top_k_per_item, top_per_item
 
 
 class InferencePipeline:
@@ -77,20 +77,56 @@ class InferencePipeline:
         candidates = decided["candidate"].to_numpy(dtype=np.intp)
         confidences = decided["conf"].to_numpy(dtype=np.float64)
         margins = decided["margin"].to_numpy(dtype=np.float64)
+        second_candidates = decided["second_candidate"].to_numpy(dtype=np.float64)
         accepted = a.abstention.accept(confidences, candidates)
         top_keys = np.asarray(a.label_space.keys)[candidates]
 
-        for item_id, top_key, conf, margin, ok in zip(
-            item_ids, top_keys, confidences, margins, accepted
+        for item_id, top_key, conf, margin, ok, second in zip(
+            item_ids, top_keys, confidences, margins, accepted, second_candidates
         ):
             key = str(top_key)
+            runner_up_key = None if np.isnan(second) else str(a.label_space.keys[int(second)])
             results[item_id] = Prediction(
                 top_key=key,
                 confidence=float(conf),
                 abstained=not ok,
                 predicted_key=key if ok else None,
+                runner_up_key=runner_up_key,
                 margin=float(margin),
             )
+        return results
+
+    def predict_topk(self, texts: Sequence[str], k: int) -> List[List[Tuple[str, float]]]:
+        """Per input, up to ``k`` ``(class_key, confidence)`` pairs ranked by
+        confidence descending. Shorter than ``k`` when fewer candidates
+        surfaced; empty for an item that retrieved nothing. Reuses a single
+        feature-assembly + fusion pass — no extra scoring work per k."""
+        texts = list(texts)
+        self._validate_texts(texts)
+        a = self._a
+        q_emb = a.encoder.encode(texts)
+        feats = self._assembler.assemble(
+            texts,
+            q_emb,
+            a.dense,
+            a.lexical,
+            a.config.retrieval.k_neighbors,
+            query_ids=list(range(len(texts))),
+            query_labels=None,
+            chunk=a.config.retrieval.feature_chunk,
+        )
+        results: List[List[Tuple[str, float]]] = [[] for _ in texts]
+        if not len(feats):
+            return results
+
+        ranked = top_k_per_item(add_confidence(feats, a.fusion, a.calibrator), k)
+        item_ids = ranked["item_id"].to_numpy(dtype=np.intp)
+        candidates = ranked["candidate"].to_numpy(dtype=np.intp)
+        confidences = ranked["conf"].to_numpy(dtype=np.float64)
+        keys = np.asarray(a.label_space.keys)[candidates]
+
+        for item_id, key, conf in zip(item_ids, keys, confidences):
+            results[item_id].append((str(key), float(conf)))
         return results
 
     @staticmethod

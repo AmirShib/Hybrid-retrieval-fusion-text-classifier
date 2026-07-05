@@ -174,6 +174,16 @@ Predict:
 text-classifier-infer --model model_dir/ --input new_items.csv --output preds.csv
 ```
 
+For a human-review queue, `--top-k N` adds the next-best suggestions as wide
+columns (`top2_key`, `top2_conf`, … `topN_key`, `topN_conf`) alongside the
+usual top-1 `predicted_key`/`top_key`/`confidence`/`abstained` columns, which
+are unchanged — abstention stays a top-1 decision, the extra columns are just
+candidates for a reviewer to pick from:
+
+```bash
+text-classifier-infer --model model_dir/ --input new_items.csv --output preds.csv --top-k 3
+```
+
 Evaluate a trained model on a labeled set (coverage, accuracy-on-accepted,
 calibration — Brier/ECE — a risk-coverage curve, and a per-class breakdown).
 Use it to validate before deploying, or to watch for drift over time:
