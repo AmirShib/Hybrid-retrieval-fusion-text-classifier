@@ -168,6 +168,44 @@ text-classifier-train --config config.json --items items.csv \
 text-classifier-train --config config.json --dump-config  # inspect, don't train
 ```
 
+**Bring your own validation / test split:** by default the calibration and test
+sets are carved out of `--items` by the internal k-fold split. If you already
+hold a split — a frozen benchmark test set, a temporally-later validation slice,
+or a split shared across model families for comparability — hand it in directly
+and keep the persisted evidence chain (`evaluation.json` / `model_card.md`)
+instead of holding the test set outside the tool:
+
+```bash
+# External validation set → calibrate + tune abstention thresholds on it.
+text-classifier-train --items train.csv --classes classes.csv --out model_dir/ \
+    --val-items val.csv
+
+# External test set → the held-out evaluation runs on it.
+text-classifier-train --items train.csv --classes classes.csv --out model_dir/ \
+    --test-items test.csv
+
+# Both → every internal fold trains the fusion model, so --folds 2 is enough.
+text-classifier-train --items train.csv --classes classes.csv --out model_dir/ \
+    --val-items val.csv --test-items test.csv --folds 2
+```
+
+Each external set is optional and independent, reuses `--text-col`/`--label-col`,
+and must be **disjoint** from `--items`: an item whose text also appears in the
+training pool sits in the deployed index, self-retrieves a perfect match, and
+silently inflates the numbers — so text overlap is a hard error, not a warning.
+The manifest in `evaluation.json` records where each split came from
+(`"splits": {"val": "external:n=1234", "test": "internal-fold"}`) so a model
+directory stays auditable.
+
+The **temporal split** is the case this exists for: calibrating on a *later*
+slice (and evaluating on a still-later one) is the drift-realistic operating
+point the internal random folds cannot express. External sets are featurized
+against the index built from all training items — the same index that ships in
+the model — so their scores, and the risk-coverage numbers derived from them,
+describe deployed behaviour. (This is a deliberate asymmetry: the fusion model
+is fit on per-fold-index features while the calibrator sees full-train-index
+features, anchoring confidence at the production operating point.)
+
 **Non-English / multilingual corpora:** BM25 applies no stopword filtering by
 default — `stop_words` is an explicit opt-in
 (`--bm25-stop-words english`/`--config` with `{"retrieval": {"bm25_token_kwargs":

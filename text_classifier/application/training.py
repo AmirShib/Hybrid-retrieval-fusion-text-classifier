@@ -7,6 +7,12 @@ Orchestrates the full training use case:
   3. isotonic calibration + threshold tuning on a held-out calibration fold;
   4. coverage/accuracy evaluation on an untouched test fold;
   5. final encoder + indices on all data, assembled into DeployedArtifacts.
+
+A caller who already holds a validation and/or test split can pass it to
+``run`` (``val_items`` / ``test_items``) to replace step 3's calibration fold
+and/or step 4's test fold with the external set — the drift-realistic temporal
+split. External sets are featurized against the deployment index (step 5's
+indices, built once up front and reused), never through the out-of-fold loop.
 """
 
 from __future__ import annotations
@@ -75,18 +81,72 @@ class TrainingPipeline:
         items: Sequence[LabeledItem],
         label_space: LabelSpace,
         output_dir: Optional[str] = None,
+        *,
+        val_items: Optional[Sequence[LabeledItem]] = None,
+        test_items: Optional[Sequence[LabeledItem]] = None,
     ) -> Tuple[DeployedArtifacts, CoverageReport]:
+        """Train the pipeline on ``items`` and return the deployed artifacts.
+
+        By default the calibration and test sets are carved out of ``items`` via
+        the internal k-fold split. A caller who already holds a split can pass it
+        in instead:
+
+        - ``val_items`` — an external validation set. The calibration fold role
+          is retired (that fold joins fusion training) and the calibrator +
+          abstention thresholds are fit on ``val_items``.
+        - ``test_items`` — an external test set. The test fold role is retired
+          and the held-out evaluation runs on ``test_items``.
+
+        Either is optional and independent; pass both to reserve every internal
+        fold for fusion training (``n_folds >= 2`` then suffices for out-of-fold
+        feature generation). External sets are encoded and featurized against the
+        index built from *all* training items — the same index that ships in the
+        deployed model — so they are scored under the production condition and
+        never enter the out-of-fold loop. This is a deliberate, documented
+        asymmetry: the fusion model is fit on per-fold-index features while the
+        calibrator sees full-train-index features, which anchors confidence (and
+        therefore the risk-coverage numbers in ``evaluation.json``) at the
+        deployed operating point. It is exactly what makes calibrating on a
+        temporally-later validation slice meaningful.
+
+        With neither ``val_items`` nor ``test_items`` the behaviour is identical
+        to before this parameter existed.
+        """
         items = list(items)
-        self._validate_inputs(items, label_space)
+        val_items = None if val_items is None else list(val_items)
+        test_items = None if test_items is None else list(test_items)
+        self._validate_inputs(items, label_space, val_items, test_items)
         self.assembler = FeatureAssembler(label_space, CandidatePolicy(self.cfg.candidate_top_n))
         texts = [it.text for it in items]
         y = np.array(label_space.encode_labels([it.label for it in items]), dtype=np.int64)
 
+        roles = self.cfg.training.fold_roles(
+            external_val=val_items is not None, external_test=test_items is not None
+        )
         oof = self._build_oof(texts, y, label_space)
-        fusion, calibrator, abstention = self._fit_fusion(oof)
-        report, evaluation = self._evaluate(oof, y, label_space, fusion, calibrator, abstention)
 
-        artifacts = self._build_deployment(texts, y, label_space, fusion, calibrator, abstention)
+        # Build the deployment index (encoder + dense/lexical over *all* training
+        # items) once, up front: external val/test items are featurized against
+        # it, and the finished DeployedArtifacts reuse the very same objects.
+        encoder, dense, lexical = self._build_deployment_index(texts, y, label_space)
+        val_feats = None
+        if val_items is not None:
+            val_feats, _ = self._featurize_external(val_items, label_space, encoder, dense, lexical)
+        test_feats = None
+        test_y: Optional[np.ndarray] = None
+        if test_items is not None:
+            test_feats, test_y = self._featurize_external(
+                test_items, label_space, encoder, dense, lexical
+            )
+
+        fusion, calibrator, abstention = self._fit_fusion(oof, roles, val_feats)
+        report, evaluation = self._evaluate(
+            oof, roles, y, label_space, fusion, calibrator, abstention, test_feats, test_y
+        )
+
+        artifacts = DeployedArtifacts(
+            self.cfg, label_space, encoder, dense, lexical, fusion, calibrator, abstention
+        )
         if output_dir:
             ArtifactRepository().save(artifacts, output_dir)
             # Persist the held-out evaluation + a provenance manifest next to the
@@ -98,24 +158,46 @@ class TrainingPipeline:
                 n_classes=label_space.size,
                 config=self.cfg,
                 n_evaluated=report.n_items,
+                splits=self._split_provenance(val_items, test_items),
             )
             write_evaluation_artifacts(output_dir, evaluation, manifest)
             log.info("saved trained pipeline + evaluation to %s", output_dir)
         return artifacts, report
 
+    @staticmethod
+    def _split_provenance(
+        val_items: Optional[Sequence[LabeledItem]],
+        test_items: Optional[Sequence[LabeledItem]],
+    ) -> dict:
+        """Record, for the manifest, whether each split came from an external set
+        or an internal fold — so a persisted model dir is auditable after the fact."""
+        return {
+            "val": f"external:n={len(val_items)}" if val_items is not None else "internal-fold",
+            "test": f"external:n={len(test_items)}" if test_items is not None else "internal-fold",
+        }
+
     # ---------------------------------------------------------------- validation
-    def _validate_inputs(self, items: Sequence[LabeledItem], label_space: LabelSpace) -> None:
+    def _validate_inputs(
+        self,
+        items: Sequence[LabeledItem],
+        label_space: LabelSpace,
+        val_items: Optional[Sequence[LabeledItem]] = None,
+        test_items: Optional[Sequence[LabeledItem]] = None,
+    ) -> None:
         """Fail fast, before any encoder/index work, on inputs that would otherwise
         surface as a cryptic numpy/pandas/sklearn traceback deep in the pipeline.
 
         Checks, in order:
           0. the config itself is coherent (``PipelineConfig.validate``) — before
              any data work, so a bad ``n_folds`` never reaches StratifiedKFold;
+             external splits relax the fold floor to ``>= 2``;
           1. the item list is non-empty;
           2. the label space has at least two classes (fusion needs negatives);
           3. every item label is defined in ``label_space``;
           4. every class present has at least ``n_folds`` examples — the minimum
-             ``StratifiedKFold`` requires per class.
+             ``StratifiedKFold`` requires per class;
+          5. each external split (val/test), if supplied, has only known labels
+             and does not overlap the training text (see ``_validate_external``).
 
         A class that is declared in the label space but has *zero* training
         examples is acceptable (it simply never appears in the folds and gets an
@@ -128,7 +210,7 @@ class TrainingPipeline:
         StratifiedKFold cannot do is split a class with fewer than ``n_folds``
         members, so that is the boundary we guard.
         """
-        self.cfg.validate()
+        self.cfg.validate(external_val=val_items is not None, external_test=test_items is not None)
 
         if not items:
             raise ValueError("TrainingPipeline.run requires a non-empty list of items")
@@ -160,6 +242,62 @@ class TrainingPipeline:
             raise ValueError(
                 f"StratifiedKFold(n_folds={n_folds}) needs at least {n_folds} examples "
                 f"per class; these class(es) have too few (key, count): {shown_counts}{suffix}"
+            )
+
+        # External splits: check labels + leakage before any encoding happens.
+        train_texts = {it.text for it in items}
+        self._validate_external("validation", val_items, label_space, train_texts)
+        self._validate_external("test", test_items, label_space, train_texts)
+        if val_items is not None and test_items is not None:
+            val_texts = {it.text for it in val_items}
+            n_shared = sum(1 for it in test_items if it.text in val_texts)
+            if n_shared:
+                log.warning(
+                    "%d item(s) appear in both the external validation and test sets; "
+                    "calibration and evaluation are no longer independent",
+                    n_shared,
+                )
+
+    def _validate_external(
+        self,
+        name: str,
+        ext_items: Optional[Sequence[LabeledItem]],
+        label_space: LabelSpace,
+        train_texts: set,
+    ) -> None:
+        """Validate one external split (val or test) against the same fail-fast
+        contract as the training inputs, before any encoding.
+
+        - The split, if supplied, must be non-empty.
+        - Every label must be defined in ``label_space`` (checked before encoding
+          so an unknown label surfaces here, not deep in ``encode_labels``).
+        - No exact-text overlap with the training items. An overlapping item sits
+          in the deployed index the external set is scored against, self-retrieves
+          with a perfect match, and silently inflates calibration/evaluation — the
+          leakage trap T66 warns about. This is a hard error, not a warning.
+        """
+        if ext_items is None:
+            return
+        if not ext_items:
+            raise ValueError(f"external {name} set was provided but is empty")
+
+        known = set(label_space.keys)
+        unknown = sorted({it.label for it in ext_items if it.label not in known})
+        if unknown:
+            shown = unknown[:10]
+            suffix = " ..." if len(unknown) > 10 else ""
+            raise ValueError(
+                f"{len(unknown)} external {name}-set label(s) are not defined in the "
+                f"LabelSpace: {shown}{suffix}"
+            )
+
+        n_overlap = sum(1 for it in ext_items if it.text in train_texts)
+        if n_overlap:
+            raise ValueError(
+                f"{n_overlap} item(s) in the external {name} set have text identical to a "
+                f"training item. Such an item sits in the deployed index, self-retrieves a "
+                f"perfect match, and silently inflates calibration/evaluation. The external "
+                f"{name} set must be disjoint from the training items."
             )
 
     # ---------------------------------------------------------------- (1) OOF
@@ -216,11 +354,56 @@ class TrainingPipeline:
         oof.attrs["candidate_recall"] = recall
         return oof
 
+    def _featurize_external(
+        self,
+        ext_items: Sequence[LabeledItem],
+        label_space: LabelSpace,
+        encoder: TextEncoder,
+        dense: DenseRetrieverAdapter,
+        lexical: LexicalRetrieverAdapter,
+    ) -> Tuple[pd.DataFrame, np.ndarray]:
+        """Featurize an external val/test set against the *deployment* index.
+
+        The dense/lexical indices here are the ones built from all training items
+        (the same objects that ship in the model), so external items are scored
+        under the production condition and never touch the out-of-fold loop. The
+        returned frame carries the same columns as an OOF fold (feature columns +
+        ``item_id`` + ``candidate`` + ``is_true``) but no ``fold`` column: external
+        rows are consumed directly, not filtered by fold role.
+
+        Returns ``(features, y)`` where ``y`` is the external labels encoded to
+        class indices, aligned to ``item_id`` (which is a positional index into
+        ``ext_items``) — the evaluation path needs it to recover the true class of
+        items whose true label missed the candidate set.
+        """
+        assert self.assembler is not None  # set in run() before this is called
+        texts = [it.text for it in ext_items]
+        y = np.array(label_space.encode_labels([it.label for it in ext_items]), dtype=np.int64)
+        q_emb = encoder.encode_queries(texts)
+        feats = self.assembler.assemble(
+            texts,
+            q_emb,
+            dense,
+            lexical,
+            self.cfg.retrieval.k_neighbors,
+            query_ids=list(range(len(texts))),
+            query_labels=y,
+            chunk=self.cfg.retrieval.feature_chunk,
+        )
+        return feats, y
+
     # ----------------------------------------------------- (2-3) fusion + thresholds
-    def _fit_fusion(self, oof: pd.DataFrame):
-        roles = self.cfg.training.fold_roles()
+    def _fit_fusion(self, oof: pd.DataFrame, roles: dict, val_feats: Optional[pd.DataFrame] = None):
+        """Fit the fusion model on the training folds, then the calibrator and
+        abstention thresholds on the calibration data.
+
+        The calibration data is the external validation set (``val_feats``) when
+        one was supplied, otherwise the internal calibration fold. When external,
+        ``roles["calibration"]`` is empty and that fold has already joined
+        ``roles["train"]``, so no training rows are lost.
+        """
         tr = oof[oof["fold"].isin(roles["train"])]
-        ca = oof[oof["fold"].isin(roles["calibration"])]
+        ca = val_feats if val_feats is not None else oof[oof["fold"].isin(roles["calibration"])]
 
         fusion = build_fusion(self.cfg.fusion)
         if getattr(fusion, "NEEDS_GROUPS", False):
@@ -253,16 +436,39 @@ class TrainingPipeline:
         return fusion, calibrator, AbstentionPolicy(global_thr, per_class)
 
     # ---------------------------------------------------------------- (4) evaluate
-    def _evaluate(self, oof, y, label_space, fusion, calibrator, abstention):
-        """Score the untouched test fold and assemble the full evaluation.
+    def _evaluate(
+        self,
+        oof,
+        roles,
+        y,
+        label_space,
+        fusion,
+        calibrator,
+        abstention,
+        test_feats: Optional[pd.DataFrame] = None,
+        test_y: Optional[np.ndarray] = None,
+    ):
+        """Score the held-out test set and assemble the full evaluation.
+
+        The test set is the external test set (``test_feats``) when one was
+        supplied, otherwise the untouched internal test fold. ``true_y`` is the
+        matching label array: the external test's own labels, or the training
+        labels for the internal fold (``item_id`` indexes into whichever set the
+        features came from).
 
         Returns ``(CoverageReport, evaluation_dict)``: the report is the compact
         headline (kept for the public API), and the dict is the rich, persistable
         report (per-class breakdown, calibration, risk-coverage) built from the
         same per-item decisions.
         """
-        roles = self.cfg.training.fold_roles()
-        te = oof[oof["fold"].isin(roles["test"])]
+        if test_feats is not None:
+            # test_feats and test_y are produced together by _featurize_external.
+            assert test_y is not None
+            te = test_feats
+            true_y = test_y
+        else:
+            te = oof[oof["fold"].isin(roles["test"])]
+            true_y = y
         decided = top_per_item(add_confidence(te, fusion, calibrator))
 
         item_ids = decided["item_id"].to_numpy(dtype=np.intp)
@@ -270,9 +476,10 @@ class TrainingPipeline:
         conf = decided["conf"].to_numpy(dtype=np.float64)
         correct = decided["is_true"].to_numpy().astype(bool)
         accept = abstention.accept(conf, pred_idx)
-        # item_id is the original item index (query_ids=va), so y[item_id] is the
-        # true class even for items whose true class missed the candidate set.
-        true_idx = y[item_ids]
+        # item_id is the positional index into the scored set (query_ids), so
+        # true_y[item_id] is the true class even for items whose true class missed
+        # the candidate set.
+        true_idx = true_y[item_ids]
 
         n = len(decided)
         coverage = float(accept.mean()) if n else 0.0
@@ -304,9 +511,18 @@ class TrainingPipeline:
         return report, evaluation
 
     # ---------------------------------------------------------------- (5) deploy
-    def _build_deployment(
-        self, texts, y, label_space, fusion, calibrator, abstention
-    ) -> DeployedArtifacts:
+    def _build_deployment_index(
+        self, texts, y, label_space
+    ) -> Tuple[TextEncoder, DenseRetrieverAdapter, LexicalRetrieverAdapter]:
+        """Fit the final encoder and build the dense + lexical indices over *all*
+        training items.
+
+        Built once and returned so a single set of index objects serves two
+        purposes: featurizing any external val/test set (production-condition
+        scoring) and shipping inside the ``DeployedArtifacts``. Splitting this out
+        of deployment assembly is what lets the external sets be scored against the
+        exact index the model will use in production.
+        """
         if self._use_per_fold_encoder():
             items = [
                 LabeledItem(texts[i], label_space.key_at(int(y[i]))) for i in range(len(texts))
@@ -316,6 +532,4 @@ class TrainingPipeline:
             encoder = self._load_shared_encoder()
         dense = DenseRetrieverAdapter.build(encoder, texts, y, label_space, self.cfg.retrieval)
         lexical = LexicalRetrieverAdapter.build(texts, y, label_space, self.cfg.retrieval)
-        return DeployedArtifacts(
-            self.cfg, label_space, encoder, dense, lexical, fusion, calibrator, abstention
-        )
+        return encoder, dense, lexical

@@ -1,6 +1,6 @@
 # T77 — User-provided validation/test splits (bring your own val, test, or both)
 
-status: todo
+status: done
 tier: 7
 depends_on: T61
 

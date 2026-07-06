@@ -148,4 +148,4 @@ existing one. T70 is the high-value capability; T71 is a design spike gated on i
 | T74 | `--config` file for the CLIs: reach the full PipelineConfig without Python      | done   | T60          |
 | T75 | Frame-native API (interchange protocols, iterables) + streaming infer (`--chunksize`) | todo | T30    |
 | T76 | Numpy-only inference path: drop pandas from the hot loop — *gated on T34*       | todo   | T34, T75     |
-| T77 | User-provided validation/test splits (`--val-items` / `--test-items`)          | todo   | T61          |
+| T77 | User-provided validation/test splits (`--val-items` / `--test-items`)          | done   | T61          |
