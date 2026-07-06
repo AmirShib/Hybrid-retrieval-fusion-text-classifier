@@ -283,14 +283,24 @@ def evaluate_decisions(
 
 
 def build_manifest(
-    n_training_items: int, n_classes: int, config: Any, n_evaluated: Optional[int] = None
+    n_training_items: int,
+    n_classes: int,
+    config: Any,
+    n_evaluated: Optional[int] = None,
+    splits: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """A provenance record: package version, timestamp, data shape, and config.
 
     Persisted alongside the metrics so a trained model can be audited later —
     what was it trained on, when, with which version and settings.
+
+    ``splits`` records where the calibration and test data came from — an
+    internal cross-validation fold or an external set the caller supplied (with
+    its size). It answers "what was this model calibrated and evaluated on?"
+    from the model directory alone, e.g. ``{"val": "external:n=1234", "test":
+    "internal-fold"}``.
     """
-    return {
+    manifest = {
         "package_version": __version__,
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
         "n_training_items": int(n_training_items),
@@ -298,6 +308,9 @@ def build_manifest(
         "n_evaluated": (int(n_evaluated) if n_evaluated is not None else None),
         "config": config.to_dict() if hasattr(config, "to_dict") else config,
     }
+    if splits is not None:
+        manifest["splits"] = splits
+    return manifest
 
 
 def render_model_card(manifest: Dict[str, Any], evaluation: Dict[str, Any]) -> str:

@@ -6,11 +6,19 @@ Usage:
         --items items.csv \           # columns: text,label
         --classes classes.csv \       # columns: key,description
         --out model_dir/ \
-        [--encoder-kind tfidf] [--per-fold-encoder] [--target-precision 0.95] [--folds 5]
+        [--encoder-kind tfidf] [--per-fold-encoder] [--target-precision 0.95] [--folds 5] \
+        [--val-items val.csv] [--test-items test.csv]
 
 `label` in items.csv must match a `key` in classes.csv. Writes a portable model
 directory plus `evaluation.json` and `model_card.md` summarizing held-out
 performance.
+
+Bring your own split: `--val-items` calibrates + tunes thresholds on an external
+validation set, `--test-items` evaluates on an external test set (each optional,
+same schema as `--items`, must be disjoint from it). With both, every internal
+fold trains the fusion model, so `--folds 2` suffices. This is the supported
+path for a temporal split — calibrate on a later slice, evaluate on a later one
+still — while keeping the persisted evaluation evidence.
 
 Every field of `PipelineConfig` (fusion kind + xgb_params, calibration kind,
 bm25_token_kwargs, encoder params, ...) is reachable via `--config config.json`
@@ -82,6 +90,24 @@ def main() -> None:
         default=None,
         help="rigorous (expensive): fine-tune a fresh encoder per fold",
     )
+    p.add_argument(
+        "--val-items",
+        default=None,
+        help="optional external validation set (CSV, same --text-col/--label-col "
+        "schema as --items): calibrate and tune abstention thresholds on it instead "
+        "of an internal fold. Must be disjoint from --items. Enables a temporal "
+        "split (calibrate on a later slice) and frees the calibration fold for "
+        "fusion training.",
+    )
+    p.add_argument(
+        "--test-items",
+        default=None,
+        help="optional external test set (CSV, same schema as --items): the "
+        "held-out evaluation (evaluation.json/model_card.md) runs on it instead "
+        "of an internal fold. Must be disjoint from --items. With both --val-items "
+        "and --test-items, every internal fold trains the fusion model (--folds may "
+        "then be 2).",
+    )
     p.add_argument("--text-col", default="text", help="items.csv text column")
     p.add_argument("--label-col", default="label", help="items.csv label column")
     p.add_argument("--key-col", default="key", help="classes.csv key column")
@@ -116,8 +142,12 @@ def main() -> None:
     if args.per_fold_encoder:
         cfg.training.use_per_fold_encoder = True
 
+    # External splits relax the fold floor to >= 2 (each retires a fold role), so
+    # validate with the same external flags run() will use.
     try:
-        cfg.validate()
+        cfg.validate(
+            external_val=args.val_items is not None, external_test=args.test_items is not None
+        )
     except ValueError as exc:
         p.error(str(exc))
 
@@ -146,6 +176,12 @@ def main() -> None:
 
     label_space = read_label_space(args.classes, args.key_col, args.desc_col)
     items = read_items(args.items, args.text_col, args.label_col)
+    val_items = (
+        read_items(args.val_items, args.text_col, args.label_col) if args.val_items else None
+    )
+    test_items = (
+        read_items(args.test_items, args.text_col, args.label_col) if args.test_items else None
+    )
 
     if enc_spec.corpus_dependent:
         logging.info(
@@ -154,7 +190,9 @@ def main() -> None:
             cfg.encoder.model_name_or_path,
         )
 
-    _, report = TrainingPipeline(cfg).run(items, label_space, output_dir=args.out)
+    _, report = TrainingPipeline(cfg).run(
+        items, label_space, output_dir=args.out, val_items=val_items, test_items=test_items
+    )
     print("\n=== coverage report (test fold) ===")
     print(f"candidate recall      : {report.candidate_recall:.4f}")
     print(f"coverage              : {report.coverage:.4f}")

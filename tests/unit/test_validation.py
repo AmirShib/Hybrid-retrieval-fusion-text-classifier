@@ -318,3 +318,127 @@ class TestPipelineConfigFromDict:
     def test_non_dict_section_errors(self):
         with pytest.raises(ValueError, match="'fusion'"):
             PipelineConfig.from_dict({"fusion": "lightgbm"})
+
+
+# --------------------------------------------------------------------------- #
+# Part G — External val/test splits (T77)
+#
+# The validation fires before any encoding, so we drive it through
+# _validate_inputs directly; no real encoder or model is needed.
+# --------------------------------------------------------------------------- #
+def _train_items() -> list:
+    return [LabeledItem(f"a text {i}", "A") for i in range(6)] + [
+        LabeledItem(f"b text {i}", "B") for i in range(6)
+    ]
+
+
+class TestExternalSplitValidation:
+    def test_unknown_val_label_raises_before_any_work(self):
+        val = [LabeledItem("fresh val text", "GHOST")]
+        with pytest.raises(ValueError, match="external validation-set label") as exc:
+            _pipeline()._validate_inputs(_train_items(), _space(), val_items=val)
+        assert "GHOST" in str(exc.value)
+
+    def test_unknown_test_label_raises(self):
+        test = [LabeledItem("fresh test text", "GHOST")]
+        with pytest.raises(ValueError, match="external test-set label"):
+            _pipeline()._validate_inputs(_train_items(), _space(), test_items=test)
+
+    def test_train_val_text_overlap_raises_and_names_count(self):
+        train = _train_items()
+        # Two val items reuse training text verbatim -> leakage trap.
+        val = [train[0], train[3], LabeledItem("genuinely new", "A")]
+        with pytest.raises(ValueError, match="identical to a") as exc:
+            _pipeline()._validate_inputs(train, _space(), val_items=val)
+        assert "2 item(s)" in str(exc.value)
+
+    def test_train_test_text_overlap_raises(self):
+        train = _train_items()
+        test = [train[1], LabeledItem("brand new test", "B")]
+        with pytest.raises(ValueError, match="1 item\\(s\\).*identical"):
+            _pipeline()._validate_inputs(train, _space(), test_items=test)
+
+    def test_empty_external_set_raises(self):
+        with pytest.raises(ValueError, match="external validation set was provided but is empty"):
+            _pipeline()._validate_inputs(_train_items(), _space(), val_items=[])
+
+    def test_disjoint_external_sets_pass(self):
+        val = [LabeledItem(f"held out a {i}", "A") for i in range(3)]
+        test = [LabeledItem(f"held out b {i}", "B") for i in range(3)]
+        # Must not raise: labels known, no overlap with training text.
+        _pipeline(n_folds=2)._validate_inputs(
+            _train_items(), _space(), val_items=val, test_items=test
+        )
+
+    def test_val_test_overlap_only_warns(self, caplog):
+        shared = LabeledItem("shared held-out text", "A")
+        val = [shared, LabeledItem("val only", "B")]
+        test = [shared, LabeledItem("test only", "B")]
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            _pipeline(n_folds=2)._validate_inputs(
+                _train_items(), _space(), val_items=val, test_items=test
+            )
+        assert any("both the external validation and test" in r.message for r in caplog.records)
+
+
+class TestExternalFoldFloor:
+    """The n_folds >= 3 floor relaxes to >= 2 when a fold role is retired."""
+
+    @pytest.mark.parametrize(
+        "external_val, external_test",
+        [(True, False), (False, True), (True, True)],
+    )
+    def test_two_folds_allowed_with_an_external_split(self, external_val, external_test):
+        cfg = PipelineConfig()
+        cfg.training.n_folds = 2
+        cfg.validate(external_val=external_val, external_test=external_test)  # must not raise
+
+    def test_two_folds_still_rejected_without_external_splits(self):
+        cfg = PipelineConfig()
+        cfg.training.n_folds = 2
+        with pytest.raises(ValueError, match="n_folds"):
+            cfg.validate()
+
+    def test_one_fold_rejected_even_with_external_splits(self):
+        cfg = PipelineConfig()
+        cfg.training.n_folds = 1
+        with pytest.raises(ValueError, match="n_folds") as exc:
+            cfg.validate(external_val=True, external_test=True)
+        assert "out-of-fold" in str(exc.value)
+
+
+class TestFoldRoles:
+    """fold_roles() retires the calibration/test role for each external split,
+    handing the freed fold to fusion training and never dropping a fold."""
+
+    def test_default_assignment_unchanged(self):
+        cfg = PipelineConfig()
+        cfg.training.n_folds = 5
+        roles = cfg.training.fold_roles()
+        assert roles == {"train": [0, 1, 2], "calibration": [3], "test": [4]}
+
+    def test_external_val_retires_calibration_fold_into_training(self):
+        cfg = PipelineConfig()
+        cfg.training.n_folds = 5
+        roles = cfg.training.fold_roles(external_val=True)
+        assert roles["calibration"] == []
+        assert roles["test"] == [4]
+        # The fold that would have calibrated now trains fusion; no fold is lost.
+        assert sorted(roles["train"] + roles["test"]) == [0, 1, 2, 3, 4]
+        assert set(roles["train"]) == {0, 1, 2, 3}
+
+    def test_external_test_retires_test_fold_into_training(self):
+        cfg = PipelineConfig()
+        cfg.training.n_folds = 5
+        roles = cfg.training.fold_roles(external_test=True)
+        assert roles["test"] == []
+        assert len(roles["calibration"]) == 1
+        assert sorted(roles["train"] + roles["calibration"]) == [0, 1, 2, 3, 4]
+
+    def test_both_external_all_folds_train_fusion(self):
+        cfg = PipelineConfig()
+        cfg.training.n_folds = 2
+        roles = cfg.training.fold_roles(external_val=True, external_test=True)
+        assert roles == {"train": [0, 1], "calibration": [], "test": []}

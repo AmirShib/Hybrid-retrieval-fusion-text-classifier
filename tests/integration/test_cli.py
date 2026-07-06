@@ -222,6 +222,106 @@ class TestConfigFileFlag:
 
 
 # --------------------------------------------------------------------------- #
+# T77 — external val/test split flags
+# --------------------------------------------------------------------------- #
+def _write_split_csvs(tmp_path) -> tuple[str, str, str, str]:
+    """Write disjoint train/val/test items CSVs + a classes CSV from one pool."""
+    label_space, items = make_synthetic(n_classes=4, per_class=12, seed=29)
+    n = len(items)
+    val, test, train = items[: n // 6], items[n // 6 : n // 3], items[n // 3 :]
+    paths = {}
+    for name, subset in [("train", train), ("val", val), ("test", test)]:
+        path = tmp_path / f"{name}.csv"
+        pd.DataFrame(
+            {"text": [it.text for it in subset], "label": [it.label for it in subset]}
+        ).to_csv(path, index=False)
+        paths[name] = str(path)
+    classes_csv = tmp_path / "classes.csv"
+    pd.DataFrame({"key": label_space.keys, "description": label_space.descriptions}).to_csv(
+        classes_csv, index=False
+    )
+    return paths["train"], paths["val"], paths["test"], str(classes_csv)
+
+
+class TestExternalSplitFlags:
+    def test_both_external_sets_train_with_two_folds(self, tmp_path):
+        """--val-items + --test-items relax the fold floor to 2 and record
+        provenance in the manifest."""
+        train_csv, val_csv, test_csv, classes_csv = _write_split_csvs(tmp_path)
+        out = str(tmp_path / "model")
+        _run(
+            [
+                "train",
+                "--items",
+                train_csv,
+                "--classes",
+                classes_csv,
+                "--out",
+                out,
+                "--encoder-kind",
+                "tfidf",
+                "--folds",
+                "2",
+                "--target-precision",
+                "0.5",
+                "--val-items",
+                val_csv,
+                "--test-items",
+                test_csv,
+            ]
+        )
+        with open(os.path.join(out, "evaluation.json")) as fh:
+            manifest = json.load(fh)["manifest"]
+        assert manifest["splits"]["val"].startswith("external:n=")
+        assert manifest["splits"]["test"].startswith("external:n=")
+
+    def test_two_folds_without_external_sets_is_rejected(self, tmp_path, capsys):
+        """The relaxed floor is conditional: plain --folds 2 still fails fast."""
+        train_csv, _, _, classes_csv = _write_split_csvs(tmp_path)
+        with pytest.raises(SystemExit) as exc:
+            _run(
+                [
+                    "train",
+                    "--items",
+                    train_csv,
+                    "--classes",
+                    classes_csv,
+                    "--out",
+                    str(tmp_path / "model"),
+                    "--encoder-kind",
+                    "tfidf",
+                    "--folds",
+                    "2",
+                ]
+            )
+        assert exc.value.code != 0
+        assert "n_folds" in capsys.readouterr().err
+
+    def test_leaky_val_set_fails_fast(self, tmp_path, capsys):
+        """Pointing --val-items at the training file is the leakage trap; hard error."""
+        train_csv, _, _, classes_csv = _write_split_csvs(tmp_path)
+        with pytest.raises((SystemExit, ValueError)) as exc:
+            _run(
+                [
+                    "train",
+                    "--items",
+                    train_csv,
+                    "--classes",
+                    classes_csv,
+                    "--out",
+                    str(tmp_path / "model"),
+                    "--encoder-kind",
+                    "tfidf",
+                    "--folds",
+                    "3",
+                    "--val-items",
+                    train_csv,  # identical to --items -> full overlap
+                ]
+            )
+        assert "identical to a training item" in str(exc.value)
+
+
+# --------------------------------------------------------------------------- #
 # T65 — infer CLI --top-k
 # --------------------------------------------------------------------------- #
 def _run_infer(argv) -> None:

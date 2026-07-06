@@ -98,10 +98,29 @@ class TrainingConfig:
     use_per_fold_encoder: bool = False  # True = rigorous (refit encoder per fold), expensive
     random_state: int = 0
 
-    def fold_roles(self) -> Dict[str, List[int]]:
-        """Last fold = test, second-last = calibration, rest = fusion training."""
+    def fold_roles(
+        self, *, external_val: bool = False, external_test: bool = False
+    ) -> Dict[str, List[int]]:
+        """Assign each cross-validation fold a role.
+
+        Default (no external splits): last fold = test, second-to-last =
+        calibration, the rest train the fusion model.
+
+        When the caller supplies an external validation and/or test set, the
+        corresponding fold role is *retired* and its fold joins the fusion
+        training folds — the calibrator/thresholds are then fit on the external
+        val set, and the held-out evaluation runs on the external test set. A
+        retired role returns an empty list (not a new type). With both external
+        sets, every fold trains the fusion model; the k-fold machinery still
+        runs because the fusion model's own training rows must stay leakage-free
+        (out-of-fold feature generation), so ``n_folds >= 2`` is enough.
+        """
         folds = list(range(self.n_folds))
-        return {"train": folds[:-2], "calibration": [folds[-2]], "test": [folds[-1]]}
+        # Reserve folds from the end so the no-external assignment is byte-for-byte
+        # what it was before (test = last, calibration = second-to-last).
+        test = [] if external_test else [folds.pop()]
+        calibration = [] if external_val else [folds.pop()]
+        return {"train": folds, "calibration": calibration, "test": test}
 
 
 @dataclass
@@ -113,23 +132,40 @@ class PipelineConfig:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     candidate_top_n: int = 10
 
-    def validate(self) -> None:
+    def validate(self, *, external_val: bool = False, external_test: bool = False) -> None:
         """Reject config values that produce silently broken runs or deep
         framework tracebacks. Raises ``ValueError`` naming the field, the
         received value, and the constraint.
+
+        ``external_val``/``external_test`` relax the fold floor: each external
+        split retires a fold role (calibration or test), so one train fold plus
+        the two folds required for out-of-fold feature generation is no longer
+        the floor. With either external split present the floor drops to
+        ``n_folds >= 2`` (still two folds for OOF); with neither it stays
+        ``>= 3`` (one train + one calibration + one test).
 
         Registry-key existence (encoder/fusion/calibrator ``kind``) is *not*
         checked here: the registry already raises a good error at build time,
         and this module must stay import-free of infrastructure.
         """
+        if external_val or external_test:
+            n_folds_ok = self.training.n_folds >= 2
+            n_folds_constraint = (
+                ">= 2 (an external split retires a fold role; two folds are still "
+                "required for out-of-fold feature generation)"
+            )
+        else:
+            n_folds_ok = self.training.n_folds >= 3
+            n_folds_constraint = ">= 3 (one train fold + one calibration fold + one test fold)"
         checks = [
             # fold_roles() needs >=1 train fold + 1 calibration + 1 test; with
-            # n_folds=2 the fusion training set is silently empty.
+            # n_folds=2 the fusion training set is silently empty. External
+            # splits retire roles, so the floor relaxes to 2 (see above).
             (
                 "training.n_folds",
                 self.training.n_folds,
-                self.training.n_folds >= 3,
-                ">= 3 (one train fold + one calibration fold + one test fold)",
+                n_folds_ok,
+                n_folds_constraint,
             ),
             (
                 "training.target_precision",
