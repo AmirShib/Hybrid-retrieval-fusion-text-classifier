@@ -267,6 +267,46 @@ Each trained model directory carries its own evidence: `evaluation.json` (the
 full held-out report) and `model_card.md` (a human-readable summary with the
 package version, dataset shape, headline metrics, and the abstention thresholds).
 
+**Grow the taxonomy without retraining:** a deployed model's label space can be
+widened after training — for a class that appears once the model has shipped, or
+to evaluate against a test set with labels the training data never contained.
+Because every feature is a per-*candidate* retrieval signal (there is no
+per-class output dimension), the trained fusion model, calibrator, and
+abstention policy are reused verbatim; only the class-indexed retrieval state
+grows. New classes are appended at the end, so every existing class index — and
+therefore every existing item's prediction — is unchanged.
+
+```python
+from text_classifier import ClassDefinition, InferencePipeline
+
+pipe = InferencePipeline.from_directory("model_dir/")
+pipe = pipe.with_added_classes([
+    ClassDefinition("REFURBISHED_PHONES", "second-hand and refurbished mobile phones"),
+    ("PET_INSURANCE", "insurance policies for pets"),   # (key, description) also accepted
+])
+pipe.predict(["cheap used iphone"])   # can now return REFURBISHED_PHONES
+```
+
+A class added this way is **description-only**: with no training examples it has
+no class prototype and no kNN support (`class_freq = 0`). It is retrievable and
+can win a query on description similarity alone, but the fusion model — trained
+when every candidate had example support — assigns it a *low calibrated
+confidence*, so under a precision-tuned abstention threshold it will usually
+route to human review rather than auto-accept. That is the honest signal for a
+class with no example evidence. The recommended lifecycle: add the class at
+inference for immediate (cautious) coverage, collect examples from the reviewed
+queue, and retrain once at least `n_folds` examples exist — the encoder is
+frozen, so retraining is cheap and lifts the class to full confidence.
+
+To score a labeled set whose labels exceed the trained taxonomy, pass the wider
+class list to the eval CLI with `--classes`; any class not seen at training is
+added description-only before scoring:
+
+```bash
+text-classifier-eval --model model_dir/ --input labeled.csv \
+    --classes full_taxonomy.csv --output report.json
+```
+
 ### Worked examples
 
 `examples/clinc150/` is a runnable, fully offline demo on CLINC150 (150 intents +

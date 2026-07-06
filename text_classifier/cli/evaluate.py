@@ -10,6 +10,13 @@ Usage:
 Reports coverage, accuracy on accepted, calibration (Brier / ECE), a
 risk-coverage curve, and a per-class breakdown. Use it to validate a model on a
 held-out set, or to monitor a deployed model for drift over time.
+
+With ``--classes classes.csv`` (columns: key, description) the model's label
+space is first widened with any class in the file it was not trained on, so a
+test set that references *new* classes can be scored end-to-end (T78). Added
+classes are description-only — retrievable from their description but, lacking
+example support, low-confidence and prone to abstain — so this measures the
+floor a not-yet-retrained class reaches, not trained-class performance.
 """
 
 from __future__ import annotations
@@ -21,7 +28,26 @@ import numpy as np
 
 from .. import InferencePipeline
 from ..application.evaluation import _json_safe, build_manifest, evaluate_decisions
-from ._common import add_logging_arg, configure_logging, read_items
+from ._common import add_logging_arg, configure_logging, read_items, read_label_space
+
+
+def _extend_with_new_classes(pipeline: InferencePipeline, classes_path: str) -> InferencePipeline:
+    """Widen ``pipeline``'s label space with any class in ``classes_path`` that the
+    model was not trained on (description-only, no retrain). Existing classes in
+    the file are ignored — their description in the model wins; changing it needs
+    a retrain. Returns the original pipeline unchanged when there is nothing new."""
+    file_space = read_label_space(classes_path)
+    known = set(pipeline.label_space.keys)
+    new = [(k, d) for k, d in zip(file_space.keys, file_space.descriptions) if k not in known]
+    if not new:
+        print(f"no new classes in {classes_path!r}; evaluating against the model's own label space")
+        return pipeline
+    print(
+        f"added {len(new)} class(es) from {classes_path!r} not seen at training "
+        f"(description-only, no retrain): {[k for k, _ in new][:10]}"
+        f"{' ...' if len(new) > 10 else ''}"
+    )
+    return pipeline.with_added_classes(new)
 
 
 def _pct(x) -> str:
@@ -41,11 +67,22 @@ def main() -> None:
     p.add_argument("--output", default=None, help="optional path to write the full JSON report")
     p.add_argument("--text-col", default="text")
     p.add_argument("--label-col", default="label")
+    p.add_argument(
+        "--classes",
+        default=None,
+        help="optional classes CSV (key, description); classes not already in the "
+        "model are added description-only (no retrain) so a test set with new "
+        "labels can be scored. Such classes are low-confidence and prone to abstain.",
+    )
     add_logging_arg(p)
     args = p.parse_args()
     configure_logging(args.log_level)
 
     pipeline = InferencePipeline.from_directory(args.model)
+
+    if args.classes:
+        pipeline = _extend_with_new_classes(pipeline, args.classes)
+
     label_space = pipeline.label_space
     keys = label_space.keys
     key_to_idx = {k: i for i, k in enumerate(keys)}

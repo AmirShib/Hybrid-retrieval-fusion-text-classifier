@@ -13,6 +13,7 @@ import numpy as np
 from ..config import PipelineConfig
 from ..domain import CandidatePolicy, LabelSpace, Prediction
 from ..infrastructure import ArtifactRepository, DeployedArtifacts
+from ..infrastructure.persistence import NewClass
 from .features import FeatureAssembler
 from .scoring import add_confidence, top_k_per_item, top_per_item
 
@@ -35,6 +36,22 @@ class InferencePipeline:
     @property
     def config(self) -> PipelineConfig:
         return self._a.config
+
+    @property
+    def artifacts(self) -> DeployedArtifacts:
+        return self._a
+
+    def with_added_classes(self, new_classes: Sequence[NewClass]) -> "InferencePipeline":
+        """Return a new pipeline whose label space is widened with ``new_classes``,
+        **without retraining** (see ``DeployedArtifacts.with_added_classes``).
+
+        Each ``new_classes`` entry is a ``ClassDefinition`` or a
+        ``(key, description)`` pair. Added classes are description-only: they are
+        retrievable from their description but, lacking example support, draw a low
+        calibrated confidence and typically abstain under a precision-tuned
+        threshold until they are seeded and the model is retrained. The original
+        pipeline is left unchanged."""
+        return InferencePipeline(self._a.with_added_classes(new_classes))
 
     def predict(self, texts: Sequence[str]) -> List[Prediction]:
         """Classify each input string.

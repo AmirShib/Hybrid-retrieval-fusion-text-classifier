@@ -132,6 +132,11 @@ loading a shipped model dir must not execute code).
 | T67 | Pickle-free model artifacts (npz/json state; legacy `.pkl` fallback)            | todo   | T60          |
 | T68 | Taxonomy update without retrain: add classes/examples to a deployed model       | todo   | T61, T66     |
 | T69 | Prediction explanations: per-signal evidence, neighbors, SHAP (`--explain`)     | todo   | T30, T65     |
+| T78 | Larger/different label space at test & inference time (add classes, no retrain)  | in-review | T61, T77  |
+
+_T78 delivers the description-only "add classes without retrain" path (a focused
+slice of T68's scope); T68's remaining piece is seeding examples into a deployed
+model, which T78 deliberately defers._
 
 ## Tier 7 — Extensibility & architecture (forward-looking)
 

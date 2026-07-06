@@ -17,8 +17,8 @@ import json
 import logging
 import os
 import pickle
-from dataclasses import dataclass
-from typing import Dict
+from dataclasses import dataclass, replace
+from typing import Dict, Sequence, Union
 
 import numpy as np
 
@@ -47,6 +47,10 @@ _LEGACY_COMPONENTS = {
 }
 
 
+# A new class may be given as a ClassDefinition or a plain (key, description) pair.
+NewClass = Union[ClassDefinition, Sequence[str]]
+
+
 @dataclass
 class DeployedArtifacts:
     """Everything the inference pipeline needs, in memory. Component fields are
@@ -61,6 +65,60 @@ class DeployedArtifacts:
     fusion: FusionModel
     calibrator: ConfidenceCalibrator
     abstention: AbstentionPolicy
+
+    def with_added_classes(self, new_classes: Sequence[NewClass]) -> "DeployedArtifacts":
+        """Widen this model's label space with new classes, **without retraining**.
+
+        Returns a new ``DeployedArtifacts`` whose label space is extended with
+        ``new_classes`` (``ClassDefinition``s or ``(key, description)`` pairs).
+        The fusion model, calibrator, and abstention policy are reused verbatim —
+        every feature is a per-candidate retrieval signal, so adding classes does
+        not change their input or output shape. Only the class-indexed retrieval
+        state grows: the dense description embeddings (encoded with this model's
+        frozen encoder) and the description BM25 (refit — its IDF is corpus-global).
+
+        New classes are appended after the existing ones, so every existing class
+        index is preserved and the trained model applies unchanged.
+
+        Each added class is **description-only**: it has no training examples, so
+        it gets a ``NaN`` prototype, no kNN support, and ``class_freq = 0``. It is
+        retrievable and can win a query on description similarity alone, but the
+        fusion model — trained when every candidate had example support — assigns
+        it a *low calibrated confidence*, so under a precision-tuned abstention
+        threshold it will typically route to human review rather than auto-accept.
+        That is the honest signal for a class with no example evidence; seed
+        examples and retrain (the encoder is frozen, so retraining is cheap) once
+        ``>= n_folds`` examples exist to lift it to full confidence.
+
+        Raises ``ValueError`` if ``new_classes`` is empty, if any new key already
+        exists in the label space, or if the new keys collide with each other.
+        """
+        defs = [
+            c if isinstance(c, ClassDefinition) else ClassDefinition(c[0], c[1])
+            for c in new_classes
+        ]
+        if not defs:
+            raise ValueError("with_added_classes requires at least one new class")
+
+        existing = set(self.label_space.keys)
+        collisions = sorted({d.key for d in defs if d.key in existing})
+        if collisions:
+            raise ValueError(
+                f"cannot add class(es) already in the label space: {collisions}. "
+                "To change an existing class's description, retrain the model."
+            )
+
+        current = [
+            ClassDefinition(k, d)
+            for k, d in zip(self.label_space.keys, self.label_space.descriptions)
+        ]
+        # LabelSpace raises on new-vs-new duplicate keys; existing collisions are
+        # already reported above with a clearer, more actionable message.
+        extended_space = LabelSpace(current + defs)
+
+        dense = self.dense.with_added_classes(self.encoder, [d.description for d in defs])
+        lexical = self.lexical.with_added_descriptions(extended_space.descriptions)
+        return replace(self, label_space=extended_space, dense=dense, lexical=lexical)
 
 
 class ArtifactRepository:
