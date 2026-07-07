@@ -117,6 +117,22 @@ class LexicalRetrieverAdapter(LexicalRetriever):
     def description_score(self, query_texts: Sequence[str]) -> np.ndarray:
         return self._descriptions.score_matrix(query_texts)
 
+    def with_added_descriptions(self, all_descriptions: Sequence[str]) -> "LexicalRetrieverAdapter":
+        """Return a copy whose description BM25 is refit over ``all_descriptions``
+        (the full, extended class-description list, existing classes first then
+        the new ones).
+
+        Used to widen a trained model's label space at inference time (T78). BM25
+        IDF is corpus-global, so the description side must be *refit* over every
+        description, not have a row appended — hence the full list. The example
+        index and its labels are reused verbatim: a class added this way is
+        description-only (no example support), so nothing on the example side
+        changes. The new BM25 keeps the same ``k1``/``b``/tokenizer kwargs as the
+        original, so existing classes score identically."""
+        old = self._descriptions
+        desc = BM25Index(old.k1, old.b, **old.cv_kwargs).fit(all_descriptions)
+        return LexicalRetrieverAdapter(self._examples, self._labels, desc, self._k_chunk)
+
 
 # ------------------------------------------------------------------- dense adapter
 def _dense_topk(
@@ -212,3 +228,37 @@ class DenseRetrieverAdapter(DenseRetriever):
 
     def description_similarity(self, query_emb: np.ndarray) -> np.ndarray:
         return query_emb @ self._s.description_emb.T
+
+    def with_added_classes(
+        self, encoder: TextEncoder, new_descriptions: Sequence[str]
+    ) -> "DenseRetrieverAdapter":
+        """Return a copy extended with new, example-free classes (T78).
+
+        Each new class is appended at the end so existing class indices stay
+        stable. Its description is encoded with the frozen deployment encoder
+        (``encode_documents`` — the document role, matching how the original
+        descriptions were embedded), and it gets an all-``NaN`` prototype row and
+        ``class_freq = 0``: it has no training examples, so it is description-only
+        and carries no prototype/kNN support. The example pool is reused verbatim.
+        """
+        new_descriptions = list(new_descriptions)
+        s = self._s
+        if not new_descriptions:
+            return DenseRetrieverAdapter(s, self._chunk)
+        new_desc = np.asarray(encoder.encode_documents(new_descriptions), dtype=np.float32)
+        dim = s.description_emb.shape[1]
+        if new_desc.shape[1] != dim:
+            raise ValueError(
+                f"encoder produced {new_desc.shape[1]}-dim embeddings but the model's "
+                f"dense index is {dim}-dim; the same encoder must be used to extend it"
+            )
+        m = len(new_descriptions)
+        prototypes = np.concatenate(
+            [s.prototypes, np.full((m, dim), np.nan, dtype=np.float32)], axis=0
+        )
+        class_freq = np.concatenate([s.class_freq, np.zeros(m, dtype=s.class_freq.dtype)])
+        description_emb = np.concatenate([s.description_emb, new_desc], axis=0)
+        extended = DenseState(
+            s.example_emb, s.example_labels, prototypes, description_emb, class_freq
+        )
+        return DenseRetrieverAdapter(extended, self._chunk)

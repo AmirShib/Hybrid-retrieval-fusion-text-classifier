@@ -9,6 +9,17 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 ## [Unreleased]
 
 ### Added
+- Widen a trained model's label space **without retraining**
+  (`DeployedArtifacts.with_added_classes` / `InferencePipeline.with_added_classes`):
+  add classes that appear after a model ships, or evaluate against a label space
+  larger than the training one. New classes are appended (existing class indices
+  are preserved, so the trained fusion model/calibrator are reused verbatim);
+  only the class-indexed retrieval state grows (dense description embeddings +
+  the description BM25, refit for corpus-global IDF). Added classes are
+  *description-only* — retrievable from their description, but with no example
+  support they draw low calibrated confidence and typically abstain under a
+  precision-tuned threshold until seeded and retrained. The `eval` CLI gains
+  `--classes` to score a labeled set whose labels exceed the trained taxonomy.
 - `--config`/`--dump-config` on the train CLI: every `PipelineConfig` field
   (fusion kind + hyperparameters, calibration kind, BM25/encoder kwargs, ...)
   is now reachable from the command line via a JSON file, with precedence
