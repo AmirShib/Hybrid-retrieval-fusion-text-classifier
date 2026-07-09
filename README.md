@@ -1,8 +1,65 @@
 # Hybrid retrieval-fusion text classifier
 
-Classifies free-text items into one of many text-described classes,
-and **abstains** when it isn't confident enough —> routing those items to a human
-(Built with imbalanced data and air-gapped setting in mind).
+Classifies short free text into one of many text-described classes — and
+**abstains when it isn't confident enough**, routing those items to a human
+instead of guessing. Five retrieval signals (dense + lexical, over class
+descriptions + labeled examples) are fused by a small XGBoost model into a
+calibrated `P(correct)`, and the abstention threshold is tuned to hold a target
+accuracy on what it accepts. Built for **imbalanced data**, **air-gapped
+deployment**, and **taxonomies that grow after the model ships**.
+
+```mermaid
+flowchart LR
+    Q[item text] --> S[5 retrieval signals<br/>dense: description / prototype / kNN<br/>BM25: description / kNN]
+    S --> C[candidate classes<br/>union of each signal's top-N]
+    C --> F[XGBoost fusion<br/>~28 features per candidate]
+    F --> K[isotonic<br/>calibration]
+    K --> T{confidence ≥<br/>tuned threshold?}
+    T -->|yes| A[auto-accept]
+    T -->|no| H[human review]
+```
+
+## Results
+
+From the two runnable examples in [`examples/`](examples/) (commands to
+reproduce are in each example's README).
+
+**[CLINC150](examples/clinc150/)** — 150 user intents plus an explicit
+**out-of-scope (OOS)** set. 40-intent subsample, fully offline TF-IDF encoder
+(the floor a real bi-encoder improves on); illustrative — exact numbers vary
+with subsample and seed. The operating point is a knob — the threshold is tuned
+so accepted items hit the target accuracy:
+
+| operating point | in-scope coverage | accuracy on accepted | OOS routed to human |
+|---|---|---|---|
+| `--target-precision 0.99` | 76.5% | 96.5% | 88.6% |
+| `--target-precision 0.999` | 58.8% | 97.9% | 96.7% |
+
+**[COICOP Hebrew](examples/coicop_hebrew/)** — short, messy Hebrew retail
+product names. First **zero-shot**: Hebrew items matched against
+English-language COICOP 2018 category descriptions with a multilingual
+encoder — no labeled data at all. Then **trained**: on ~160k labeled items
+across an 81-category retail taxonomy, the full pipeline reaches **~61%
+coverage at ~90% accuracy-on-accepted** on the held-out split — i.e. ~61% of a
+real product catalog auto-coded at production precision, the rest queued for
+human review.
+
+The risk–coverage trade-off is the product: every trained model ships an
+`evaluation.json` with the full curve, so you pick the operating point from
+*your* cost of a wrong answer vs. a human review.
+
+## Quickstart
+
+```bash
+pip install .
+text-classifier-train --items items.csv --classes classes.csv --out model_dir/
+text-classifier-infer --model model_dir/ --input new_items.csv --output preds.csv
+```
+
+`items.csv` is `text,label`; `classes.csv` is `key,description`. `preds.csv`
+carries a prediction + calibrated confidence per row; abstained rows have an
+empty `predicted_key` — that's the human-review queue. No data yet?
+`python -m scripts.demo` runs an offline end-to-end smoke test (no downloads).
 
 ## How it works
 
@@ -309,19 +366,17 @@ text-classifier-eval --model model_dir/ --input labeled.csv \
 
 ### Worked examples
 
-`examples/clinc150/` is a runnable, fully offline demo on CLINC150 (150 intents +
-an out-of-scope set). It shows the abstention knob in action — raising the
-confidence bar routes more out-of-scope queries to a human while keeping in-scope
-accuracy high. Start with the notebook walkthrough,
-`examples/clinc150/clinc150_abstention_demo.ipynb` (cell-by-cell, with charts);
-`examples/clinc150/README.md` has the command-line equivalent.
+The two demos behind the [Results](#results) table, each with a cell-by-cell
+notebook walkthrough and a command-line equivalent in its README:
 
-`examples/coicop_hebrew/` is a cross-lingual, **zero-shot** demo: short Hebrew
-grocery names classified into the international COICOP 2018 taxonomy (English
-labels) with a multilingual encoder and no labeled training data. It shows the
-encoder + description-similarity signal carrying the easy cases and abstaining on
-the noisy ones, and how the full pipeline takes over once labels exist. See
-`examples/coicop_hebrew/coicop_hebrew_classification.ipynb`.
+- **[`examples/clinc150/`](examples/clinc150/)** — calibrated abstention on
+  CLINC150, fully offline: raising the confidence bar routes more out-of-scope
+  queries to a human while keeping in-scope accuracy high. Start with
+  `clinc150_abstention_demo.ipynb`.
+- **[`examples/coicop_hebrew/`](examples/coicop_hebrew/)** — cross-lingual
+  zero-shot (Hebrew items ↔ English COICOP descriptions, no labels), then the
+  full trained pipeline once labels exist. Start with
+  `coicop_hebrew_classification.ipynb`.
 
 Library:
 
