@@ -9,6 +9,17 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 ## [Unreleased]
 
 ### Added
+- **Pluggable custom fusion features** via a `FeatureProvider` port
+  (`config.features.providers`): contribute columns beyond the built-in ~28 (text
+  length, a domain lexicon hit, an external score) that reach the fusion model at
+  **train and inference in the identical order**. The effective schema is composed
+  at runtime (core columns + each provider's, in order) and persisted into
+  `meta.json`, so a loaded model rebuilds the exact column order. Providers with
+  training-derived state are fit **per fold on out-of-fold rows** (leakage-free,
+  like prototypes/indices) and persist portable artifacts that run air-gapped with
+  no labels; "did not fire" is emitted as `NaN` (XGBoost missing), never a true 0.
+  Ships one sample provider, `class-keyword` (per-class learned keyword overlap).
+  With no providers configured the schema and outputs are byte-for-byte unchanged.
 - Widen a trained model's label space **without retraining**
   (`DeployedArtifacts.with_added_classes` / `InferencePipeline.with_added_classes`):
   add classes that appear after a model ships, or evaluate against a label space

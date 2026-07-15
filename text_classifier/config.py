@@ -91,6 +91,26 @@ class CalibrationConfig:
 
 
 @dataclass
+class FeatureProviderConfig:
+    """One custom feature provider (T70): a registry ``kind`` plus its params.
+    ``params`` is forwarded to the provider's factory (see
+    ``infrastructure/registry.py``)."""
+
+    kind: str  # registry key (see infrastructure/registry.py)
+    params: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class FeaturesConfig:
+    """Custom fusion features (T70). ``providers`` is an *ordered* list — the
+    provider columns are appended to the core ~28 in this order, and that composed
+    order is persisted into ``meta.json``. Empty (the default) means the feature
+    schema and outputs are byte-for-byte identical to a build without T70."""
+
+    providers: List[FeatureProviderConfig] = field(default_factory=list)
+
+
+@dataclass
 class TrainingConfig:
     n_folds: int = 5
     target_precision: float = 0.95
@@ -130,6 +150,7 @@ class PipelineConfig:
     fusion: FusionConfig = field(default_factory=FusionConfig)
     calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
+    features: FeaturesConfig = field(default_factory=FeaturesConfig)
     candidate_top_n: int = 10
 
     def validate(self, *, external_val: bool = False, external_test: bool = False) -> None:
@@ -237,8 +258,57 @@ class PipelineConfig:
             fusion=_build_section(FusionConfig, data, "fusion"),
             calibration=_build_section(CalibrationConfig, data, "calibration"),
             training=_build_section(TrainingConfig, data, "training"),
+            features=_build_features_section(data),
             candidate_top_n=data.get("candidate_top_n", cls().candidate_top_n),
         )
+
+
+def _build_features_section(data: Dict[str, Any]) -> FeaturesConfig:
+    """Build the ``features`` section: a list of ``FeatureProviderConfig``.
+
+    Its shape (a list of provider objects) differs from the other single-object
+    sections, so it gets its own builder. Unknown keys — at the section level, or
+    inside any provider entry — are rejected by name, and a provider entry missing
+    its required ``kind`` raises a clear error rather than a bare ``TypeError``."""
+    sub = data.get("features") or {}
+    if not isinstance(sub, dict):
+        raise ValueError(
+            f"invalid PipelineConfig: section 'features' must be an object; got {sub!r}"
+        )
+    valid = {f.name for f in fields(FeaturesConfig)}
+    unknown = sorted(set(sub) - valid)
+    if unknown:
+        raise ValueError(
+            f"invalid PipelineConfig: unknown key(s) {unknown} in section 'features'; "
+            f"valid keys: {sorted(valid)}"
+        )
+    raw = sub.get("providers") or []
+    if not isinstance(raw, list):
+        raise ValueError(
+            f"invalid PipelineConfig: 'features.providers' must be a list; got {raw!r}"
+        )
+    provider_keys = {f.name for f in fields(FeatureProviderConfig)}
+    providers: List[FeatureProviderConfig] = []
+    for i, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"invalid PipelineConfig: 'features.providers[{i}]' must be an object; "
+                f"got {entry!r}"
+            )
+        entry_unknown = sorted(set(entry) - provider_keys)
+        if entry_unknown:
+            raise ValueError(
+                f"invalid PipelineConfig: unknown key(s) {entry_unknown} in "
+                f"'features.providers[{i}]'; valid keys: {sorted(provider_keys)}"
+            )
+        if "kind" not in entry:
+            raise ValueError(
+                f"invalid PipelineConfig: 'features.providers[{i}]' is missing required key 'kind'"
+            )
+        providers.append(
+            FeatureProviderConfig(kind=entry["kind"], params=entry.get("params") or {})
+        )
+    return FeaturesConfig(providers=providers)
 
 
 def _build_section(dc_cls: Type[_T], data: Dict[str, Any], section_name: str) -> _T:

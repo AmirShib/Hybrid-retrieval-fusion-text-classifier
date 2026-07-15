@@ -7,6 +7,7 @@ from .encoder import (
     fit_tfidf_encoder,
     train_encoder,
 )
+from .feature_providers import ClassKeywordOverlapProvider
 from .fusion import (
     BetaCalibrator,
     IsotonicCalibrator,
@@ -19,14 +20,17 @@ from .persistence import ArtifactRepository, DeployedArtifacts
 from .registry import (
     CalibratorSpec,
     EncoderSpec,
+    FeatureProviderSpec,
     FusionSpec,
     build_calibrator,
     build_encoder,
+    build_feature_providers,
     build_fusion,
     encoder_is_corpus_dependent,
     fit_encoder,
     register_calibrator,
     register_encoder,
+    register_feature_provider,
     register_fusion,
 )
 from .retrieval import (
@@ -54,15 +58,19 @@ __all__ = [
     "BetaCalibrator",
     "ArtifactRepository",
     "DeployedArtifacts",
+    "ClassKeywordOverlapProvider",
     "EncoderSpec",
     "FusionSpec",
     "CalibratorSpec",
+    "FeatureProviderSpec",
     "build_encoder",
     "build_fusion",
     "build_calibrator",
+    "build_feature_providers",
     "encoder_is_corpus_dependent",
     "fit_encoder",
     "register_encoder",
     "register_fusion",
     "register_calibrator",
+    "register_feature_provider",
 ]

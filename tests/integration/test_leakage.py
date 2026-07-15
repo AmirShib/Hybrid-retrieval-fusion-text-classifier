@@ -29,7 +29,11 @@ from text_classifier.config import (
     TrainingConfig,
 )
 from text_classifier.domain import CandidatePolicy
-from text_classifier.infrastructure import DenseRetrieverAdapter, LexicalRetrieverAdapter
+from text_classifier.infrastructure import (
+    ClassKeywordOverlapProvider,
+    DenseRetrieverAdapter,
+    LexicalRetrieverAdapter,
+)
 from tests._doubles import HashingEncoder, make_synthetic
 
 
@@ -203,6 +207,94 @@ class TestCanary:
         assert (leaky_true["d_proto_sim"] > 0.9).all(), (
             "Leaky: true-class prototype should be ≈1.0 (item retrieves itself). "
             "If this fails, the leaky baseline is broken."
+        )
+
+
+# ---------------------------------------------------------------------------
+# T70 — custom feature providers obey the same out-of-fold rule
+# ---------------------------------------------------------------------------
+
+
+class TestCustomFeatureProviderLeakage:
+    """A ``FeatureProvider`` that derives state from training data (here the
+    ``ClassKeywordOverlapProvider``'s per-class lexicon) must obey the out-of-fold
+    rule exactly like prototypes/indices: an item never contributes to the state
+    it is then scored against.
+
+    Same singleton-class canary as the prototype test: 10 classes × 1 exclusive
+    example each, identical descriptions so every class is a candidate.
+
+    OOF (leave-one-out): class C_i has no example in the provider's fitted fold →
+    its lexicon is empty → ``class_kw_overlap`` for the true-class rows is NaN.
+    Leaky (fit including the item): C_i's lexicon holds item_i's own tokens → the
+    query's tokens fully overlap → overlap ≈ 1.0. If OOF leaked, the NaN assertion
+    below would fail immediately, proving the test is sensitive."""
+
+    def _singleton_dataset(self):
+        n = 10
+        defs = [ClassDefinition(f"C{i}", "shared description for all classes") for i in range(n)]
+        items = [
+            LabeledItem(
+                f"excl_{i}_p{i * 31 + 7} excl_{i}_q{i * 17 + 3} excl_{i}_r{i * 13 + 11}", f"C{i}"
+            )
+            for i in range(n)
+        ]
+        return LabelSpace(defs), items
+
+    def _build_feats(self, label_space, items, enc, include_self: bool):
+        import pandas as pd
+
+        cfg = _fast_cfg()
+        texts = [it.text for it in items]
+        y = np.array(label_space.encode_labels([it.label for it in items]), dtype=np.int64)
+        assembler = FeatureAssembler(label_space, CandidatePolicy(cfg.candidate_top_n))
+        all_idx = np.arange(len(items))
+
+        parts = []
+        for i in all_idx:
+            tr = all_idx if include_self else all_idx[all_idx != i]
+            tr_texts = [texts[j] for j in tr]
+            dense = DenseRetrieverAdapter.build(enc, tr_texts, y[tr], label_space, cfg.retrieval)
+            lexical = LexicalRetrieverAdapter.build(tr_texts, y[tr], label_space, cfg.retrieval)
+            # The provider is fit on exactly the same rows as the indices.
+            fold_items = [LabeledItem(texts[j], label_space.key_at(int(y[j]))) for j in tr]
+            provider = ClassKeywordOverlapProvider().fit(fold_items, label_space)
+            q_emb = enc.encode([texts[i]])
+            feats = assembler.assemble(
+                [texts[i]],
+                q_emb,
+                dense,
+                lexical,
+                cfg.retrieval.k_neighbors,
+                query_ids=[int(i)],
+                query_labels=y[[i]],
+                providers=[provider],
+            )
+            parts.append(feats)
+        return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+
+    def test_oof_provider_nan_leaky_provider_one(self):
+        enc = HashingEncoder(dim=64)
+        label_space, items = self._singleton_dataset()
+
+        oof_feats = self._build_feats(label_space, items, enc, include_self=False)
+        leaky_feats = self._build_feats(label_space, items, enc, include_self=True)
+
+        oof_true = oof_feats[oof_feats["is_true"] == 1]
+        leaky_true = leaky_feats[leaky_feats["is_true"] == 1]
+
+        assert len(oof_true) > 0 and len(leaky_true) > 0
+
+        # OOF: the true class has no training example in the provider's fold, so
+        # its lexicon is empty and the feature is NaN — the item never saw itself.
+        assert oof_true["class_kw_overlap"].isna().all(), (
+            "OOF: the provider's true-class column must be NaN when the item is "
+            "excluded from the fold it is scored against. A value here means leakage."
+        )
+        # Leaky: the item is its own class lexicon → its tokens fully overlap.
+        assert (leaky_true["class_kw_overlap"] > 0.9).all(), (
+            "Leaky: the true-class overlap should be ≈1.0 (item is its own lexicon). "
+            "If this fails, the leaky baseline is broken and the test is not sensitive."
         )
 
 

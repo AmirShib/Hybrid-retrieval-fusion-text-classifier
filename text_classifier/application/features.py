@@ -19,9 +19,16 @@ from ..domain import (
     CandidatePolicy,
     DenseRetriever,
     FEATURE_NAMES,
+    FeatureContext,
+    FeatureProvider,
     LabelSpace,
     LexicalRetriever,
+    composed_feature_names,
 )
+
+# Re-exported for callers that reach for it via the assembly module; the
+# canonical definition lives in the domain schema (``domain/services.py``).
+__all__ = ["FeatureAssembler", "composed_feature_names"]
 
 
 def _scatter_knn(labels: np.ndarray, scores: np.ndarray, n_classes: int):
@@ -108,7 +115,14 @@ class FeatureAssembler:
         query_ids: Sequence[Any],
         query_labels: Optional[np.ndarray] = None,
         chunk: int = 4096,
+        providers: Sequence[FeatureProvider] = (),
     ) -> pd.DataFrame:
+        """Assemble the (item, candidate) feature table.
+
+        ``providers`` (T70) contribute extra columns appended after the core ~28,
+        in provider order; with none the output is byte-for-byte the pre-T70
+        schema. Each provider must already be fitted (the caller fits per fold to
+        stay leakage-free)."""
         frames = []
         ids = np.asarray(query_ids)
         for s in range(0, len(query_texts), chunk):
@@ -122,13 +136,14 @@ class FeatureAssembler:
                     k_neighbors,
                     ids[sl],
                     None if query_labels is None else np.asarray(query_labels)[sl],
+                    providers,
                 )
             )
-        return (
-            pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=FEATURE_NAMES)
-        )
+        if frames:
+            return pd.concat(frames, ignore_index=True)
+        return pd.DataFrame(columns=composed_feature_names(providers))
 
-    def _assemble_chunk(self, texts, q_emb, dense, lexical, k, ids, labels) -> pd.DataFrame:
+    def _assemble_chunk(self, texts, q_emb, dense, lexical, k, ids, labels, providers=()) -> pd.DataFrame:
         C = self._space.size
         n = self._policy.top_n_per_signal
         class_freq = dense.class_freq
@@ -154,7 +169,10 @@ class FeatureAssembler:
         )
         rows, cols = np.nonzero(mask)
         if rows.size == 0:
-            return pd.DataFrame(columns=FEATURE_NAMES + (["is_true"] if labels is not None else []))
+            empty_cols = composed_feature_names(providers) + (
+                ["is_true"] if labels is not None else []
+            )
+            return pd.DataFrame(columns=empty_cols)
 
         # ---- per-query scalars ----
         a_desc = np.argmax(np.where(np.isnan(desc_d), -np.inf, desc_d), axis=1)
@@ -217,8 +235,47 @@ class FeatureAssembler:
             "n_signal_agreement": n_agree[rows],
         }
         df = pd.DataFrame({col: np.asarray(data[col], dtype=np.float32) for col in FEATURE_NAMES})
+        # Custom providers (T70) append their columns after the core ~28. Each
+        # gathers over the same (rows, cols) grid; a provider that "did not fire"
+        # for a candidate emits NaN, which XGBoost consumes as missing.
+        for col, values in self._provider_columns(providers, texts, q_emb, rows, cols).items():
+            df[col] = values
         df["item_id"] = ids[rows]
         df["candidate"] = cols.astype(np.int64)
         if labels is not None:
             df["is_true"] = (cols == labels[rows]).astype(np.int64)
         return df
+
+    def _provider_columns(self, providers, texts, q_emb, rows, cols) -> dict:
+        """Run each provider over the candidate grid and collect its columns as
+        float32 arrays, validating the contract (declared names, one value per
+        candidate row). Returns an insertion-ordered ``{name: (n_candidates,)}``."""
+        if not providers:
+            return {}
+        ctx = FeatureContext(
+            query_texts=texts,
+            query_emb=q_emb,
+            rows=rows,
+            cols=cols,
+            label_space=self._space,
+        )
+        n = rows.shape[0]
+        out: dict = {}
+        for provider in providers:
+            declared = provider.names()
+            produced = provider.compute(ctx)
+            missing = [nm for nm in declared if nm not in produced]
+            if missing:
+                raise ValueError(
+                    f"{type(provider).__name__}.compute did not return column(s) {missing} "
+                    f"that {type(provider).__name__}.names() declares"
+                )
+            for name in declared:
+                arr = np.asarray(produced[name])
+                if arr.shape != (n,):
+                    raise ValueError(
+                        f"{type(provider).__name__} column {name!r} has shape {arr.shape}; "
+                        f"expected one value per candidate row, i.e. ({n},)"
+                    )
+                out[name] = arr.astype(np.float32)
+        return out

@@ -5,6 +5,8 @@ per item.
 
 from __future__ import annotations
 
+from typing import Optional, Sequence
+
 import numpy as np
 import pandas as pd
 
@@ -12,10 +14,18 @@ from ..domain import FEATURE_NAMES, ConfidenceCalibrator, FusionModel
 
 
 def add_confidence(
-    features: pd.DataFrame, fusion: FusionModel, calibrator: ConfidenceCalibrator
+    features: pd.DataFrame,
+    fusion: FusionModel,
+    calibrator: ConfidenceCalibrator,
+    feature_names: Optional[Sequence[str]] = None,
 ) -> pd.DataFrame:
-    """Append a calibrated `conf` column = P(candidate is correct)."""
-    X = features[FEATURE_NAMES].to_numpy(dtype=np.float32)
+    """Append a calibrated `conf` column = P(candidate is correct).
+
+    ``feature_names`` is the effective feature schema (core + any custom-provider
+    columns); it must match the order the fusion model was trained on. Defaults to
+    the core ``FEATURE_NAMES`` so callers with no custom providers are unaffected."""
+    cols = list(feature_names) if feature_names is not None else FEATURE_NAMES
+    X = features[cols].to_numpy(dtype=np.float32)
     raw = fusion.predict_proba(X)
     out = features.copy()
     out["conf"] = calibrator.transform(raw)

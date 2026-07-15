@@ -1,6 +1,6 @@
 # T70 — Pluggable custom features into the fusion layer (train + inference parity)
 
-status: todo
+status: in-review
 tier: 7
 depends_on: T23, T03
 

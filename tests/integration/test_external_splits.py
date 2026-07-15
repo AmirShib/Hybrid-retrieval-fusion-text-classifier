@@ -112,9 +112,9 @@ class TestExternalVal:
         real_add_confidence = training_mod.add_confidence
         seen = []
 
-        def spy(features, fusion, calibrator):
+        def spy(features, fusion, calibrator, *args, **kwargs):
             seen.append(features)
-            return real_add_confidence(features, fusion, calibrator)
+            return real_add_confidence(features, fusion, calibrator, *args, **kwargs)
 
         with patch.object(training_mod, "add_confidence", side_effect=spy):
             _run(_cfg(), train, label_space, val_items=val)

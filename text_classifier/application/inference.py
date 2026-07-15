@@ -11,7 +11,7 @@ from typing import List, Sequence, Tuple
 import numpy as np
 
 from ..config import PipelineConfig
-from ..domain import CandidatePolicy, LabelSpace, Prediction
+from ..domain import CandidatePolicy, LabelSpace, Prediction, composed_feature_names
 from ..infrastructure import ArtifactRepository, DeployedArtifacts
 from ..infrastructure.persistence import NewClass
 from .features import FeatureAssembler
@@ -24,6 +24,11 @@ class InferencePipeline:
         self._assembler = FeatureAssembler(
             artifacts.label_space, CandidatePolicy(artifacts.config.candidate_top_n)
         )
+        # Custom feature providers (T70) shipped with the model, plus the composed
+        # schema (core + provider columns) the fusion model was trained on. Empty /
+        # core-only for a model with no custom features.
+        self._providers = artifacts.feature_providers
+        self._feature_names = composed_feature_names(self._providers)
 
     @classmethod
     def from_directory(cls, directory: str) -> "InferencePipeline":
@@ -75,6 +80,7 @@ class InferencePipeline:
             query_ids=list(range(len(texts))),
             query_labels=None,
             chunk=a.config.retrieval.feature_chunk,
+            providers=self._providers,
         )
 
         # Every item defaults to abstaining; this also covers items whose features
@@ -89,7 +95,7 @@ class InferencePipeline:
         # pulling the columns into arrays lets us call `accept` a single time and
         # map class indices to keys vectorized — no per-row pandas loop on the hot
         # path (the trailing loop only packages the immutable Predictions).
-        decided = top_per_item(add_confidence(feats, a.fusion, a.calibrator))
+        decided = top_per_item(add_confidence(feats, a.fusion, a.calibrator, self._feature_names))
         item_ids = decided["item_id"].to_numpy(dtype=np.intp)
         candidates = decided["candidate"].to_numpy(dtype=np.intp)
         confidences = decided["conf"].to_numpy(dtype=np.float64)
@@ -131,12 +137,13 @@ class InferencePipeline:
             query_ids=list(range(len(texts))),
             query_labels=None,
             chunk=a.config.retrieval.feature_chunk,
+            providers=self._providers,
         )
         results: List[List[Tuple[str, float]]] = [[] for _ in texts]
         if not len(feats):
             return results
 
-        ranked = top_k_per_item(add_confidence(feats, a.fusion, a.calibrator), k)
+        ranked = top_k_per_item(add_confidence(feats, a.fusion, a.calibrator, self._feature_names), k)
         item_ids = ranked["item_id"].to_numpy(dtype=np.intp)
         candidates = ranked["candidate"].to_numpy(dtype=np.intp)
         confidences = ranked["conf"].to_numpy(dtype=np.float64)
