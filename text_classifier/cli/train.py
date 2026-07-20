@@ -66,7 +66,15 @@ def main() -> None:
         "ignored by corpus-fitted encoders such as tfidf "
         "(default: sentence-transformers/all-MiniLM-L6-v2)",
     )
-    p.add_argument("--folds", type=int, default=None, help="default: 5")
+    p.add_argument(
+        "--folds",
+        type=int,
+        default=None,
+        help="cross-validation folds for out-of-fold feature generation (default: 5). "
+        "With both --val-items and --test-items, --folds 1 selects leave-one-out "
+        "featurization (each training item scored against every other, itself masked "
+        "out) instead of a k-fold split.",
+    )
     p.add_argument(
         "--target-precision",
         type=float,
@@ -106,7 +114,7 @@ def main() -> None:
         "held-out evaluation (evaluation.json/model_card.md) runs on it instead "
         "of an internal fold. Must be disjoint from --items. With both --val-items "
         "and --test-items, every internal fold trains the fusion model (--folds may "
-        "then be 2).",
+        "then be 2, or 1 for leave-one-out featurization).",
     )
     p.add_argument("--text-col", default="text", help="items.csv text column")
     p.add_argument("--label-col", default="label", help="items.csv label column")

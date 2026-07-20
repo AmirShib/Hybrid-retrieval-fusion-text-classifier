@@ -384,7 +384,8 @@ class TestExternalSplitValidation:
 
 
 class TestExternalFoldFloor:
-    """The n_folds >= 3 floor relaxes to >= 2 when a fold role is retired."""
+    """The n_folds >= 3 floor relaxes to >= 2 when a fold role is retired, and to
+    >= 1 (leave-one-out) when both roles are external."""
 
     @pytest.mark.parametrize(
         "external_val, external_test",
@@ -401,12 +402,33 @@ class TestExternalFoldFloor:
         with pytest.raises(ValueError, match="n_folds"):
             cfg.validate()
 
-    def test_one_fold_rejected_even_with_external_splits(self):
+    def test_one_fold_allowed_with_both_external_splits(self):
+        """n_folds=1 selects leave-one-out featurization; valid only when both the
+        calibration and test roles are supplied externally (no fold left to carve)."""
         cfg = PipelineConfig()
         cfg.training.n_folds = 1
-        with pytest.raises(ValueError, match="n_folds") as exc:
+        cfg.validate(external_val=True, external_test=True)  # must not raise
+
+    @pytest.mark.parametrize(
+        "external_val, external_test",
+        [(True, False), (False, True), (False, False)],
+    )
+    def test_one_fold_rejected_without_both_external_splits(self, external_val, external_test):
+        cfg = PipelineConfig()
+        cfg.training.n_folds = 1
+        with pytest.raises(ValueError, match="n_folds"):
+            cfg.validate(external_val=external_val, external_test=external_test)
+
+    def test_one_fold_rejected_with_custom_providers(self):
+        """LOO has no per-item fit hook, so a provider fit on all training rows would
+        see the item it scores — the combination is a hard error, not a silent leak."""
+        from text_classifier.config import FeatureProviderConfig
+
+        cfg = PipelineConfig()
+        cfg.training.n_folds = 1
+        cfg.features.providers = [FeatureProviderConfig(kind="class_keyword_overlap")]
+        with pytest.raises(ValueError, match="leave-one-out"):
             cfg.validate(external_val=True, external_test=True)
-        assert "out-of-fold" in str(exc.value)
 
 
 class TestFoldRoles:

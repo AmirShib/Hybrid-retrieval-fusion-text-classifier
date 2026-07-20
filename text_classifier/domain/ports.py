@@ -48,12 +48,37 @@ class DenseRetriever(ABC):
     """Semantic signals from a bi-encoder over an example pool + class set."""
 
     @abstractmethod
-    def knn_example_labels(self, query_emb: np.ndarray, k: int) -> Tuple[np.ndarray, np.ndarray]:
-        """Return (neighbor_class_indices (b, k) int, similarities (b, k) float)."""
+    def knn_example_labels(
+        self, query_emb: np.ndarray, k: int, exclude_idx: Optional[np.ndarray] = None
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Return (neighbor_class_indices (b, k) int, similarities (b, k) float).
+
+        ``exclude_idx`` (b,) gives, per query, one example-pool index to drop from
+        that query's neighbors (or a value < 0 to drop nothing) — the leave-one-out
+        self-mask, so a query that is itself in the pool never retrieves itself.
+        ``None`` (the default) excludes nothing, the ordinary retrieval path."""
 
     @abstractmethod
     def prototype_similarity(self, query_emb: np.ndarray) -> np.ndarray:
         """(b, C) cosine to each class prototype; NaN column for absent classes."""
+
+    def loo_prototype_similarity(
+        self, query_emb: np.ndarray, self_idx: np.ndarray
+    ) -> np.ndarray:
+        """Leave-one-out prototype similarity for queries that are themselves in
+        the example pool.
+
+        Like ``prototype_similarity``, but for each query ``i`` whose own example
+        index is ``self_idx[i] >= 0``, that query's own-class prototype is
+        recomputed with example ``self_idx[i]`` removed (NaN if it was the class's
+        only example). Every other class column is the ordinary prototype. Queries
+        with ``self_idx[i] < 0`` (not in the pool) fall back to the ordinary value.
+
+        Optional capability: only retrievers that back leave-one-out training
+        (``n_folds=1``) implement it; the default raises."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support leave-one-out prototype similarity"
+        )
 
     @abstractmethod
     def description_similarity(self, query_emb: np.ndarray) -> np.ndarray:
@@ -70,10 +95,14 @@ class LexicalRetriever(ABC):
 
     @abstractmethod
     def knn_example_labels(
-        self, query_texts: Sequence[str], k: int
+        self, query_texts: Sequence[str], k: int, exclude_idx: Optional[np.ndarray] = None
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Return (neighbor_class_indices (b, k) int with -1 padding,
-        scores (b, k) float with NaN padding)."""
+        scores (b, k) float with NaN padding).
+
+        ``exclude_idx`` (b,) gives, per query, one example-pool index to drop from
+        that query's neighbors (or a value < 0 to drop nothing) — the leave-one-out
+        self-mask. ``None`` (the default) excludes nothing."""
 
     @abstractmethod
     def description_score(self, query_texts: Sequence[str]) -> np.ndarray:

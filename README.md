@@ -244,6 +244,12 @@ text-classifier-train --items train.csv --classes classes.csv --out model_dir/ \
 # Both → every internal fold trains the fusion model, so --folds 2 is enough.
 text-classifier-train --items train.csv --classes classes.csv --out model_dir/ \
     --val-items val.csv --test-items test.csv --folds 2
+
+# Both, --folds 1 → leave-one-out: each training item is scored against every
+# other (itself masked out) rather than a k-fold split — the maximum-size,
+# deployment-matching index while staying leakage-free.
+text-classifier-train --items train.csv --classes classes.csv --out model_dir/ \
+    --val-items val.csv --test-items test.csv --folds 1
 ```
 
 Each external set is optional and independent, reuses `--text-col`/`--label-col`,
@@ -262,6 +268,18 @@ the model — so their scores, and the risk-coverage numbers derived from them,
 describe deployed behaviour. (This is a deliberate asymmetry: the fusion model
 is fit on per-fold-index features while the calibrator sees full-train-index
 features, anchoring confidence at the production operating point.)
+
+**Leave-one-out (`--folds 1`)** is available only with *both* external sets,
+because with no calibration or test role left to carve, the internal folds exist
+solely to keep the fusion model's own training features leakage-free. Instead of
+a k-fold split, each training item is featurized against the full deployment
+index with *itself* masked out — its dense/BM25 self-match dropped and its own
+vector left out of its class prototype. This gives every item the largest,
+most deployment-like index possible while still honouring the rule that an item
+never sees itself in its own index. It is the most faithful (and, at `O(n)`
+larger, the most expensive) fusion-training featurization; use `--folds 2` for
+the cheaper k-fold out-of-fold split. Leave-one-out has no per-item fit hook for
+custom fusion feature providers, so it rejects a config that sets any.
 
 **Non-English / multilingual corpora:** BM25 applies no stopword filtering by
 default — `stop_words` is an explicit opt-in

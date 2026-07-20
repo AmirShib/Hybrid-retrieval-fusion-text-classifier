@@ -174,6 +174,65 @@ class TestBothExternal:
 
 
 # ---------------------------------------------------------------------------
+# Leave-one-out (n_folds=1): both external sets, no k-fold split
+# ---------------------------------------------------------------------------
+class TestLeaveOneOut:
+    def test_runs_with_one_fold(self, tmp_path):
+        """n_folds=1 featurizes every training item against the deployment index
+        with itself masked out (leave-one-out) instead of a k-fold split. Requires
+        both external sets; the run must produce sane numbers and count the external
+        test set."""
+        label_space, train, val, test = _split()
+        out = str(tmp_path / "model")
+        _, report = _run(
+            _cfg(n_folds=1), train, label_space, output_dir=out, val_items=val, test_items=test
+        )
+        assert report.n_items == len(test)
+        assert 0.0 <= report.coverage <= 1.0
+        with open(os.path.join(out, "evaluation.json")) as fh:
+            payload = json.load(fh)
+        assert payload["overall"]["n_items"] == len(test)
+
+    def test_single_synthetic_training_fold(self):
+        roles = _cfg(n_folds=1).training.fold_roles(external_val=True, external_test=True)
+        assert roles == {"train": [0], "calibration": [], "test": []}
+
+    def test_one_fold_requires_both_external_sets(self):
+        """LOO has no internal fold to carve a calibration/test set from, so a single
+        external set (or none) is rejected before any encoding."""
+        label_space, train, val, test = _split()
+        with pytest.raises(ValueError, match="n_folds"):
+            _run(_cfg(n_folds=1), train, label_space, val_items=val)  # test set missing
+        with pytest.raises(ValueError, match="n_folds"):
+            _run(_cfg(n_folds=1), train, label_space, test_items=test)  # val set missing
+
+    def test_loo_training_never_self_retrieves(self):
+        """The leakage guarantee end-to-end: capture the fusion-training frame and
+        assert no training item shows a perfect dense self-match. Under LOO each
+        item is scored against every *other* item, so ``abs_top_dense_sim`` stays
+        strictly below 1 (no item retrieves itself)."""
+        from unittest.mock import patch
+
+        import text_classifier.application.training as training_mod
+
+        label_space, train, val, test = _split()
+        captured = {}
+
+        real_fit = training_mod.TrainingPipeline._fit_fusion
+
+        def spy(self, oof, roles, val_feats=None):
+            captured["oof"] = oof
+            return real_fit(self, oof, roles, val_feats)
+
+        with patch.object(training_mod.TrainingPipeline, "_fit_fusion", spy):
+            _run(_cfg(n_folds=1), train, label_space, val_items=val, test_items=test)
+
+        oof = captured["oof"]
+        # A self-match would be cosine ~1.0; masking self keeps it strictly below.
+        assert oof["abs_top_dense_sim"].max() < 0.999
+
+
+# ---------------------------------------------------------------------------
 # Leakage guard
 # ---------------------------------------------------------------------------
 class TestLeakageGuard:

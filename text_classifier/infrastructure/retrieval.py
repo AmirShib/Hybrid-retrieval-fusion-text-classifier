@@ -23,6 +23,39 @@ from ..config import RetrievalConfig
 from ..domain import DenseRetriever, LabelSpace, LexicalRetriever, TextEncoder
 
 
+def _exclude_self(
+    idx: np.ndarray, score: np.ndarray, exclude: np.ndarray, k: int
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Drop the per-row self-match from best-first neighbor lists and return
+    exactly ``(b, k)``.
+
+    ``idx``/``score`` are ``(b, m)`` neighbor indices/scores sorted best-first
+    (``-1``/NaN pad allowed). ``exclude`` is ``(b,)``: for row ``r`` the example
+    index ``exclude[r]`` is removed from that row's neighbors (a value ``< 0``
+    removes nothing — a query not present in the pool). Real non-self neighbors
+    are kept best-first, everything else is nulled to ``(-1, NaN)``, and the
+    result is padded/trimmed to width ``k``. This is the leave-one-out self-mask:
+    fetch one extra neighbor upstream (``k + 1``) so ``k`` real ones always remain.
+    """
+    b, m = idx.shape
+    exclude = np.asarray(exclude)
+    self_hit = (idx == exclude[:, None]) & (exclude[:, None] >= 0)
+    valid = (idx >= 0) & ~self_hit
+    # Stable sort by ~valid: kept neighbours (valid) stay first in their existing
+    # best-first order; self-matches and padding sink to the end.
+    order = np.argsort(~valid, axis=1, kind="stable")
+    idx_s = np.take_along_axis(idx, order, axis=1)
+    score_s = np.take_along_axis(score, order, axis=1)
+    valid_s = np.take_along_axis(valid, order, axis=1)
+    idx_s = np.where(valid_s, idx_s, -1)
+    score_s = np.where(valid_s, score_s, np.nan)
+    if m >= k:
+        return idx_s[:, :k], score_s[:, :k]
+    pad_i = np.full((b, k - m), -1, dtype=idx_s.dtype)
+    pad_s = np.full((b, k - m), np.nan, dtype=score_s.dtype)
+    return np.concatenate([idx_s, pad_i], axis=1), np.concatenate([score_s, pad_s], axis=1)
+
+
 # --------------------------------------------------------------------------- BM25
 class BM25Index:
     """Okapi BM25 (Lucene IDF variant) with a precomputed weight matrix."""
@@ -60,28 +93,37 @@ class BM25Index:
         return np.asarray((self._query_incidence(texts) @ self._Wt).todense(), dtype=np.float32)
 
     def top_k(
-        self, texts: Sequence[str], k: int, chunk: int = 256
+        self, texts: Sequence[str], k: int, chunk: int = 256, exclude: Any = None
     ) -> Tuple[np.ndarray, np.ndarray]:
         """(idx (b, k) int with -1 pad, score (b, k) float with NaN pad). Only
-        strictly-positive scores are returned; the rest is padding."""
+        strictly-positive scores are returned; the rest is padding.
+
+        ``exclude`` (b,), when given, drops one example index per query from that
+        query's neighbors (a value < 0 drops nothing) — the leave-one-out
+        self-mask. One extra neighbor is fetched so ``k`` real ones survive."""
         b = len(texts)
-        kk = min(k, self.n_docs)
-        out_idx = np.full((b, k), -1, dtype=np.int64)
-        out_score = np.full((b, k), np.nan, dtype=np.float32)
-        Qbin = self._query_incidence(texts)
-        for s in range(0, b, chunk):
-            S = np.asarray((Qbin[s : s + chunk] @ self._Wt).todense(), dtype=np.float32)
-            part = np.argpartition(-S, kk - 1, axis=1)[:, :kk]
-            rows = np.arange(part.shape[0])[:, None]
-            part_s = S[rows, part]
-            order = np.argsort(-part_s, axis=1)
-            idx = np.take_along_axis(part, order, axis=1)
-            sc = np.take_along_axis(part_s, order, axis=1)
-            bad = sc <= 0
-            idx = np.where(bad, -1, idx)
-            sc = np.where(bad, np.nan, sc)
-            out_idx[s : s + chunk, :kk] = idx
-            out_score[s : s + chunk, :kk] = sc
+        # Fetch one extra when self-masking so k real neighbours remain after drop.
+        width = k + 1 if exclude is not None else k
+        fetch = min(width, self.n_docs)
+        out_idx = np.full((b, width), -1, dtype=np.int64)
+        out_score = np.full((b, width), np.nan, dtype=np.float32)
+        if fetch > 0:
+            Qbin = self._query_incidence(texts)
+            for s in range(0, b, chunk):
+                S = np.asarray((Qbin[s : s + chunk] @ self._Wt).todense(), dtype=np.float32)
+                part = np.argpartition(-S, fetch - 1, axis=1)[:, :fetch]
+                rows = np.arange(part.shape[0])[:, None]
+                part_s = S[rows, part]
+                order = np.argsort(-part_s, axis=1)
+                idx = np.take_along_axis(part, order, axis=1)
+                sc = np.take_along_axis(part_s, order, axis=1)
+                bad = sc <= 0
+                idx = np.where(bad, -1, idx)
+                sc = np.where(bad, np.nan, sc)
+                out_idx[s : s + chunk, :fetch] = idx
+                out_score[s : s + chunk, :fetch] = sc
+        if exclude is not None:
+            return _exclude_self(out_idx, out_score, exclude, k)
         return out_idx, out_score
 
 
@@ -108,9 +150,9 @@ class LexicalRetrieverAdapter(LexicalRetriever):
         return cls(ex, np.asarray(labels), desc, cfg.dense_chunk)
 
     def knn_example_labels(
-        self, query_texts: Sequence[str], k: int
+        self, query_texts: Sequence[str], k: int, exclude_idx: Any = None
     ) -> Tuple[np.ndarray, np.ndarray]:
-        idx, score = self._examples.top_k(query_texts, k, self._k_chunk)
+        idx, score = self._examples.top_k(query_texts, k, self._k_chunk, exclude=exclude_idx)
         labels = np.where(idx >= 0, self._labels[np.clip(idx, 0, None)], -1)
         return labels.astype(np.int64), score
 
@@ -216,8 +258,14 @@ class DenseRetrieverAdapter(DenseRetriever):
     def class_freq(self) -> np.ndarray:
         return self._s.class_freq
 
-    def knn_example_labels(self, query_emb: np.ndarray, k: int) -> Tuple[np.ndarray, np.ndarray]:
-        idx, sim = _dense_topk(query_emb, self._s.example_emb, k, self._chunk)
+    def knn_example_labels(
+        self, query_emb: np.ndarray, k: int, exclude_idx: Any = None
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        # Fetch one extra when self-masking so k real neighbours survive the drop.
+        fetch = k + 1 if exclude_idx is not None else k
+        idx, sim = _dense_topk(query_emb, self._s.example_emb, fetch, self._chunk)
+        if exclude_idx is not None:
+            idx, sim = _exclude_self(idx, sim, exclude_idx, k)
         # idx == -1 marks padding (k > n_examples); keep it as -1 rather than
         # letting np indexing wrap around to a real label.
         labels = np.where(idx >= 0, self._s.example_labels[np.clip(idx, 0, None)], -1)
@@ -225,6 +273,46 @@ class DenseRetrieverAdapter(DenseRetriever):
 
     def prototype_similarity(self, query_emb: np.ndarray) -> np.ndarray:
         return query_emb @ self._s.prototypes.T
+
+    def loo_prototype_similarity(
+        self, query_emb: np.ndarray, self_idx: np.ndarray
+    ) -> np.ndarray:
+        """Prototype similarity with each query's own example left out of its own
+        class prototype (see the port docstring).
+
+        Only the own-class column of each in-pool query (``self_idx >= 0``) is
+        recomputed: its class prototype is the normalized mean of that class's
+        embeddings *minus* the query's own, and cosine to it (query embeddings are
+        L2-normalized, so ``q·mean/‖mean‖`` == cosine and the count cancels). A
+        query that was its class's only example gets NaN (no prototype without it),
+        which XGBoost reads as "did not retrieve" — the same as an absent class.
+        Every other column, and every out-of-pool query, keeps the ordinary value.
+        """
+        base = self.prototype_similarity(query_emb)
+        self_idx = np.asarray(self_idx)
+        rows = np.nonzero(self_idx >= 0)[0]
+        if rows.size == 0:
+            return base
+        E = self._s.example_emb.astype(np.float64)
+        y = self._s.example_labels
+        C = base.shape[1]
+        class_sum = np.zeros((C, E.shape[1]), dtype=np.float64)
+        class_cnt = np.zeros(C, dtype=np.float64)
+        np.add.at(class_sum, y, E)
+        np.add.at(class_cnt, y, 1.0)
+
+        s = self_idx[rows]
+        c = y[s]  # own class of each in-pool query
+        loo_vec = class_sum[c] - E[s]  # class sum with the query's own vector removed
+        loo_cnt = class_cnt[c] - 1.0
+        norm = np.linalg.norm(loo_vec, axis=1)
+        q = np.asarray(query_emb, dtype=np.float64)[rows]
+        with np.errstate(invalid="ignore", divide="ignore"):
+            sim = np.einsum("md,md->m", q, loo_vec) / norm
+        sim = np.where((loo_cnt > 0) & (norm > 0), sim, np.nan)
+        out = base.copy()
+        out[rows, c] = sim.astype(out.dtype)
+        return out
 
     def description_similarity(self, query_emb: np.ndarray) -> np.ndarray:
         return query_emb @ self._s.description_emb.T

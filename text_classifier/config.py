@@ -134,6 +134,12 @@ class TrainingConfig:
         sets, every fold trains the fusion model; the k-fold machinery still
         runs because the fusion model's own training rows must stay leakage-free
         (out-of-fold feature generation), so ``n_folds >= 2`` is enough.
+
+        ``n_folds == 1`` is the leave-one-out (LOO) mode, valid only when both
+        external roles are supplied (there is no fold left to carve a calibration
+        or test set from). It has a single synthetic training "fold" ``[0]``: the
+        pipeline featurizes every training item against the deployment index with
+        that item masked out, rather than running the k-fold loop.
         """
         folds = list(range(self.n_folds))
         # Reserve folds from the end so the no-external assignment is byte-for-byte
@@ -163,13 +169,24 @@ class PipelineConfig:
         the two folds required for out-of-fold feature generation is no longer
         the floor. With either external split present the floor drops to
         ``n_folds >= 2`` (still two folds for OOF); with neither it stays
-        ``>= 3`` (one train + one calibration + one test).
+        ``>= 3`` (one train + one calibration + one test). With *both* external
+        splits the floor drops to ``n_folds >= 1``: ``1`` selects leave-one-out
+        featurization (each training item scored against every other, itself
+        masked out), which is the leakage-free way to give every item the
+        maximum-size index without a k-fold split.
 
         Registry-key existence (encoder/fusion/calibrator ``kind``) is *not*
         checked here: the registry already raises a good error at build time,
         and this module must stay import-free of infrastructure.
         """
-        if external_val or external_test:
+        both_external = external_val and external_test
+        if both_external:
+            n_folds_ok = self.training.n_folds >= 1
+            n_folds_constraint = (
+                ">= 1 (both external roles are supplied; n_folds=1 selects leave-one-out "
+                "featurization, n_folds>=2 uses a k-fold out-of-fold split)"
+            )
+        elif external_val or external_test:
             n_folds_ok = self.training.n_folds >= 2
             n_folds_constraint = (
                 ">= 2 (an external split retires a fold role; two folds are still "
@@ -231,6 +248,16 @@ class PipelineConfig:
             for name, value, ok, constraint in checks
             if not ok
         ]
+        # Leave-one-out featurization (n_folds=1) has no per-item fit hook, so a
+        # custom feature provider fit on all training rows would see the very item
+        # it later scores — the exact leakage LOO's self-masking otherwise removes.
+        # Reject the combination rather than leak silently.
+        if both_external and self.training.n_folds == 1 and self.features.providers:
+            problems.append(
+                "training.n_folds=1 (leave-one-out featurization) does not support custom "
+                "feature providers (features.providers); a provider fit on all training rows "
+                "would see the item it scores. Use n_folds>=2 (k-fold out-of-fold) with providers."
+            )
         if problems:
             raise ValueError("invalid PipelineConfig: " + "; ".join(problems))
 

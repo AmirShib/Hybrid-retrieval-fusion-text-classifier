@@ -130,12 +130,18 @@ class TrainingPipeline:
         roles = self.cfg.training.fold_roles(
             external_val=val_items is not None, external_test=test_items is not None
         )
-        oof = self._build_oof(texts, y, label_space)
 
         # Build the deployment index (encoder + dense/lexical over *all* training
         # items) once, up front: external val/test items are featurized against
         # it, and the finished DeployedArtifacts reuse the very same objects.
-        encoder, dense, lexical = self._build_deployment_index(texts, y, label_space)
+        if self.cfg.training.n_folds == 1:
+            # Leave-one-out: build the deployment index first, then featurize every
+            # training item against it with itself masked out — no k-fold loop.
+            encoder, dense, lexical = self._build_deployment_index(texts, y, label_space)
+            oof = self._build_loo(texts, y, label_space, encoder, dense, lexical)
+        else:
+            oof = self._build_oof(texts, y, label_space)
+            encoder, dense, lexical = self._build_deployment_index(texts, y, label_space)
         val_feats = None
         if val_items is not None:
             val_feats, _ = self._featurize_external(val_items, label_space, encoder, dense, lexical)
@@ -387,6 +393,51 @@ class TrainingPipeline:
         oof = pd.concat(frames, ignore_index=True)
         oof.attrs["candidate_recall"] = recall
         return oof
+
+    def _build_loo(
+        self, texts, y, label_space, encoder, dense, lexical
+    ) -> pd.DataFrame:
+        """Leave-one-out featurization of the training items (``n_folds == 1``).
+
+        Every training item is scored against the *deployment* index — the same
+        dense/BM25 indices and prototypes that ship in the model, built over all
+        training items — with that item masked out of its own neighbors and its own
+        class prototype (see ``FeatureAssembler.assemble``'s ``self_ids``). This
+        gives each item the maximum-size, deployment-matching index while keeping
+        the out-of-fold leakage rule (an item never sees itself in its own index),
+        and reuses the single deployment index instead of rebuilding one per fold.
+
+        Valid only with both external splits (enforced in ``PipelineConfig.validate``
+        and reachable only via ``fold_roles(n_folds=1)``), so every row here trains
+        the fusion model; the frame carries a single synthetic ``fold = 0`` and no
+        custom providers (rejected upstream — there is no per-item fit hook). It is
+        the drop-in replacement for ``_build_oof``'s output on the LOO path.
+        """
+        assert self.assembler is not None  # set in run() before this is called
+        self_ids = np.arange(len(texts))
+        q_emb = encoder.encode_queries(texts)
+        feats = self.assembler.assemble(
+            texts,
+            q_emb,
+            dense,
+            lexical,
+            self.cfg.retrieval.k_neighbors,
+            query_ids=self_ids,
+            query_labels=y,
+            chunk=self.cfg.retrieval.feature_chunk,
+            providers=self._providers,
+            self_ids=self_ids,
+        )
+        feats["fold"] = 0
+        recall = float(feats.groupby("item_id")["is_true"].max().mean()) if len(feats) else 0.0
+        log.info(
+            "leave-one-out: %d items, %d feature rows; candidate recall = %.4f",
+            len(texts),
+            len(feats),
+            recall,
+        )
+        feats.attrs["candidate_recall"] = recall
+        return feats
 
     def _featurize_external(
         self,
