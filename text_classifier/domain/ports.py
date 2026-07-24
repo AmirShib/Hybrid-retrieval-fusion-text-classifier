@@ -62,9 +62,7 @@ class DenseRetriever(ABC):
     def prototype_similarity(self, query_emb: np.ndarray) -> np.ndarray:
         """(b, C) cosine to each class prototype; NaN column for absent classes."""
 
-    def loo_prototype_similarity(
-        self, query_emb: np.ndarray, self_idx: np.ndarray
-    ) -> np.ndarray:
+    def loo_prototype_similarity(self, query_emb: np.ndarray, self_idx: np.ndarray) -> np.ndarray:
         """Leave-one-out prototype similarity for queries that are themselves in
         the example pool.
 
@@ -129,6 +127,20 @@ class FusionModel(ABC):
     @abstractmethod
     def predict_proba(self, X: np.ndarray) -> np.ndarray:  # (n,) P(class==1)
         ...
+
+    def predict_contribs(self, X: np.ndarray) -> Optional[np.ndarray]:
+        """Optional per-feature contributions toward the *raw* (pre-calibration)
+        score, for prediction explanations (T69).
+
+        Returns ``(n, n_features + 1)``: columns ``0..n_features-1`` align to the
+        fusion feature columns in order, and the trailing column is the bias/base
+        value, so each row *sums to the raw margin* — the additive-feature identity
+        the gradient-boosted-tree backends provide. Returns ``None`` (the default)
+        when the backend cannot decompose its score additively — e.g. a ranker
+        whose isotonic head breaks additivity. Callers must treat ``None`` as "no
+        attribution available" and degrade gracefully. The default keeps the port
+        additive: existing and custom backends need no change."""
+        return None
 
     @abstractmethod
     def save(self, path: str) -> None: ...

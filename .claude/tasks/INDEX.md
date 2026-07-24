@@ -131,7 +131,7 @@ loading a shipped model dir must not execute code).
 | T66 | Re-tune calibration + abstention thresholds on a trained model (tune CLI)       | todo   | T61          |
 | T67 | Pickle-free model artifacts (npz/json state; legacy `.pkl` fallback)            | todo   | T60          |
 | T68 | Taxonomy update without retrain: add classes/examples to a deployed model       | todo   | T61, T66     |
-| T69 | Prediction explanations: per-signal evidence, neighbors, SHAP (`--explain`)     | todo   | T30, T65     |
+| T69 | Prediction explanations: per-signal evidence, neighbors, SHAP (`--explain`)     | in-review | T30, T65  |
 | T78 | Larger/different label space at test & inference time (add classes, no retrain)  | in-review | T61, T77  |
 
 _T78 delivers the description-only "add classes without retrain" path (a focused

@@ -9,6 +9,24 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 ## [Unreleased]
 
 ### Added
+- **Prediction explanations for reviewers (T69)** — answer "why did it call this
+  that, and how close was it to the threshold" from one record, built from a
+  single feature pass (the plain `predict` path is untouched):
+  - `InferencePipeline.explain_records(texts, top_k=3, include_contributions=False)`
+    returns a JSON-clean payload per item: the decision plus the abstention
+    `threshold_applied`/`threshold_scope`, each top candidate's per-signal
+    `features` (`NaN` → `null`), which signals ranked it first (`signals_top1`),
+    the matched class `description`, and the nearest dense/lexical example
+    neighbors (`{label_key, score}`; neighbor *texts* await a persisted corpus, so
+    `texts_available` is `False`).
+  - **Optional per-feature SHAP contributions** via a new additive
+    `FusionModel.predict_contribs(X) -> Optional[np.ndarray]` port method
+    (default `None`; implemented for the XGBoost and LightGBM backends, `None` for
+    the XGBRanker whose isotonic head breaks additivity). Each row sums to the raw
+    margin; surfaced per candidate as `contributions` with
+    `contributions_space: "raw_margin"`.
+  - Infer CLI: `--explain-json PATH` writes the payloads as JSONL; add
+    `--explain-contribs` to include the SHAP contributions.
 - **Per-signal insight for data scientists** — see the individual retrieval
   signals' scores *before* the fusion model, and how each technique performs
   alone on your data:

@@ -6,6 +6,8 @@ consistency with `predict`, never exact floats (XGBoost internals vary).
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 
@@ -93,3 +95,80 @@ class TestSignalDetail:
         # candidate: that is encoded as NaN (missing), never a true 0.
         df = pipeline.explain(sample)
         assert df[["b_desc_sim", "b_knn_sum", "d_knn_sum"]].isna().any().any()
+
+
+class TestExplainRecords:
+    def test_payload_schema_is_json_clean(self, pipeline, sample):
+        recs = pipeline.explain_records(sample, top_k=3)
+        assert len(recs) == len(sample)
+        for rec in recs:
+            assert set(rec) == {"text", "decision", "candidates", "neighbors"}
+            dec = rec["decision"]
+            assert set(dec) == {
+                "top_key",
+                "confidence",
+                "abstained",
+                "threshold_applied",
+                "threshold_scope",
+            }
+            assert rec["neighbors"]["texts_available"] is False
+            assert isinstance(rec["neighbors"]["dense"], list)
+            # Round-trips through stdlib json (JSON-clean, NaN already -> null).
+            json.loads(json.dumps(rec))
+
+    def test_top_candidate_features_match_flat_table_and_nan_is_null(self, pipeline, sample):
+        recs = pipeline.explain_records(sample, top_k=3)
+        flat = pipeline.explain(sample)
+        saw_null = False
+        for i, rec in enumerate(recs):
+            for cand in rec["candidates"]:
+                frow = flat[(flat["item_id"] == i) & (flat["candidate_key"] == cand["key"])].iloc[0]
+                for name in FEATURE_NAMES:
+                    val = cand["features"][name]
+                    if val is None:
+                        assert np.isnan(frow[name])  # NaN -> null
+                        saw_null = True
+                    else:
+                        assert val == pytest.approx(float(frow[name]), abs=1e-5)
+        assert saw_null  # some non-retrieved signal surfaced as null across the batch
+
+    def test_signals_top1_agrees_with_is_top1_flags(self, pipeline, sample):
+        flag_to_signal = {
+            "is_d_desc_top1": "dense_description",
+            "is_d_proto_top1": "dense_prototype",
+            "is_d_knn_top1": "dense_knn",
+            "is_b_desc_top1": "bm25_description",
+            "is_b_knn_top1": "bm25_knn",
+        }
+        for rec in pipeline.explain_records(sample, top_k=3):
+            for cand in rec["candidates"]:
+                expected = {
+                    sig for flag, sig in flag_to_signal.items() if cand["features"][flag] == 1.0
+                }
+                assert set(cand["signals_top1"]) == expected
+
+    def test_decision_matches_predict(self, pipeline, sample):
+        recs = pipeline.explain_records(sample, top_k=3)
+        preds = pipeline.predict(sample)
+        for rec, pred in zip(recs, preds):
+            assert rec["decision"]["top_key"] == pred.top_key
+            assert rec["decision"]["abstained"] == pred.abstained
+            assert rec["decision"]["confidence"] == pytest.approx(pred.confidence, abs=1e-9)
+
+    def test_contributions_present_and_sum_to_margin_when_requested(self, pipeline, sample):
+        recs = pipeline.explain_records(sample, top_k=2, include_contributions=True)
+        seen = 0
+        for rec in recs:
+            for cand in rec["candidates"]:
+                assert cand["contributions_space"] == "raw_margin"
+                contribs = cand["contributions"]
+                assert "bias" in contribs
+                assert set(contribs) == {*pipeline._feature_names, "bias"}
+                assert np.isfinite(sum(contribs.values()))
+                seen += 1
+        assert seen > 0
+
+    def test_contributions_absent_by_default(self, pipeline, sample):
+        for rec in pipeline.explain_records(sample, top_k=2):
+            for cand in rec["candidates"]:
+                assert "contributions" not in cand

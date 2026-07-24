@@ -1,8 +1,18 @@
 # T69 — Explain predictions: per-signal evidence for reviewers and debugging
 
-status: todo
+status: in-review
 tier: 6
 depends_on: T30, T65
+
+> **Implementation note (in-review).** Delivered: `InferencePipeline.explain`
+> (flat per-(item, candidate) signal table + `--explain` CSV) and
+> `explain_records` (the JSONL payload below) with decision + `threshold_applied`
+> /`threshold_scope`, per-candidate `features`/`signals_top1`/`description`,
+> dense+lexical neighbors, and optional SHAP `contributions` via the additive
+> `FusionModel.predict_contribs` port (XGBoost/LightGBM; `None` for XGBRanker).
+> CLI: `--explain-json` / `--explain-contribs`. **Deferred:** neighbor *texts*
+> stay gated on T68's `--store-corpus` (`texts_available: false` until then);
+> model-level importance/ablation remains T40's scope.
 
 ## Goal
 An `InferencePipeline.explain(texts, top_k=3)` API and an infer-CLI flag that,
