@@ -210,7 +210,10 @@ class TrainingPipeline:
             feature_providers=self._providers,
         )
         if output_dir:
-            ArtifactRepository().save(artifacts, output_dir)
+            repo = ArtifactRepository()
+            repo.save(artifacts, output_dir)
+            if self.cfg.training.store_corpus:
+                repo.save_corpus(output_dir, items)
             # Per-signal diagnostics from the leakage-free out-of-fold rows: how each
             # retrieval technique performs *alone*, before fusion combines them. This
             # is the "which signals carry my data" evidence a data scientist reads

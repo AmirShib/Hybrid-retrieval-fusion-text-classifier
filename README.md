@@ -194,6 +194,11 @@ text-classifier-train \
 # add --per-fold-encoder for the rigorous (expensive) encoder path
 ```
 
+By default this also writes `corpus.jsonl.gz` (the raw text+label pairs) into
+the model directory — pass `--no-store-corpus` to opt out for privacy/size.
+It costs little and is what lets `text-classifier-update` (below) add labeled
+examples later without needing the original items file again.
+
 For a torch-free, air-gapped run (no torch, no model download) use the TF-IDF
 encoder backend (corpus-fitted, so `--encoder` is ignored). For a
 dependency-free smoke test there is also a non-semantic `hashing` encoder:
@@ -408,6 +413,48 @@ added description-only before scoring:
 text-classifier-eval --model model_dir/ --input labeled.csv \
     --classes full_taxonomy.csv --output report.json
 ```
+
+**Persist taxonomy/example changes to a model directory:** `with_added_classes`
+above only widens a pipeline *in memory* — reload the directory and you're back
+to the trained taxonomy. `text-classifier-update` does the same class-agnostic
+trick, but writes the result back to a model directory, and can also add real
+labeled *examples* (for a new or an existing class), not just descriptions:
+
+```bash
+text-classifier-update \
+    --model model_dir/ --out updated_model_dir/ \
+    --classes full_taxonomy.csv \    # every existing key + any new ones (edited descriptions are re-embedded)
+    --items new_examples.csv \       # optional: new labeled examples (text,label)
+    --tune-with fresh_labeled.csv     # optional: re-tune thresholds in the same run
+```
+
+`--classes` is the *full* taxonomy (same shape as `--classes` at train time):
+every key already in the model must be present — `update` never removes or
+reorders a class, so a file that drops one is rejected with a message telling
+you to retrain instead. A key not yet in the model is appended; an existing
+key whose description text changed gets just that description re-embedded.
+
+Adding examples (`--items`) needs the original training corpus, because BM25's
+IDF is corpus-global and can't be updated incrementally. By default this comes
+from `corpus.jsonl.gz`, written into every model directory unless you passed
+`--no-store-corpus` at train time; for a directory that predates it (or opted
+out), supply the original items with `--base-items original_items.csv`. Only
+the *new* texts are re-encoded — the existing example embeddings are reused
+verbatim, so cost scales with the delta, not the whole corpus.
+
+Without `--tune-with`, abstention thresholds are left as they were (a new
+class falls back to the global threshold, same as `with_added_classes`), and
+the model directory's `evaluation.json`/`model_card.md` are carried forward
+but marked stale (their headline metrics predate the update) — run
+`text-classifier-tune` on fresh labeled data afterward. Pass `--tune-with` to
+do both in one step and get a fresh evaluation, including candidate recall for
+the classes you just added — the evidence for whether their descriptions/
+examples actually retrieve. Everything is provenance-tracked: `meta.json`
+gains an `updates` entry (timestamp, classes/items added, package version)
+each time.
+
+Use `--in-place` to overwrite `--model` directly instead of writing a new
+directory.
 
 ### Worked examples
 

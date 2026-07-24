@@ -1,8 +1,36 @@
 # T68 — Update a deployed model with new classes/examples without retraining fusion
 
-status: todo
+status: in-review
 tier: 6
 depends_on: T61, T66
+
+> **Implementation note (in-review).** Delivered: `text-classifier-update`
+> console script + `application/updating.py::update`. Classes: `--classes` is
+> the full taxonomy (new keys appended via `DenseRetrieverAdapter.with_added_classes`
+> + `LexicalRetrieverAdapter.with_added_descriptions`, T78's existing methods;
+> an existing key's changed description is re-embedded via a new
+> `with_updated_descriptions`; a file missing an existing key is rejected —
+> "retrain" in the message). Examples: `--items` requires the original corpus
+> (`corpus.jsonl.gz`, written by `--store-corpus` — default on — or supplied via
+> `--base-items`); dense side only encodes the delta (new
+> `DenseRetrieverAdapter.with_added_examples`, prototypes/`class_freq`
+> recomputed over the merged pool via a shared `_prototypes_and_freq` helper
+> extracted from `build`); lexical side does a full `LexicalRetrieverAdapter.build`
+> over the merged corpus (BM25 IDF is corpus-global, no incremental path).
+> Fusion/calibrator are reused verbatim (`replace()`, never refit). Corpus-fitted
+> encoders (tfidf) get a warning, not a rejection. `--tune-with` runs T66's
+> `retune` inline and reports new-class candidate recall; without it, thresholds
+> are untouched and the carried-forward `evaluation.json`/`model_card.md` are
+> marked `stale`. `meta.json` gains an `updates` provenance list, carried
+> forward across `--out`/`--in-place` by a new `ArtifactRepository.read_meta`/
+> `apply_update_provenance` pair (needed because `save()` always rewrites
+> `meta.json` from scratch). Tests: `tests/integration/test_update_cli.py` (14
+> cases). One deviation from the ticket's literal test list: "fusion +
+> calibrator files byte-identical" is checked as fusion-file-hash-identical +
+> calibrator-functionally-identical (`transform()` on a probe), not
+> calibrator-hash-identical — `IsotonicCalibrator`'s pickle (a scipy `interp1d`
+> inside it) isn't byte-stable across an unrelated reload+re-save even with zero
+> semantic change, confirmed by direct round-trip testing.
 
 ## Goal
 A `text-classifier-update` CLI (+ application use case) that adds new classes
@@ -74,22 +102,35 @@ refitting on the *full* corpus (IDF changes). Two supported paths:
 - `tests/integration/test_update_cli.py`.
 
 ## Tests
-- [ ] Add a class with examples (hashing encoder e2e): update, then infer an
-      obvious member of the new class → predicted correctly with sensible conf.
-- [ ] Index stability: predictions and confidences for items of untouched classes
-      are identical before/after an update that only appends (golden check).
-- [ ] Add examples to an existing class: prototype/`class_freq` change, fusion
-      file byte-identical, per-class threshold for that class preserved.
-- [ ] Reorder/remove attempts rejected with a message saying "retrain".
-- [ ] Dir without corpus + no `--base-items` → actionable error naming both fixes.
-- [ ] Updated dir loads via unchanged `InferencePipeline.from_directory`.
+- [x] Add a class with examples (offline tfidf encoder, not hashing — same
+      offline/deterministic contract, and words built from the fitted
+      vocabulary since tfidf's is frozen/corpus-dependent): update, then infer
+      an obvious member of the new class → predicted correctly (`conf > 0.3`,
+      real example support, not description-only).
+- [x] Index stability: predictions and confidences for items of untouched
+      classes are identical before/after an update that only adds examples to
+      one other class.
+- [x] Add examples to an existing class: `meta.json` abstention block
+      (global + per-class thresholds) unchanged, fusion file byte-identical,
+      calibrator functionally identical (see implementation note above for why
+      not byte-identical), corpus grows by exactly the added count.
+- [x] Reorder/remove attempts (a `--classes` file missing an existing key)
+      rejected with a message containing "retrain".
+- [x] Dir without corpus + no `--base-items` → actionable error naming both
+      `--base-items` and `--store-corpus`.
+- [x] Updated dir loads via unchanged `InferencePipeline.from_directory`.
 
 ## Acceptance criteria
-- [ ] No fusion/calibrator refit anywhere in the path; runtime dominated by
-      encoding the delta + BM25 refit.
-- [ ] `meta.json` records update provenance; evaluation artifacts note staleness
-      (headline metrics predate the update) until a re-eval/tune runs.
-- [ ] Old model dirs (no corpus) still fully usable for everything except update.
+- [x] No fusion/calibrator refit anywhere in the path (verified: fusion file
+      hash-identical, calibrator functionally identical) unless `--tune-with`
+      is passed, which explicitly opts into T66's refit; runtime is dominated
+      by encoding the delta + the BM25 refit.
+- [x] `meta.json` records `updates` provenance (carried forward across
+      `--out`/`--in-place`); evaluation artifacts are marked `stale` (headline
+      metrics predate the update) until `--tune-with`/a re-eval runs.
+- [x] Old model dirs (no corpus) still fully usable for prediction/eval/tune;
+      `update --items` on one is rejected with the actionable error above
+      (classes-only `update` still works with no corpus at all).
 
 ## Out of scope
 Removing/merging classes (retrain); encoder refresh (retrain); automatic

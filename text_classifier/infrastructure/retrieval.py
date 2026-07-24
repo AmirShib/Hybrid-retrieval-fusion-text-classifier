@@ -205,6 +205,29 @@ def _dense_topk(
     return out_idx, out_sim
 
 
+def _prototypes_and_freq(
+    emb: np.ndarray, labels: np.ndarray, n_classes: int
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Per-class prototype (L2-normalized mean example embedding) and example
+    count, over ``n_classes`` classes. A class with no examples gets an
+    all-``NaN`` prototype row (XGBoost reads NaN as "missing"). Shared by
+    ``DenseRetrieverAdapter.build`` (fresh) and ``with_added_examples`` (T68,
+    merged pool) so both compute prototypes identically."""
+    dim = emb.shape[1]
+    proto = np.full((n_classes, dim), np.nan, dtype=np.float32)
+    freq = np.zeros(n_classes, dtype=np.int64)
+    labels = np.asarray(labels)
+    for c in range(n_classes):
+        mask = labels == c
+        freq[c] = int(mask.sum())
+        if freq[c]:
+            v = emb[mask].mean(axis=0)
+            norm = np.linalg.norm(v)
+            if norm > 0:
+                proto[c] = (v / norm).astype(np.float32)
+    return proto, freq
+
+
 @dataclass
 class DenseState:
     """Serializable numeric state of the dense retriever."""
@@ -234,19 +257,8 @@ class DenseRetrieverAdapter(DenseRetriever):
         # retrieval; asymmetric encoders (E5/BGE prompts) encode them with the
         # document prompt so query embeddings land in the matching space.
         emb = encoder.encode_documents(texts)
-        dim = emb.shape[1]
-        C = label_space.size
-        proto = np.full((C, dim), np.nan, dtype=np.float32)
-        freq = np.zeros(C, dtype=np.int64)
         labels = np.asarray(labels)
-        for c in range(C):
-            mask = labels == c
-            freq[c] = int(mask.sum())
-            if freq[c]:
-                v = emb[mask].mean(axis=0)
-                norm = np.linalg.norm(v)
-                if norm > 0:
-                    proto[c] = (v / norm).astype(np.float32)
+        proto, freq = _prototypes_and_freq(emb, labels, label_space.size)
         desc = encoder.encode_documents(label_space.descriptions)
         return cls(DenseState(emb, labels.astype(np.int64), proto, desc, freq), cfg.dense_chunk)
 
@@ -350,3 +362,58 @@ class DenseRetrieverAdapter(DenseRetriever):
             s.example_emb, s.example_labels, prototypes, description_emb, class_freq
         )
         return DenseRetrieverAdapter(extended, self._chunk)
+
+    def with_updated_descriptions(
+        self, encoder: TextEncoder, edits: dict
+    ) -> "DenseRetrieverAdapter":
+        """Return a copy with the description embeddings at ``edits``' class
+        indices re-encoded (T68): ``{class_index: new_description_text}``, for
+        editing an *existing* class's description in place. A brand-new class's
+        description is added via ``with_added_classes``, not this method. Every
+        row not named in ``edits`` is untouched."""
+        if not edits:
+            return DenseRetrieverAdapter(self._s, self._chunk)
+        s = self._s
+        idxs = list(edits.keys())
+        new_rows = np.asarray(
+            encoder.encode_documents([edits[i] for i in idxs]), dtype=np.float32
+        )
+        description_emb = s.description_emb.copy()
+        description_emb[idxs] = new_rows
+        updated = DenseState(
+            s.example_emb, s.example_labels, s.prototypes, description_emb, s.class_freq
+        )
+        return DenseRetrieverAdapter(updated, self._chunk)
+
+    def with_added_examples(
+        self,
+        encoder: TextEncoder,
+        new_texts: Sequence[str],
+        new_labels: np.ndarray,
+        n_classes: int,
+    ) -> "DenseRetrieverAdapter":
+        """Return a copy whose example pool is extended with ``new_texts``/
+        ``new_labels`` (T68). Only ``new_texts`` is encoded — the existing
+        ``example_emb`` is reused verbatim (the encoder is frozen, so
+        re-encoding it would reproduce the same vectors at needless cost, and
+        for an expensive sentence-transformer encoder that cost is the whole
+        point of avoiding a retrain). Prototypes and ``class_freq`` are
+        recomputed over the *merged* pool for all ``n_classes`` classes — an
+        added example can only change its own class's prototype, but computing
+        every class the same way ``build`` does keeps the numerics provably
+        identical to a from-scratch build over the same merged corpus.
+        Description embeddings are untouched; see ``with_added_classes``/
+        ``with_updated_descriptions`` for those."""
+        s = self._s
+        new_texts = list(new_texts)
+        if new_texts:
+            new_emb = np.asarray(encoder.encode_documents(new_texts), dtype=np.float32)
+        else:
+            new_emb = np.zeros((0, s.example_emb.shape[1]), dtype=s.example_emb.dtype)
+        merged_emb = np.concatenate([s.example_emb, new_emb], axis=0)
+        merged_labels = np.concatenate(
+            [s.example_labels, np.asarray(new_labels, dtype=np.int64)]
+        )
+        proto, freq = _prototypes_and_freq(merged_emb, merged_labels, n_classes)
+        updated = DenseState(merged_emb, merged_labels, proto, s.description_emb, freq)
+        return DenseRetrieverAdapter(updated, self._chunk)

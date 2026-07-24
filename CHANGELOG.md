@@ -9,6 +9,27 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 ## [Unreleased]
 
 ### Added
+- **Add classes/examples to a deployed model without retraining (T68)** — a
+  `text-classifier-update` console script (+ `application/updating.py::update`)
+  that rebuilds only the cheap, class-indexed retrieval state (dense
+  prototypes/description embeddings, BM25) while reusing the trained fusion
+  model and calibrator verbatim — the fusion model is class-agnostic by
+  construction (every feature is a per-candidate retrieval signal, not a
+  per-class weight). `--classes` is the full taxonomy (new keys appended,
+  edited descriptions re-embedded; a file missing an existing key is rejected
+  — update never removes or reorders a class). `--items` adds labeled
+  examples for a new or existing class: only the new texts are re-encoded
+  (old example embeddings are reused as-is), while the BM25 example index is
+  refit over the merged corpus (its IDF is corpus-global, so it can't be
+  updated incrementally) — this needs the original training corpus, which
+  `text-classifier-train` now persists as `corpus.jsonl.gz` by default
+  (`--no-store-corpus` to opt out; `--base-items` supplies it for a dir that
+  predates the flag). Without `--tune-with`, thresholds are left as-is and the
+  persisted `evaluation.json`/`model_card.md` are carried forward marked
+  stale; with it, `retune` (T66) runs in the same step and reports candidate
+  recall for the newly added classes. `meta.json` gains an `updates`
+  provenance list; `--in-place` overwrites `--model` instead of writing a new
+  directory.
 - **Re-tune the operating point without retraining (T66)** — a
   `text-classifier-tune` console script (+ `application/tuning.py::retune`) that
   refits the calibrator and re-tunes the global + per-class abstention

@@ -9,17 +9,19 @@ Layout:
     <dir>/fusion.json      XGBoost model
     <dir>/calibrator.pkl   calibrator (isotonic | platt | beta)
     <dir>/meta.json        label space, thresholds, config, feature schema
+    <dir>/corpus.jsonl.gz  optional: raw training corpus (text+label), see TrainingConfig.store_corpus
 """
 
 from __future__ import annotations
 
 import datetime
+import gzip
 import json
 import logging
 import os
 import pickle
 from dataclasses import dataclass, field, replace
-from typing import Dict, List, Sequence, Union
+from typing import Dict, List, Optional, Sequence, Union
 
 import numpy as np
 
@@ -31,6 +33,7 @@ from ..domain import (
     ConfidenceCalibrator,
     FeatureProvider,
     FusionModel,
+    LabeledItem,
     LabelSpace,
     TextEncoder,
     composed_feature_names,
@@ -232,6 +235,62 @@ class ArtifactRepository:
         )
 
         with open(meta_path, "w") as fh:
+            json.dump(meta, fh, indent=2)
+
+    @staticmethod
+    def save_corpus(directory: str, items: Sequence[LabeledItem]) -> None:
+        """Persist the raw training corpus as gzip-compressed JSONL (one
+        ``{"text": ..., "label": ...}`` object per line) so a later
+        ``update`` (T68) can add labeled examples without needing
+        ``--base-items``: appending examples to BM25 requires refitting on the
+        *full* corpus (its IDF is corpus-global), and the model dir otherwise
+        keeps no raw text at all (``dense.npz`` is embeddings, ``lexical.pkl``
+        a fitted vectorizer). Opt out via ``TrainingConfig.store_corpus=False``."""
+        path = os.path.join(directory, "corpus.jsonl.gz")
+        with gzip.open(path, "wt", encoding="utf-8") as fh:
+            for it in items:
+                fh.write(json.dumps({"text": it.text, "label": it.label}) + "\n")
+
+    @staticmethod
+    def load_corpus(directory: str) -> Optional[List[LabeledItem]]:
+        """Load the persisted training corpus, or ``None`` if this model dir
+        predates ``--store-corpus`` or opted out of it (``update`` then needs
+        ``--base-items`` to supply the original items instead)."""
+        path = os.path.join(directory, "corpus.jsonl.gz")
+        if not os.path.isfile(path):
+            return None
+        items: List[LabeledItem] = []
+        with gzip.open(path, "rt", encoding="utf-8") as fh:
+            for line in fh:
+                row = json.loads(line)
+                items.append(LabeledItem(row["text"], row["label"]))
+        return items
+
+    @staticmethod
+    def read_meta(directory: str) -> Dict:
+        """Read a model dir's raw ``meta.json`` dict — used by ``update`` (T68)
+        to carry forward provenance (``updates``/``retunes``) that a fresh
+        ``save()`` would otherwise drop, read *before* that rewrite happens
+        (which matters for ``--in-place``, where source and target are the
+        same directory)."""
+        with open(os.path.join(directory, "meta.json")) as fh:
+            return json.load(fh)
+
+    @staticmethod
+    def apply_update_provenance(target_dir: str, prior_meta: Dict, entry: Dict) -> None:
+        """After ``save()`` rewrites ``target_dir``'s ``meta.json`` from
+        scratch (part of ``update``, T68), carry forward ``prior_meta``'s
+        ``updates``/``retunes`` provenance history — dropped by the fresh
+        rewrite, since ``save()`` builds ``meta.json`` from nothing — and
+        append ``entry`` to ``updates``. Call with ``prior_meta`` read via
+        ``read_meta`` *before* ``save()`` runs."""
+        target_meta_path = os.path.join(target_dir, "meta.json")
+        with open(target_meta_path) as fh:
+            meta = json.load(fh)
+        meta["updates"] = list(prior_meta.get("updates", [])) + [entry]
+        if prior_meta.get("retunes"):
+            meta["retunes"] = list(prior_meta["retunes"]) + list(meta.get("retunes", []))
+        with open(target_meta_path, "w") as fh:
             json.dump(meta, fh, indent=2)
 
     @staticmethod

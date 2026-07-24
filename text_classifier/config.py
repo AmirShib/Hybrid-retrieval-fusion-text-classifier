@@ -117,6 +117,13 @@ class TrainingConfig:
     per_class_min_support: int = 100
     use_per_fold_encoder: bool = False  # True = rigorous (refit encoder per fold), expensive
     random_state: int = 0
+    # Persist the raw training corpus (text + label, gzip-compressed JSONL) into
+    # the model dir as corpus.jsonl.gz (T68). `text-classifier-update` needs it
+    # to add labeled examples later without retraining (BM25's IDF is
+    # corpus-global, so appending examples requires the full corpus to refit
+    # against). Opt out via --no-store-corpus for privacy/size; an update on a
+    # dir with no persisted corpus still works via --base-items.
+    store_corpus: bool = True
 
     def fold_roles(
         self, *, external_val: bool = False, external_test: bool = False
