@@ -9,6 +9,21 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 ## [Unreleased]
 
 ### Added
+- **Re-tune the operating point without retraining (T66)** — a
+  `text-classifier-tune` console script (+ `application/tuning.py::retune`) that
+  refits the calibrator and re-tunes the global + per-class abstention
+  thresholds against a fresh labeled set and a chosen `--target-precision`,
+  reusing the model's existing encoder, retrieval indices, and fusion model
+  verbatim. Updates `calibrator.pkl` and `meta.json`'s abstention block in
+  place (recording a `retunes` provenance entry) and writes a fresh
+  `evaluation.json`/`model_card.md`; `--dry-run` previews the new coverage/
+  accuracy/thresholds and writes nothing. The threshold-tuning logic is shared
+  with `TrainingPipeline` via a new `fit_calibration_and_abstention` helper, not
+  duplicated. The tune set must be disjoint from the training data — an
+  overlapping item retrieves itself as a perfect match and inflates its own
+  confidence — so the CLI warns (a best-effort embedding-similarity proxy; see
+  README) when a tune-set item looks like a near-duplicate of an indexed
+  training example.
 - **Prediction explanations for reviewers (T69)** — answer "why did it call this
   that, and how close was it to the threshold" from one record, built from a
   single feature pass (the plain `predict` path is untouched):

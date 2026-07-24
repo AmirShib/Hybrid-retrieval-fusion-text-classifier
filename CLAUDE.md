@@ -38,8 +38,9 @@ Dependency rule: `domain` imports no ML framework. `infrastructure` depends on `
 - Train: `python -m scripts.train --items items.csv --classes classes.csv --out model_dir/`
 - Infer: `python -m scripts.infer --model model_dir/ --input new.csv --output preds.csv`
 - Evaluate on a labeled set: `python -m text_classifier.cli.evaluate --model model_dir/ --input labeled.csv`
+- Re-tune the operating point (no retrain): `python -m text_classifier.cli.tune --model model_dir/ --input fresh_labeled.csv --target-precision 0.97`
 - Tests: `pytest -q`
-- After `pip install .`: console scripts `text-classifier-train` / `-infer` / `-eval`. CLI logic lives in
+- After `pip install .`: console scripts `text-classifier-train` / `-infer` / `-eval` / `-tune`. CLI logic lives in
   `text_classifier/cli/`; `scripts/*.py` are thin dev wrappers. Training writes `evaluation.json` +
   `model_card.md` into the model dir.
 

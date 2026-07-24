@@ -34,6 +34,7 @@ lightgbm = ["lightgbm"]
 text-classifier-train = "text_classifier.cli.train:main"
 text-classifier-infer = "text_classifier.cli.infer:main"
 text-classifier-eval = "text_classifier.cli.evaluate:main"
+text-classifier-tune = "text_classifier.cli.tune:main"
 
 # Flat layout: pick up the package, leave scripts/ as runnable dev wrappers.
 [tool.setuptools.packages.find]

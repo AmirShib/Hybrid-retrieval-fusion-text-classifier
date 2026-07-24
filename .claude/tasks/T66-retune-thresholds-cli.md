@@ -1,8 +1,23 @@
 # T66 — Re-tune calibration + abstention thresholds on a trained model (tune CLI)
 
-status: todo
+status: in-review
 tier: 6
 depends_on: T61
+
+> **Implementation note (in-review).** Delivered: `text-classifier-tune` console
+> script + `application/tuning.py::retune` (featurizes a fresh labeled set
+> against the deployed indices, refits the calibrator, re-tunes global +
+> per-class thresholds via a new shared `fit_calibration_and_abstention` helper
+> extracted from `TrainingPipeline._fit_fusion`). Persistence is a focused
+> `ArtifactRepository.update_decision_layer` (calibrator file + `meta.json`
+> abstention/`target_precision`/`retunes` provenance only — encoder, indices,
+> and fusion file untouched, asserted by hash in tests). `--dry-run` writes
+> nothing. The training-corpus overlap check is a best-effort embedding-
+> similarity proxy (documented limitation: exact-text detection needs T68's
+> persisted corpus, which does not exist yet). Tests:
+> `tests/integration/test_tune_cli.py` (7 cases: threshold/coverage
+> monotonicity, byte-identical untouched artifacts, reload picks up new
+> thresholds, dry-run no-op, overlap warning fires/doesn't, bad-label error).
 
 ## Goal
 A `text-classifier-tune` console script (and matching application-layer function)
@@ -66,20 +81,31 @@ match is cheap — do it and *warn*, listing the count.)
 - `README.md` — usage + the freshness warning.
 
 ## Tests
-- [ ] Train a model (hashing encoder), retune on a held-out labeled set with a
-      higher target: new global threshold ≥ old, coverage on that set drops,
-      accuracy-on-accepted meets the new target (up to the tuner's guarantee).
-- [ ] `meta.json` abstention block and calibrator file change; encoder/dense/
-      lexical/fusion files byte-identical (assert on mtimes-or-hashes).
-- [ ] Reloading via `InferencePipeline.from_directory` uses the new thresholds.
-- [ ] `--dry-run` leaves the directory byte-identical.
-- [ ] Overlap warning fires when the tune set intersects training texts.
+- [x] Train a model (offline tfidf encoder, not hashing — same offline/
+      deterministic contract), retune the same model at a low and a high target
+      precision: higher target -> global threshold >= lower target's, and
+      coverage cannot rise (the monotonicity `ThresholdTuner.threshold_for_precision`
+      guarantees), checked end-to-end through the CLI.
+- [ ] accuracy-on-accepted meeting the new target is not separately asserted —
+      the synthetic fixture's confidence/correctness relationship doesn't
+      reliably support an exact-target assertion at this scale; the monotonicity
+      property above is the guarantee actually being tested.
+- [x] `meta.json` abstention block and calibrator file change; encoder/dense/
+      lexical/fusion files byte-identical (asserted by sha256 hash).
+- [x] Reloading via `InferencePipeline.from_directory` uses the new thresholds.
+- [x] `--dry-run` leaves the directory byte-identical.
+- [x] Overlap warning fires when the tune set *is* the training set; does not
+      fire for a genuinely disjoint set (embedding-similarity proxy, see the
+      implementation note above for its limitation).
 
 ## Acceptance criteria
-- [ ] No encoder/index/fusion retraining anywhere in the path; runtime is
-      dominated by encoding the tune set.
-- [ ] Threshold logic shared with `TrainingPipeline`, not duplicated.
-- [ ] Model dir stays fully portable and loadable by unchanged inference code.
+- [x] No encoder/index/fusion retraining anywhere in the path (`retune` only
+      encodes the tune set and reuses `artifacts.encoder/dense/lexical/fusion`
+      verbatim); runtime is dominated by encoding the tune set.
+- [x] Threshold logic shared with `TrainingPipeline` via
+      `fit_calibration_and_abstention`, not duplicated.
+- [x] Model dir stays fully portable and loadable by unchanged inference code
+      (`InferencePipeline.from_directory`, verified in tests).
 
 ## Out of scope
 Target-coverage mode (T43 adds the alternative objective; this CLI should grow the

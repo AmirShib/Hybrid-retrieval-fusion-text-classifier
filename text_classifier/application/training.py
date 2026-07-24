@@ -19,18 +19,20 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import StratifiedKFold
 
-from ..config import PipelineConfig
+from ..config import CalibrationConfig, PipelineConfig
 from ..domain import (
     AbstentionPolicy,
     CandidatePolicy,
+    ConfidenceCalibrator,
     CoverageReport,
     FeatureProvider,
+    FusionModel,
     LabeledItem,
     LabelSpace,
     TextEncoder,
@@ -55,6 +57,44 @@ from .scoring import add_confidence, top_per_item
 from .signal_report import signal_report
 
 log = logging.getLogger(__name__)
+
+
+def fit_calibration_and_abstention(
+    ca: pd.DataFrame,
+    fusion: FusionModel,
+    calibration_cfg: CalibrationConfig,
+    feature_names: Sequence[str],
+    target_precision: float,
+    per_class_min_support: int,
+) -> Tuple[ConfidenceCalibrator, AbstentionPolicy]:
+    """Fit a calibrator on ``fusion``'s raw scores for the calibration rows ``ca``,
+    then tune the global + per-class abstention thresholds for ``target_precision``.
+
+    ``ca`` must carry the raw feature columns (``feature_names``) plus ``is_true``
+    (whether that candidate is the item's true class) and ``candidate`` (its class
+    index) — the same shape as an out-of-fold or featurized-external frame.
+
+    This is the decision-layer half of ``TrainingPipeline._fit_fusion`` (the fusion
+    model itself is fit separately, before this is called), extracted so the
+    re-tune use case (T66) can reuse the identical threshold logic against a fresh
+    labeled set without duplicating it.
+    """
+    names = list(feature_names)
+    raw = fusion.predict_proba(ca[names].to_numpy(np.float32))
+    calibrator = build_calibrator(calibration_cfg)
+    calibrator.fit(raw, ca["is_true"].to_numpy())
+
+    decided = top_per_item(add_confidence(ca, fusion, calibrator, names))
+    global_thr = ThresholdTuner.threshold_for_precision(
+        decided["conf"].to_numpy(), decided["is_true"].to_numpy(), target_precision
+    )
+    per_class: Dict[int, float] = {}
+    for cls, grp in decided.groupby("candidate"):
+        if len(grp) >= per_class_min_support:
+            per_class[int(cls)] = ThresholdTuner.threshold_for_precision(
+                grp["conf"].to_numpy(), grp["is_true"].to_numpy(), target_precision
+            )
+    return calibrator, AbstentionPolicy(global_thr, per_class)
 
 
 class TrainingPipeline:
@@ -507,23 +547,20 @@ class TrainingPipeline:
         else:
             fusion.fit(tr[names].to_numpy(np.float32), tr["is_true"].to_numpy())
 
-        raw = fusion.predict_proba(ca[names].to_numpy(np.float32))
-        calibrator = build_calibrator(self.cfg.calibration)
-        calibrator.fit(raw, ca["is_true"].to_numpy())
-
-        decided = top_per_item(add_confidence(ca, fusion, calibrator, names))
-        target = self.cfg.training.target_precision
-        global_thr = ThresholdTuner.threshold_for_precision(
-            decided["conf"].to_numpy(), decided["is_true"].to_numpy(), target
+        calibrator, abstention = fit_calibration_and_abstention(
+            ca,
+            fusion,
+            self.cfg.calibration,
+            names,
+            self.cfg.training.target_precision,
+            self.cfg.training.per_class_min_support,
         )
-        per_class = {}
-        for cls, grp in decided.groupby("candidate"):
-            if len(grp) >= self.cfg.training.per_class_min_support:
-                per_class[int(cls)] = ThresholdTuner.threshold_for_precision(
-                    grp["conf"].to_numpy(), grp["is_true"].to_numpy(), target
-                )
-        log.info("global threshold=%.4f, %d per-class thresholds", global_thr, len(per_class))
-        return fusion, calibrator, AbstentionPolicy(global_thr, per_class)
+        log.info(
+            "global threshold=%.4f, %d per-class thresholds",
+            abstention.global_threshold,
+            len(abstention.per_class),
+        )
+        return fusion, calibrator, abstention
 
     # ---------------------------------------------------------------- (4) evaluate
     def _evaluate(

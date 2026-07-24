@@ -342,6 +342,33 @@ Each trained model directory carries its own evidence: `evaluation.json` (the
 full held-out report) and `model_card.md` (a human-readable summary with the
 package version, dataset shape, headline metrics, and the abstention thresholds).
 
+**Move the coverage/precision operating point without retraining:** the target
+precision → abstention threshold is normally baked in at train time. Moving
+that knob — or responding to drift `text-classifier-eval` surfaced — does not
+require a full retrain: the encoder, retrieval indices, and fusion model are
+reused verbatim, and only the calibrator + thresholds are refit, on arrays the
+model already produces (seconds of work, not a k-fold pass over the corpus):
+
+```bash
+text-classifier-tune --model model_dir/ --input fresh_labeled.csv \
+    --target-precision 0.97
+# --dry-run prints the would-be coverage/accuracy/thresholds and writes nothing
+```
+
+This updates `calibrator.pkl` and `meta.json`'s abstention block in place, and
+writes a fresh `evaluation.json`/`model_card.md` reflecting the new operating
+point (with a `retunes` provenance entry recording when and on how many items).
+
+**The labeled set must be fresh.** An item that was in the original training
+set sits inside the deployed retrieval indices and retrieves itself as a
+perfect match, so its confidence is optimistically inflated — the retuned
+threshold would then under-abstain in production. Never point `--input` at the
+file used for `text-classifier-train --items`. The tool warns when a tune-set
+item looks like a (near-)exact embedding match to an indexed training example
+— a cheap, best-effort proxy; it cannot check exact text identity without the
+persisted training corpus itself (a future capability), so treat the absence of
+a warning as reassuring, not as proof.
+
 **Grow the taxonomy without retraining:** a deployed model's label space can be
 widened after training — for a class that appears once the model has shipped, or
 to evaluate against a test set with labels the training data never contained.

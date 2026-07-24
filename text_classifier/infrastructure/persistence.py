@@ -13,6 +13,7 @@ Layout:
 
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 import os
@@ -183,6 +184,54 @@ class ArtifactRepository:
             },
         }
         with open(os.path.join(directory, "meta.json"), "w") as fh:
+            json.dump(meta, fh, indent=2)
+
+    def update_decision_layer(
+        self,
+        directory: str,
+        calibrator: ConfidenceCalibrator,
+        abstention: AbstentionPolicy,
+        target_precision: float,
+        n_items: int,
+    ) -> None:
+        """Persist a re-tuned calibrator + abstention policy into an existing
+        model directory (T66), touching only the decision layer.
+
+        Unlike ``save`` (a full rewrite), this writes just the calibrator file
+        (via its recorded registry kind — retuning never changes the calibrator
+        *kind*, only refits it) and updates ``meta.json``'s ``abstention`` block
+        and ``config.training.target_precision``, appending a ``retunes``
+        provenance entry. The encoder, dense/lexical indices, fusion model, and
+        feature-provider files are left byte-identical.
+        """
+        meta_path = os.path.join(directory, "meta.json")
+        with open(meta_path) as fh:
+            meta = json.load(fh)
+
+        cal_kind = self._components_from_meta(meta)["calibrator"]
+        cal_spec = calibrator_spec(cal_kind)
+        calibrator.save(os.path.join(directory, cal_spec.filename))
+
+        meta.setdefault("config", {}).setdefault("training", {})["target_precision"] = (
+            target_precision
+        )
+        meta["abstention"] = {
+            "global_threshold": abstention.global_threshold,
+            "per_class": {str(k): v for k, v in abstention.per_class.items()},
+        }
+        retunes = meta.setdefault("retunes", [])
+        retunes.append(
+            {
+                "retuned_at": datetime.datetime.now(datetime.timezone.utc).isoformat(
+                    timespec="seconds"
+                ),
+                "n_items": int(n_items),
+                "target_precision": target_precision,
+                "package_version": __version__,
+            }
+        )
+
+        with open(meta_path, "w") as fh:
             json.dump(meta, fh, indent=2)
 
     @staticmethod
