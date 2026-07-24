@@ -1,8 +1,65 @@
 # Hybrid retrieval-fusion text classifier
 
-Classifies free-text items into one of many text-described classes,
-and **abstains** when it isn't confident enough —> routing those items to a human
-(Built with imbalanced data and air-gapped setting in mind).
+Classifies short free text into one of many text-described classes — and
+**abstains when it isn't confident enough**, routing those items to a human
+instead of guessing. Five retrieval signals (dense + lexical, over class
+descriptions + labeled examples) are fused by a small XGBoost model into a
+calibrated `P(correct)`, and the abstention threshold is tuned to hold a target
+accuracy on what it accepts. Built for **imbalanced data**, **air-gapped
+deployment**, and **taxonomies that grow after the model ships**.
+
+```mermaid
+flowchart LR
+    Q[item text] --> S[5 retrieval signals<br/>dense: description / prototype / kNN<br/>BM25: description / kNN]
+    S --> C[candidate classes<br/>union of each signal's top-N]
+    C --> F[XGBoost fusion<br/>~28 features per candidate]
+    F --> K[isotonic<br/>calibration]
+    K --> T{confidence ≥<br/>tuned threshold?}
+    T -->|yes| A[auto-accept]
+    T -->|no| H[human review]
+```
+
+## Results
+
+From the two runnable examples in [`examples/`](examples/) (commands to
+reproduce are in each example's README).
+
+**[CLINC150](examples/clinc150/)** — 150 user intents plus an explicit
+**out-of-scope (OOS)** set. 40-intent subsample, fully offline TF-IDF encoder
+(the floor a real bi-encoder improves on); illustrative — exact numbers vary
+with subsample and seed. The operating point is a knob — the threshold is tuned
+so accepted items hit the target accuracy:
+
+| operating point | in-scope coverage | accuracy on accepted | OOS routed to human |
+|---|---|---|---|
+| `--target-precision 0.99` | 76.5% | 96.5% | 88.6% |
+| `--target-precision 0.999` | 58.8% | 97.9% | 96.7% |
+
+**[COICOP Hebrew](examples/coicop_hebrew/)** — short, messy Hebrew retail
+product names. First **zero-shot**: Hebrew items matched against
+English-language COICOP 2018 category descriptions with a multilingual
+encoder — no labeled data at all. Then **trained**: on ~160k labeled items
+across an 81-category retail taxonomy, the full pipeline reaches **~61%
+coverage at ~90% accuracy-on-accepted** on the held-out split — i.e. ~61% of a
+real product catalog auto-coded at production precision, the rest queued for
+human review.
+
+The risk–coverage trade-off is the product: every trained model ships an
+`evaluation.json` with the full curve, so you pick the operating point from
+*your* cost of a wrong answer vs. a human review.
+
+## Quickstart
+
+```bash
+pip install .
+text-classifier-train --items items.csv --classes classes.csv --out model_dir/
+text-classifier-infer --model model_dir/ --input new_items.csv --output preds.csv
+```
+
+`items.csv` is `text,label`; `classes.csv` is `key,description`. `preds.csv`
+carries a prediction + calibrated confidence per row; abstained rows have an
+empty `predicted_key` — that's the human-review queue. No data yet?
+`python -m scripts.demo` runs an offline end-to-end smoke test (no downloads).
 
 ## How it works
 
@@ -137,6 +194,11 @@ text-classifier-train \
 # add --per-fold-encoder for the rigorous (expensive) encoder path
 ```
 
+By default this also writes `corpus.jsonl.gz` (the raw text+label pairs) into
+the model directory — pass `--no-store-corpus` to opt out for privacy/size.
+It costs little and is what lets `text-classifier-update` (below) add labeled
+examples later without needing the original items file again.
+
 For a torch-free, air-gapped run (no torch, no model download) use the TF-IDF
 encoder backend (corpus-fitted, so `--encoder` is ignored). For a
 dependency-free smoke test there is also a non-semantic `hashing` encoder:
@@ -187,6 +249,12 @@ text-classifier-train --items train.csv --classes classes.csv --out model_dir/ \
 # Both → every internal fold trains the fusion model, so --folds 2 is enough.
 text-classifier-train --items train.csv --classes classes.csv --out model_dir/ \
     --val-items val.csv --test-items test.csv --folds 2
+
+# Both, --folds 1 → leave-one-out: each training item is scored against every
+# other (itself masked out) rather than a k-fold split — the maximum-size,
+# deployment-matching index while staying leakage-free.
+text-classifier-train --items train.csv --classes classes.csv --out model_dir/ \
+    --val-items val.csv --test-items test.csv --folds 1
 ```
 
 Each external set is optional and independent, reuses `--text-col`/`--label-col`,
@@ -205,6 +273,18 @@ the model — so their scores, and the risk-coverage numbers derived from them,
 describe deployed behaviour. (This is a deliberate asymmetry: the fusion model
 is fit on per-fold-index features while the calibrator sees full-train-index
 features, anchoring confidence at the production operating point.)
+
+**Leave-one-out (`--folds 1`)** is available only with *both* external sets,
+because with no calibration or test role left to carve, the internal folds exist
+solely to keep the fusion model's own training features leakage-free. Instead of
+a k-fold split, each training item is featurized against the full deployment
+index with *itself* masked out — its dense/BM25 self-match dropped and its own
+vector left out of its class prototype. This gives every item the largest,
+most deployment-like index possible while still honouring the rule that an item
+never sees itself in its own index. It is the most faithful (and, at `O(n)`
+larger, the most expensive) fusion-training featurization; use `--folds 2` for
+the cheaper k-fold out-of-fold split. Leave-one-out has no per-item fit hook for
+custom fusion feature providers, so it rejects a config that sets any.
 
 **Non-English / multilingual corpora:** BM25 applies no stopword filtering by
 default — `stop_words` is an explicit opt-in
@@ -267,6 +347,33 @@ Each trained model directory carries its own evidence: `evaluation.json` (the
 full held-out report) and `model_card.md` (a human-readable summary with the
 package version, dataset shape, headline metrics, and the abstention thresholds).
 
+**Move the coverage/precision operating point without retraining:** the target
+precision → abstention threshold is normally baked in at train time. Moving
+that knob — or responding to drift `text-classifier-eval` surfaced — does not
+require a full retrain: the encoder, retrieval indices, and fusion model are
+reused verbatim, and only the calibrator + thresholds are refit, on arrays the
+model already produces (seconds of work, not a k-fold pass over the corpus):
+
+```bash
+text-classifier-tune --model model_dir/ --input fresh_labeled.csv \
+    --target-precision 0.97
+# --dry-run prints the would-be coverage/accuracy/thresholds and writes nothing
+```
+
+This updates `calibrator.pkl` and `meta.json`'s abstention block in place, and
+writes a fresh `evaluation.json`/`model_card.md` reflecting the new operating
+point (with a `retunes` provenance entry recording when and on how many items).
+
+**The labeled set must be fresh.** An item that was in the original training
+set sits inside the deployed retrieval indices and retrieves itself as a
+perfect match, so its confidence is optimistically inflated — the retuned
+threshold would then under-abstain in production. Never point `--input` at the
+file used for `text-classifier-train --items`. The tool warns when a tune-set
+item looks like a (near-)exact embedding match to an indexed training example
+— a cheap, best-effort proxy; it cannot check exact text identity without the
+persisted training corpus itself (a future capability), so treat the absence of
+a warning as reassuring, not as proof.
+
 **Grow the taxonomy without retraining:** a deployed model's label space can be
 widened after training — for a class that appears once the model has shipped, or
 to evaluate against a test set with labels the training data never contained.
@@ -307,21 +414,61 @@ text-classifier-eval --model model_dir/ --input labeled.csv \
     --classes full_taxonomy.csv --output report.json
 ```
 
+**Persist taxonomy/example changes to a model directory:** `with_added_classes`
+above only widens a pipeline *in memory* — reload the directory and you're back
+to the trained taxonomy. `text-classifier-update` does the same class-agnostic
+trick, but writes the result back to a model directory, and can also add real
+labeled *examples* (for a new or an existing class), not just descriptions:
+
+```bash
+text-classifier-update \
+    --model model_dir/ --out updated_model_dir/ \
+    --classes full_taxonomy.csv \    # every existing key + any new ones (edited descriptions are re-embedded)
+    --items new_examples.csv \       # optional: new labeled examples (text,label)
+    --tune-with fresh_labeled.csv     # optional: re-tune thresholds in the same run
+```
+
+`--classes` is the *full* taxonomy (same shape as `--classes` at train time):
+every key already in the model must be present — `update` never removes or
+reorders a class, so a file that drops one is rejected with a message telling
+you to retrain instead. A key not yet in the model is appended; an existing
+key whose description text changed gets just that description re-embedded.
+
+Adding examples (`--items`) needs the original training corpus, because BM25's
+IDF is corpus-global and can't be updated incrementally. By default this comes
+from `corpus.jsonl.gz`, written into every model directory unless you passed
+`--no-store-corpus` at train time; for a directory that predates it (or opted
+out), supply the original items with `--base-items original_items.csv`. Only
+the *new* texts are re-encoded — the existing example embeddings are reused
+verbatim, so cost scales with the delta, not the whole corpus.
+
+Without `--tune-with`, abstention thresholds are left as they were (a new
+class falls back to the global threshold, same as `with_added_classes`), and
+the model directory's `evaluation.json`/`model_card.md` are carried forward
+but marked stale (their headline metrics predate the update) — run
+`text-classifier-tune` on fresh labeled data afterward. Pass `--tune-with` to
+do both in one step and get a fresh evaluation, including candidate recall for
+the classes you just added — the evidence for whether their descriptions/
+examples actually retrieve. Everything is provenance-tracked: `meta.json`
+gains an `updates` entry (timestamp, classes/items added, package version)
+each time.
+
+Use `--in-place` to overwrite `--model` directly instead of writing a new
+directory.
+
 ### Worked examples
 
-`examples/clinc150/` is a runnable, fully offline demo on CLINC150 (150 intents +
-an out-of-scope set). It shows the abstention knob in action — raising the
-confidence bar routes more out-of-scope queries to a human while keeping in-scope
-accuracy high. Start with the notebook walkthrough,
-`examples/clinc150/clinc150_abstention_demo.ipynb` (cell-by-cell, with charts);
-`examples/clinc150/README.md` has the command-line equivalent.
+The two demos behind the [Results](#results) table, each with a cell-by-cell
+notebook walkthrough and a command-line equivalent in its README:
 
-`examples/coicop_hebrew/` is a cross-lingual, **zero-shot** demo: short Hebrew
-grocery names classified into the international COICOP 2018 taxonomy (English
-labels) with a multilingual encoder and no labeled training data. It shows the
-encoder + description-similarity signal carrying the easy cases and abstaining on
-the noisy ones, and how the full pipeline takes over once labels exist. See
-`examples/coicop_hebrew/coicop_hebrew_classification.ipynb`.
+- **[`examples/clinc150/`](examples/clinc150/)** — calibrated abstention on
+  CLINC150, fully offline: raising the confidence bar routes more out-of-scope
+  queries to a human while keeping in-scope accuracy high. Start with
+  `clinc150_abstention_demo.ipynb`.
+- **[`examples/coicop_hebrew/`](examples/coicop_hebrew/)** — cross-lingual
+  zero-shot (Hebrew items ↔ English COICOP descriptions, no labels), then the
+  full trained pipeline once labels exist. Start with
+  `coicop_hebrew_classification.ipynb`.
 
 Library:
 

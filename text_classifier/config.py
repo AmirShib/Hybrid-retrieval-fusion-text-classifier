@@ -91,12 +91,39 @@ class CalibrationConfig:
 
 
 @dataclass
+class FeatureProviderConfig:
+    """One custom feature provider (T70): a registry ``kind`` plus its params.
+    ``params`` is forwarded to the provider's factory (see
+    ``infrastructure/registry.py``)."""
+
+    kind: str  # registry key (see infrastructure/registry.py)
+    params: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class FeaturesConfig:
+    """Custom fusion features (T70). ``providers`` is an *ordered* list — the
+    provider columns are appended to the core ~28 in this order, and that composed
+    order is persisted into ``meta.json``. Empty (the default) means the feature
+    schema and outputs are byte-for-byte identical to a build without T70."""
+
+    providers: List[FeatureProviderConfig] = field(default_factory=list)
+
+
+@dataclass
 class TrainingConfig:
     n_folds: int = 5
     target_precision: float = 0.95
     per_class_min_support: int = 100
     use_per_fold_encoder: bool = False  # True = rigorous (refit encoder per fold), expensive
     random_state: int = 0
+    # Persist the raw training corpus (text + label, gzip-compressed JSONL) into
+    # the model dir as corpus.jsonl.gz (T68). `text-classifier-update` needs it
+    # to add labeled examples later without retraining (BM25's IDF is
+    # corpus-global, so appending examples requires the full corpus to refit
+    # against). Opt out via --no-store-corpus for privacy/size; an update on a
+    # dir with no persisted corpus still works via --base-items.
+    store_corpus: bool = True
 
     def fold_roles(
         self, *, external_val: bool = False, external_test: bool = False
@@ -114,6 +141,12 @@ class TrainingConfig:
         sets, every fold trains the fusion model; the k-fold machinery still
         runs because the fusion model's own training rows must stay leakage-free
         (out-of-fold feature generation), so ``n_folds >= 2`` is enough.
+
+        ``n_folds == 1`` is the leave-one-out (LOO) mode, valid only when both
+        external roles are supplied (there is no fold left to carve a calibration
+        or test set from). It has a single synthetic training "fold" ``[0]``: the
+        pipeline featurizes every training item against the deployment index with
+        that item masked out, rather than running the k-fold loop.
         """
         folds = list(range(self.n_folds))
         # Reserve folds from the end so the no-external assignment is byte-for-byte
@@ -130,6 +163,7 @@ class PipelineConfig:
     fusion: FusionConfig = field(default_factory=FusionConfig)
     calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
+    features: FeaturesConfig = field(default_factory=FeaturesConfig)
     candidate_top_n: int = 10
 
     def validate(self, *, external_val: bool = False, external_test: bool = False) -> None:
@@ -142,13 +176,24 @@ class PipelineConfig:
         the two folds required for out-of-fold feature generation is no longer
         the floor. With either external split present the floor drops to
         ``n_folds >= 2`` (still two folds for OOF); with neither it stays
-        ``>= 3`` (one train + one calibration + one test).
+        ``>= 3`` (one train + one calibration + one test). With *both* external
+        splits the floor drops to ``n_folds >= 1``: ``1`` selects leave-one-out
+        featurization (each training item scored against every other, itself
+        masked out), which is the leakage-free way to give every item the
+        maximum-size index without a k-fold split.
 
         Registry-key existence (encoder/fusion/calibrator ``kind``) is *not*
         checked here: the registry already raises a good error at build time,
         and this module must stay import-free of infrastructure.
         """
-        if external_val or external_test:
+        both_external = external_val and external_test
+        if both_external:
+            n_folds_ok = self.training.n_folds >= 1
+            n_folds_constraint = (
+                ">= 1 (both external roles are supplied; n_folds=1 selects leave-one-out "
+                "featurization, n_folds>=2 uses a k-fold out-of-fold split)"
+            )
+        elif external_val or external_test:
             n_folds_ok = self.training.n_folds >= 2
             n_folds_constraint = (
                 ">= 2 (an external split retires a fold role; two folds are still "
@@ -210,6 +255,16 @@ class PipelineConfig:
             for name, value, ok, constraint in checks
             if not ok
         ]
+        # Leave-one-out featurization (n_folds=1) has no per-item fit hook, so a
+        # custom feature provider fit on all training rows would see the very item
+        # it later scores — the exact leakage LOO's self-masking otherwise removes.
+        # Reject the combination rather than leak silently.
+        if both_external and self.training.n_folds == 1 and self.features.providers:
+            problems.append(
+                "training.n_folds=1 (leave-one-out featurization) does not support custom "
+                "feature providers (features.providers); a provider fit on all training rows "
+                "would see the item it scores. Use n_folds>=2 (k-fold out-of-fold) with providers."
+            )
         if problems:
             raise ValueError("invalid PipelineConfig: " + "; ".join(problems))
 
@@ -237,8 +292,57 @@ class PipelineConfig:
             fusion=_build_section(FusionConfig, data, "fusion"),
             calibration=_build_section(CalibrationConfig, data, "calibration"),
             training=_build_section(TrainingConfig, data, "training"),
+            features=_build_features_section(data),
             candidate_top_n=data.get("candidate_top_n", cls().candidate_top_n),
         )
+
+
+def _build_features_section(data: Dict[str, Any]) -> FeaturesConfig:
+    """Build the ``features`` section: a list of ``FeatureProviderConfig``.
+
+    Its shape (a list of provider objects) differs from the other single-object
+    sections, so it gets its own builder. Unknown keys — at the section level, or
+    inside any provider entry — are rejected by name, and a provider entry missing
+    its required ``kind`` raises a clear error rather than a bare ``TypeError``."""
+    sub = data.get("features") or {}
+    if not isinstance(sub, dict):
+        raise ValueError(
+            f"invalid PipelineConfig: section 'features' must be an object; got {sub!r}"
+        )
+    valid = {f.name for f in fields(FeaturesConfig)}
+    unknown = sorted(set(sub) - valid)
+    if unknown:
+        raise ValueError(
+            f"invalid PipelineConfig: unknown key(s) {unknown} in section 'features'; "
+            f"valid keys: {sorted(valid)}"
+        )
+    raw = sub.get("providers") or []
+    if not isinstance(raw, list):
+        raise ValueError(
+            f"invalid PipelineConfig: 'features.providers' must be a list; got {raw!r}"
+        )
+    provider_keys = {f.name for f in fields(FeatureProviderConfig)}
+    providers: List[FeatureProviderConfig] = []
+    for i, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"invalid PipelineConfig: 'features.providers[{i}]' must be an object; "
+                f"got {entry!r}"
+            )
+        entry_unknown = sorted(set(entry) - provider_keys)
+        if entry_unknown:
+            raise ValueError(
+                f"invalid PipelineConfig: unknown key(s) {entry_unknown} in "
+                f"'features.providers[{i}]'; valid keys: {sorted(provider_keys)}"
+            )
+        if "kind" not in entry:
+            raise ValueError(
+                f"invalid PipelineConfig: 'features.providers[{i}]' is missing required key 'kind'"
+            )
+        providers.append(
+            FeatureProviderConfig(kind=entry["kind"], params=entry.get("params") or {})
+        )
+    return FeaturesConfig(providers=providers)
 
 
 def _build_section(dc_cls: Type[_T], data: Dict[str, Any], section_name: str) -> _T:

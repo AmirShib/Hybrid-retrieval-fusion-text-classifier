@@ -9,31 +9,36 @@ Layout:
     <dir>/fusion.json      XGBoost model
     <dir>/calibrator.pkl   calibrator (isotonic | platt | beta)
     <dir>/meta.json        label space, thresholds, config, feature schema
+    <dir>/corpus.jsonl.gz  optional: raw training corpus (text+label), see TrainingConfig.store_corpus
 """
 
 from __future__ import annotations
 
+import datetime
+import gzip
 import json
 import logging
 import os
 import pickle
-from dataclasses import dataclass, replace
-from typing import Dict, Sequence, Union
+from dataclasses import dataclass, field, replace
+from typing import Dict, List, Optional, Sequence, Union
 
 import numpy as np
 
 from .._version import __version__
-from ..config import PipelineConfig
+from ..config import FeatureProviderConfig, PipelineConfig
 from ..domain import (
     AbstentionPolicy,
     ClassDefinition,
     ConfidenceCalibrator,
-    FEATURE_NAMES,
+    FeatureProvider,
     FusionModel,
+    LabeledItem,
     LabelSpace,
     TextEncoder,
+    composed_feature_names,
 )
-from .registry import calibrator_spec, encoder_spec, fusion_spec
+from .registry import calibrator_spec, encoder_spec, feature_provider_spec, fusion_spec
 from .retrieval import DenseRetrieverAdapter, DenseState, LexicalRetrieverAdapter
 
 log = logging.getLogger(__name__)
@@ -65,6 +70,10 @@ class DeployedArtifacts:
     fusion: FusionModel
     calibrator: ConfidenceCalibrator
     abstention: AbstentionPolicy
+    # Custom fusion-feature providers (T70), fitted on all training data. Empty
+    # for a model with no custom features — the byte-for-byte-identical default.
+    # A trailing field with a default keeps every positional construction valid.
+    feature_providers: List[FeatureProvider] = field(default_factory=list)
 
     def with_added_classes(self, new_classes: Sequence[NewClass]) -> "DeployedArtifacts":
         """Widen this model's label space with new classes, **without retraining**.
@@ -151,8 +160,15 @@ class ArtifactRepository:
         artifacts.fusion.save(os.path.join(directory, fus_spec.filename))
         artifacts.calibrator.save(os.path.join(directory, cal_spec.filename))
 
+        # Custom feature providers (T70): each persists to its own subdirectory,
+        # indexed so two providers of the same kind can't collide. The manifest
+        # records kind + relative path + declared names so load rebuilds them in
+        # order; the composed feature-name list below is the authoritative schema.
+        provider_manifest = self._save_providers(directory, cfg, artifacts.feature_providers)
+        feature_names = composed_feature_names(artifacts.feature_providers)
+
         meta = {
-            "feature_names": FEATURE_NAMES,
+            "feature_names": feature_names,
             "package_version": __version__,
             "config": cfg.to_dict(),
             "components": {
@@ -160,6 +176,7 @@ class ArtifactRepository:
                 "fusion": cfg.fusion.kind,
                 "calibrator": cfg.calibration.kind,
             },
+            "feature_providers": provider_manifest,
             "classes": [
                 {"key": k, "description": d}
                 for k, d in zip(artifacts.label_space.keys, artifacts.label_space.descriptions)
@@ -172,6 +189,152 @@ class ArtifactRepository:
         with open(os.path.join(directory, "meta.json"), "w") as fh:
             json.dump(meta, fh, indent=2)
 
+    def update_decision_layer(
+        self,
+        directory: str,
+        calibrator: ConfidenceCalibrator,
+        abstention: AbstentionPolicy,
+        target_precision: float,
+        n_items: int,
+    ) -> None:
+        """Persist a re-tuned calibrator + abstention policy into an existing
+        model directory (T66), touching only the decision layer.
+
+        Unlike ``save`` (a full rewrite), this writes just the calibrator file
+        (via its recorded registry kind — retuning never changes the calibrator
+        *kind*, only refits it) and updates ``meta.json``'s ``abstention`` block
+        and ``config.training.target_precision``, appending a ``retunes``
+        provenance entry. The encoder, dense/lexical indices, fusion model, and
+        feature-provider files are left byte-identical.
+        """
+        meta_path = os.path.join(directory, "meta.json")
+        with open(meta_path) as fh:
+            meta = json.load(fh)
+
+        cal_kind = self._components_from_meta(meta)["calibrator"]
+        cal_spec = calibrator_spec(cal_kind)
+        calibrator.save(os.path.join(directory, cal_spec.filename))
+
+        meta.setdefault("config", {}).setdefault("training", {})["target_precision"] = (
+            target_precision
+        )
+        meta["abstention"] = {
+            "global_threshold": abstention.global_threshold,
+            "per_class": {str(k): v for k, v in abstention.per_class.items()},
+        }
+        retunes = meta.setdefault("retunes", [])
+        retunes.append(
+            {
+                "retuned_at": datetime.datetime.now(datetime.timezone.utc).isoformat(
+                    timespec="seconds"
+                ),
+                "n_items": int(n_items),
+                "target_precision": target_precision,
+                "package_version": __version__,
+            }
+        )
+
+        with open(meta_path, "w") as fh:
+            json.dump(meta, fh, indent=2)
+
+    @staticmethod
+    def save_corpus(directory: str, items: Sequence[LabeledItem]) -> None:
+        """Persist the raw training corpus as gzip-compressed JSONL (one
+        ``{"text": ..., "label": ...}`` object per line) so a later
+        ``update`` (T68) can add labeled examples without needing
+        ``--base-items``: appending examples to BM25 requires refitting on the
+        *full* corpus (its IDF is corpus-global), and the model dir otherwise
+        keeps no raw text at all (``dense.npz`` is embeddings, ``lexical.pkl``
+        a fitted vectorizer). Opt out via ``TrainingConfig.store_corpus=False``."""
+        path = os.path.join(directory, "corpus.jsonl.gz")
+        with gzip.open(path, "wt", encoding="utf-8") as fh:
+            for it in items:
+                fh.write(json.dumps({"text": it.text, "label": it.label}) + "\n")
+
+    @staticmethod
+    def load_corpus(directory: str) -> Optional[List[LabeledItem]]:
+        """Load the persisted training corpus, or ``None`` if this model dir
+        predates ``--store-corpus`` or opted out of it (``update`` then needs
+        ``--base-items`` to supply the original items instead)."""
+        path = os.path.join(directory, "corpus.jsonl.gz")
+        if not os.path.isfile(path):
+            return None
+        items: List[LabeledItem] = []
+        with gzip.open(path, "rt", encoding="utf-8") as fh:
+            for line in fh:
+                row = json.loads(line)
+                items.append(LabeledItem(row["text"], row["label"]))
+        return items
+
+    @staticmethod
+    def read_meta(directory: str) -> Dict:
+        """Read a model dir's raw ``meta.json`` dict — used by ``update`` (T68)
+        to carry forward provenance (``updates``/``retunes``) that a fresh
+        ``save()`` would otherwise drop, read *before* that rewrite happens
+        (which matters for ``--in-place``, where source and target are the
+        same directory)."""
+        with open(os.path.join(directory, "meta.json")) as fh:
+            return json.load(fh)
+
+    @staticmethod
+    def apply_update_provenance(target_dir: str, prior_meta: Dict, entry: Dict) -> None:
+        """After ``save()`` rewrites ``target_dir``'s ``meta.json`` from
+        scratch (part of ``update``, T68), carry forward ``prior_meta``'s
+        ``updates``/``retunes`` provenance history — dropped by the fresh
+        rewrite, since ``save()`` builds ``meta.json`` from nothing — and
+        append ``entry`` to ``updates``. Call with ``prior_meta`` read via
+        ``read_meta`` *before* ``save()`` runs."""
+        target_meta_path = os.path.join(target_dir, "meta.json")
+        with open(target_meta_path) as fh:
+            meta = json.load(fh)
+        meta["updates"] = list(prior_meta.get("updates", [])) + [entry]
+        if prior_meta.get("retunes"):
+            meta["retunes"] = list(prior_meta["retunes"]) + list(meta.get("retunes", []))
+        with open(target_meta_path, "w") as fh:
+            json.dump(meta, fh, indent=2)
+
+    @staticmethod
+    def _save_providers(
+        directory: str, cfg: PipelineConfig, providers: Sequence[FeatureProvider]
+    ) -> List[Dict]:
+        """Persist each feature provider to ``features/NN_<kind>/`` and return the
+        manifest (kind + relative path + declared names, in order). Empty in, empty
+        out — a model with no providers writes no ``features/`` directory, so its
+        on-disk layout is byte-for-byte the pre-T70 one."""
+        if not providers:
+            return []
+        provider_cfgs = cfg.features.providers
+        if len(provider_cfgs) != len(providers):
+            raise ValueError(
+                f"feature-provider mismatch: config lists {len(provider_cfgs)} provider(s) "
+                f"but {len(providers)} were fitted; they must correspond one-to-one"
+            )
+        os.makedirs(os.path.join(directory, "features"), exist_ok=True)
+        manifest: List[Dict] = []
+        for i, (pc, provider) in enumerate(zip(provider_cfgs, providers)):
+            rel = os.path.join("features", f"{i:02d}_{pc.kind}")
+            provider.save(os.path.join(directory, rel))
+            manifest.append({"kind": pc.kind, "path": rel, "names": provider.names()})
+        return manifest
+
+    @staticmethod
+    def _load_providers(
+        directory: str, meta: Dict, config: PipelineConfig
+    ) -> List[FeatureProvider]:
+        """Rebuild the feature providers from the manifest, in order, dispatching
+        each through the registry by its recorded kind. Returns ``[]`` for a model
+        dir with no ``feature_providers`` block (every pre-T70 model)."""
+        manifest = meta.get("feature_providers") or []
+        provider_cfgs = config.features.providers
+        providers: List[FeatureProvider] = []
+        for i, entry in enumerate(manifest):
+            spec = feature_provider_spec(entry["kind"])
+            # Pass the matching config entry when present so a provider's load can
+            # honour its params; fall back to a bare config for the entry's kind.
+            pc = provider_cfgs[i] if i < len(provider_cfgs) else FeatureProviderConfig(entry["kind"])
+            providers.append(spec.load(os.path.join(directory, entry["path"]), pc))
+        return providers
+
     def load(self, directory: str) -> DeployedArtifacts:
         if not os.path.isdir(directory):
             raise FileNotFoundError(f"model directory not found: {directory!r}")
@@ -183,10 +346,16 @@ class ArtifactRepository:
         with open(meta_path) as fh:
             meta = json.load(fh)
 
-        self._check_feature_schema(meta.get("feature_names"))
         self._check_package_version(meta.get("package_version"))
 
         config = PipelineConfig.from_dict(meta["config"])
+        # Rebuild feature providers before the schema check: the effective schema
+        # is core + provider columns, so the providers must exist to compute it.
+        feature_providers = self._load_providers(directory, meta, config)
+        self._check_feature_schema(
+            meta.get("feature_names"), composed_feature_names(feature_providers)
+        )
+
         label_space = LabelSpace(
             [ClassDefinition(c["key"], c["description"]) for c in meta["classes"]]
         )
@@ -222,7 +391,15 @@ class ArtifactRepository:
             per_class={int(k): float(v) for k, v in meta["abstention"]["per_class"].items()},
         )
         return DeployedArtifacts(
-            config, label_space, encoder, dense, lexical, fusion, calibrator, abstention
+            config,
+            label_space,
+            encoder,
+            dense,
+            lexical,
+            fusion,
+            calibrator,
+            abstention,
+            feature_providers=feature_providers,
         )
 
     @staticmethod
@@ -266,25 +443,28 @@ class ArtifactRepository:
             )
 
     @staticmethod
-    def _check_feature_schema(saved_names) -> None:
+    def _check_feature_schema(saved_names, expected_names) -> None:
         """Guard against schema drift between a persisted model and the running code.
 
-        ``FEATURE_NAMES`` is the single source of truth for column order; a model
+        The *effective* schema — the core columns plus every active provider's
+        columns, in order — is the single source of truth for column order; a model
         trained against a different version of it would feed XGBoost mislabelled
-        columns and produce silently wrong scores. Detecting the mismatch at load
-        time turns that into a clear, actionable error.
+        columns and produce silently wrong scores. ``expected_names`` is that schema
+        recomputed from the code + the model's rebuilt providers; ``saved_names`` is
+        what was persisted. Detecting the mismatch at load time turns a silent
+        wrong-answer bug into a clear, actionable error.
         """
-        if saved_names == FEATURE_NAMES:
+        if saved_names == expected_names:
             return
         saved = list(saved_names or [])
-        missing = [n for n in FEATURE_NAMES if n not in saved]
-        extra = [n for n in saved if n not in FEATURE_NAMES]
+        missing = [n for n in expected_names if n not in saved]
+        extra = [n for n in saved if n not in expected_names]
         if not missing and not extra:
             detail = "feature names match but column order differs"
         else:
             detail = f"missing from model: {missing or 'none'}; unknown to code: {extra or 'none'}"
         raise ValueError(
             "feature schema drift between the saved model and the current code "
-            f"(meta.json has {len(saved)} feature(s), code expects {len(FEATURE_NAMES)}): "
+            f"(meta.json has {len(saved)} feature(s), code expects {len(expected_names)}): "
             f"{detail}. Retrain the model against this version of the package."
         )

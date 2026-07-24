@@ -9,6 +9,87 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 ## [Unreleased]
 
 ### Added
+- **Add classes/examples to a deployed model without retraining (T68)** — a
+  `text-classifier-update` console script (+ `application/updating.py::update`)
+  that rebuilds only the cheap, class-indexed retrieval state (dense
+  prototypes/description embeddings, BM25) while reusing the trained fusion
+  model and calibrator verbatim — the fusion model is class-agnostic by
+  construction (every feature is a per-candidate retrieval signal, not a
+  per-class weight). `--classes` is the full taxonomy (new keys appended,
+  edited descriptions re-embedded; a file missing an existing key is rejected
+  — update never removes or reorders a class). `--items` adds labeled
+  examples for a new or existing class: only the new texts are re-encoded
+  (old example embeddings are reused as-is), while the BM25 example index is
+  refit over the merged corpus (its IDF is corpus-global, so it can't be
+  updated incrementally) — this needs the original training corpus, which
+  `text-classifier-train` now persists as `corpus.jsonl.gz` by default
+  (`--no-store-corpus` to opt out; `--base-items` supplies it for a dir that
+  predates the flag). Without `--tune-with`, thresholds are left as-is and the
+  persisted `evaluation.json`/`model_card.md` are carried forward marked
+  stale; with it, `retune` (T66) runs in the same step and reports candidate
+  recall for the newly added classes. `meta.json` gains an `updates`
+  provenance list; `--in-place` overwrites `--model` instead of writing a new
+  directory.
+- **Re-tune the operating point without retraining (T66)** — a
+  `text-classifier-tune` console script (+ `application/tuning.py::retune`) that
+  refits the calibrator and re-tunes the global + per-class abstention
+  thresholds against a fresh labeled set and a chosen `--target-precision`,
+  reusing the model's existing encoder, retrieval indices, and fusion model
+  verbatim. Updates `calibrator.pkl` and `meta.json`'s abstention block in
+  place (recording a `retunes` provenance entry) and writes a fresh
+  `evaluation.json`/`model_card.md`; `--dry-run` previews the new coverage/
+  accuracy/thresholds and writes nothing. The threshold-tuning logic is shared
+  with `TrainingPipeline` via a new `fit_calibration_and_abstention` helper, not
+  duplicated. The tune set must be disjoint from the training data — an
+  overlapping item retrieves itself as a perfect match and inflates its own
+  confidence — so the CLI warns (a best-effort embedding-similarity proxy; see
+  README) when a tune-set item looks like a near-duplicate of an indexed
+  training example.
+- **Prediction explanations for reviewers (T69)** — answer "why did it call this
+  that, and how close was it to the threshold" from one record, built from a
+  single feature pass (the plain `predict` path is untouched):
+  - `InferencePipeline.explain_records(texts, top_k=3, include_contributions=False)`
+    returns a JSON-clean payload per item: the decision plus the abstention
+    `threshold_applied`/`threshold_scope`, each top candidate's per-signal
+    `features` (`NaN` → `null`), which signals ranked it first (`signals_top1`),
+    the matched class `description`, and the nearest dense/lexical example
+    neighbors (`{label_key, score}`; neighbor *texts* await a persisted corpus, so
+    `texts_available` is `False`).
+  - **Optional per-feature SHAP contributions** via a new additive
+    `FusionModel.predict_contribs(X) -> Optional[np.ndarray]` port method
+    (default `None`; implemented for the XGBoost and LightGBM backends, `None` for
+    the XGBRanker whose isotonic head breaks additivity). Each row sums to the raw
+    margin; surfaced per candidate as `contributions` with
+    `contributions_space: "raw_margin"`.
+  - Infer CLI: `--explain-json PATH` writes the payloads as JSONL; add
+    `--explain-contribs` to include the SHAP contributions.
+- **Per-signal insight for data scientists** — see the individual retrieval
+  signals' scores *before* the fusion model, and how each technique performs
+  alone on your data:
+  - `InferencePipeline.explain(texts, top_k=None)` returns the full
+    per-(item, candidate) table `predict` computes and then discards: one row per
+    candidate class with every raw signal feature plus the calibrated `conf`,
+    ranked per item. `NaN` stays "this signal did not retrieve this class"
+    (distinct from a true 0), exactly as the fusion model sees it. The infer CLI
+    exposes it as `--explain PATH` (a CSV sidecar, bounded by `--top-k`).
+  - A **per-signal diagnostics report** (`application/signal_report.py`) computed
+    over the leakage-free out-of-fold rows: each signal's standalone top-1
+    accuracy, how often it fires, its precision when it fires, and how much the
+    signals agree. It is persisted into `evaluation.json` (key `signal_report`)
+    and summarized in `model_card.md` at train time, and printed / persisted by
+    the `eval` CLI for a labeled set — the evidence for which techniques carry a
+    given dataset. No model internals, no change to any existing output.
+- **Pluggable custom fusion features** via a `FeatureProvider` port
+  (`config.features.providers`): contribute columns beyond the built-in ~28 (text
+  length, a domain lexicon hit, an external score) that reach the fusion model at
+  **train and inference in the identical order**. The effective schema is composed
+  at runtime (core columns + each provider's, in order) and persisted into
+  `meta.json`, so a loaded model rebuilds the exact column order. Providers with
+  training-derived state are fit **per fold on out-of-fold rows** (leakage-free,
+  like prototypes/indices) and persist portable artifacts that run air-gapped with
+  no labels; "did not fire" is emitted as `NaN` (XGBoost missing), never a true 0.
+  Ships one sample provider, `class-keyword` (per-class learned keyword overlap).
+  With no providers configured the schema and outputs are byte-for-byte unchanged.
 - Widen a trained model's label space **without retraining**
   (`DeployedArtifacts.with_added_classes` / `InferencePipeline.with_added_classes`):
   add classes that appear after a model ships, or evaluate against a label space

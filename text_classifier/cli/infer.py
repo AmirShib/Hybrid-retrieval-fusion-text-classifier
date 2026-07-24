@@ -13,11 +13,24 @@ Rows where the system abstained have an empty predicted_key (route to a human).
 With ``--top-k N`` (N > 1), additional wide columns ``top2_key``, ``top2_conf``,
 … ``topN_key``, ``topN_conf`` surface the next-best suggestions for a human
 reviewer; ``predicted_key``/``abstained`` stay a top-1 decision.
+
+With ``--explain PATH`` the full per-(item, candidate) signal table is written to
+PATH as CSV: one row per candidate class with every retrieval signal's raw score
+behind the prediction (NaN = "that signal did not retrieve this class"), for data
+scientists who want to inspect the signals before fusion. ``--top-k N`` bounds it
+to each item's N most-confident candidates.
+
+With ``--explain-json PATH`` a richer per-item explanation is written as JSONL (one
+object per input): the decision and the abstention threshold that applied, each top
+candidate's per-signal features and matched class description, and the nearest
+dense/lexical neighbors. Add ``--explain-contribs`` to include per-feature SHAP
+contributions (raw-margin space) for reviewers debugging a specific call.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 
 import pandas as pd
 
@@ -40,11 +53,35 @@ def main() -> None:
         help="emit the top-k candidate suggestions per item (default: 1, "
         "today's output); adds top2_key/top2_conf..topN_key/topN_conf columns",
     )
+    p.add_argument(
+        "--explain",
+        metavar="PATH",
+        default=None,
+        help="also write the full per-(item, candidate) signal table to PATH as "
+        "CSV: every retrieval signal's raw score behind each prediction. Bounded "
+        "to each item's --top-k best candidates when --top-k > 1.",
+    )
+    p.add_argument(
+        "--explain-json",
+        metavar="PATH",
+        default=None,
+        help="write rich per-item explanations to PATH as JSONL (one object per "
+        "input): the decision + applied threshold, each top candidate's per-signal "
+        "features and matched description, and the nearest dense/lexical neighbors.",
+    )
+    p.add_argument(
+        "--explain-contribs",
+        action="store_true",
+        help="include per-feature SHAP contributions (raw-margin space) in "
+        "--explain-json; needs a fusion backend that supports it (XGBoost/LightGBM).",
+    )
     add_logging_arg(p)
     args = p.parse_args()
     configure_logging(args.log_level)
     if args.top_k < 1:
         p.error(f"--top-k must be >= 1; got {args.top_k}")
+    if args.explain_contribs and not args.explain_json:
+        p.error("--explain-contribs only applies with --explain-json")
 
     _, texts = read_texts(args.input, args.text_col)
 
@@ -76,6 +113,22 @@ def main() -> None:
         f"wrote {len(out)} predictions to {args.output} "
         f"({accepted} accepted, {len(out) - accepted} abstained)"
     )
+
+    if args.explain:
+        detail = pipeline.explain(texts, top_k=args.top_k if args.top_k > 1 else None)
+        detail.to_csv(args.explain, index=False)
+        print(f"wrote {len(detail)} per-signal rows to {args.explain}")
+
+    if args.explain_json:
+        records = pipeline.explain_records(
+            texts,
+            top_k=args.top_k if args.top_k > 1 else 3,
+            include_contributions=args.explain_contribs,
+        )
+        with open(args.explain_json, "w") as fh:
+            for rec in records:
+                fh.write(json.dumps(rec) + "\n")
+        print(f"wrote {len(records)} explanation records to {args.explain_json}")
 
 
 if __name__ == "__main__":

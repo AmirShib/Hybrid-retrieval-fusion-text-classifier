@@ -19,9 +19,16 @@ from ..domain import (
     CandidatePolicy,
     DenseRetriever,
     FEATURE_NAMES,
+    FeatureContext,
+    FeatureProvider,
     LabelSpace,
     LexicalRetriever,
+    composed_feature_names,
 )
+
+# Re-exported for callers that reach for it via the assembly module; the
+# canonical definition lives in the domain schema (``domain/services.py``).
+__all__ = ["FeatureAssembler", "composed_feature_names"]
 
 
 def _scatter_knn(labels: np.ndarray, scores: np.ndarray, n_classes: int):
@@ -108,9 +115,24 @@ class FeatureAssembler:
         query_ids: Sequence[Any],
         query_labels: Optional[np.ndarray] = None,
         chunk: int = 4096,
+        providers: Sequence[FeatureProvider] = (),
+        self_ids: Optional[np.ndarray] = None,
     ) -> pd.DataFrame:
+        """Assemble the (item, candidate) feature table.
+
+        ``providers`` (T70) contribute extra columns appended after the core ~28,
+        in provider order; with none the output is byte-for-byte the pre-T70
+        schema. Each provider must already be fitted (the caller fits per fold to
+        stay leakage-free).
+
+        ``self_ids`` (leave-one-out mode, ``n_folds=1``) is the example-pool index
+        of each query when the queries *are* the pool being retrieved against: the
+        dense/BM25 kNN drop that self-neighbor and the dense prototype leaves the
+        query's own vector out of its own class. ``None`` (the default) is ordinary
+        featurization — every existing caller — and is byte-for-byte unchanged."""
         frames = []
         ids = np.asarray(query_ids)
+        sids = None if self_ids is None else np.asarray(self_ids)
         for s in range(0, len(query_texts), chunk):
             sl = slice(s, s + chunk)
             frames.append(
@@ -122,26 +144,40 @@ class FeatureAssembler:
                     k_neighbors,
                     ids[sl],
                     None if query_labels is None else np.asarray(query_labels)[sl],
+                    providers,
+                    None if sids is None else sids[sl],
                 )
             )
-        return (
-            pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=FEATURE_NAMES)
-        )
+        if frames:
+            return pd.concat(frames, ignore_index=True)
+        return pd.DataFrame(columns=composed_feature_names(providers))
 
-    def _assemble_chunk(self, texts, q_emb, dense, lexical, k, ids, labels) -> pd.DataFrame:
+    def _assemble_chunk(
+        self, texts, q_emb, dense, lexical, k, ids, labels, providers=(), self_ids=None
+    ) -> pd.DataFrame:
         C = self._space.size
         n = self._policy.top_n_per_signal
         class_freq = dense.class_freq
 
         # ---- signals as (b, C) matrices ----
+        # In leave-one-out mode (self_ids given) each query is itself in the pool,
+        # so its own kNN self-match and its own contribution to its class prototype
+        # are masked out — the same leakage-free discipline as an out-of-fold index.
         desc_d = np.asarray(dense.description_similarity(q_emb), dtype=np.float64)
-        proto = np.asarray(dense.prototype_similarity(q_emb), dtype=np.float64)
-        dn_lab, dn_sim = dense.knn_example_labels(q_emb, k)
+        if self_ids is None:
+            # Ordinary path — call the two-argument kNN form so retriever doubles
+            # that predate the leave-one-out param keep working unchanged.
+            proto = np.asarray(dense.prototype_similarity(q_emb), dtype=np.float64)
+            dn_lab, dn_sim = dense.knn_example_labels(q_emb, k)
+            bn_lab, bn_sco = lexical.knn_example_labels(texts, k)
+        else:
+            proto = np.asarray(dense.loo_prototype_similarity(q_emb, self_ids), dtype=np.float64)
+            dn_lab, dn_sim = dense.knn_example_labels(q_emb, k, self_ids)
+            bn_lab, bn_sco = lexical.knn_example_labels(texts, k, self_ids)
         d_sum, d_max, d_cnt = _scatter_knn(dn_lab, dn_sim, C)
 
         bdesc_raw = np.asarray(lexical.description_score(texts), dtype=np.float64)
         bdesc = np.where(bdesc_raw > 0, bdesc_raw, np.nan)  # 0 overlap == missing
-        bn_lab, bn_sco = lexical.knn_example_labels(texts, k)
         b_sum, b_max, b_cnt = _scatter_knn(bn_lab, bn_sco, C)
 
         # ---- candidate set = union of each signal's top-n ----
@@ -154,7 +190,10 @@ class FeatureAssembler:
         )
         rows, cols = np.nonzero(mask)
         if rows.size == 0:
-            return pd.DataFrame(columns=FEATURE_NAMES + (["is_true"] if labels is not None else []))
+            empty_cols = composed_feature_names(providers) + (
+                ["is_true"] if labels is not None else []
+            )
+            return pd.DataFrame(columns=empty_cols)
 
         # ---- per-query scalars ----
         a_desc = np.argmax(np.where(np.isnan(desc_d), -np.inf, desc_d), axis=1)
@@ -217,8 +256,47 @@ class FeatureAssembler:
             "n_signal_agreement": n_agree[rows],
         }
         df = pd.DataFrame({col: np.asarray(data[col], dtype=np.float32) for col in FEATURE_NAMES})
+        # Custom providers (T70) append their columns after the core ~28. Each
+        # gathers over the same (rows, cols) grid; a provider that "did not fire"
+        # for a candidate emits NaN, which XGBoost consumes as missing.
+        for col, values in self._provider_columns(providers, texts, q_emb, rows, cols).items():
+            df[col] = values
         df["item_id"] = ids[rows]
         df["candidate"] = cols.astype(np.int64)
         if labels is not None:
             df["is_true"] = (cols == labels[rows]).astype(np.int64)
         return df
+
+    def _provider_columns(self, providers, texts, q_emb, rows, cols) -> dict:
+        """Run each provider over the candidate grid and collect its columns as
+        float32 arrays, validating the contract (declared names, one value per
+        candidate row). Returns an insertion-ordered ``{name: (n_candidates,)}``."""
+        if not providers:
+            return {}
+        ctx = FeatureContext(
+            query_texts=texts,
+            query_emb=q_emb,
+            rows=rows,
+            cols=cols,
+            label_space=self._space,
+        )
+        n = rows.shape[0]
+        out: dict = {}
+        for provider in providers:
+            declared = provider.names()
+            produced = provider.compute(ctx)
+            missing = [nm for nm in declared if nm not in produced]
+            if missing:
+                raise ValueError(
+                    f"{type(provider).__name__}.compute did not return column(s) {missing} "
+                    f"that {type(provider).__name__}.names() declares"
+                )
+            for name in declared:
+                arr = np.asarray(produced[name])
+                if arr.shape != (n,):
+                    raise ValueError(
+                        f"{type(provider).__name__} column {name!r} has shape {arr.shape}; "
+                        f"expected one value per candidate row, i.e. ({n},)"
+                    )
+                out[name] = arr.astype(np.float32)
+        return out

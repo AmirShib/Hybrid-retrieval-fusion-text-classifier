@@ -22,10 +22,23 @@ anything about it.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Dict, Mapping, Optional, Sequence, TypeVar
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, TypeVar
 
-from ..config import CalibrationConfig, EncoderConfig, FusionConfig
-from ..domain import ConfidenceCalibrator, FusionModel, LabeledItem, LabelSpace, TextEncoder
+from ..config import (
+    CalibrationConfig,
+    EncoderConfig,
+    FeatureProviderConfig,
+    FeaturesConfig,
+    FusionConfig,
+)
+from ..domain import (
+    ConfidenceCalibrator,
+    FeatureProvider,
+    FusionModel,
+    LabeledItem,
+    LabelSpace,
+    TextEncoder,
+)
 from .encoder import (
     HashingEncoder,
     SentenceTransformerEncoder,
@@ -33,6 +46,7 @@ from .encoder import (
     fit_tfidf_encoder,
     train_encoder,
 )
+from .feature_providers import ClassKeywordOverlapProvider
 from .fusion import (
     BetaCalibrator,
     IsotonicCalibrator,
@@ -78,10 +92,22 @@ class CalibratorSpec:
     load: Callable[[str], ConfidenceCalibrator]
 
 
+@dataclass(frozen=True)
+class FeatureProviderSpec:
+    """How to build/persist a ``FeatureProvider`` (T70). Providers persist to a
+    *directory* (like encoders) so a backend can write several files; ``load``
+    receives the provider's ``FeatureProviderConfig`` for symmetry with the other
+    specs, even though the sample provider reconstructs entirely from disk."""
+
+    build: Callable[[FeatureProviderConfig], FeatureProvider]
+    load: Callable[[str, FeatureProviderConfig], FeatureProvider]
+
+
 # --------------------------------------------------------------------------- maps
 _ENCODERS: Dict[str, EncoderSpec] = {}
 _FUSIONS: Dict[str, FusionSpec] = {}
 _CALIBRATORS: Dict[str, CalibratorSpec] = {}
+_FEATURE_PROVIDERS: Dict[str, FeatureProviderSpec] = {}
 
 _T = TypeVar("_T")
 
@@ -96,6 +122,10 @@ def register_fusion(name: str, spec: FusionSpec) -> None:
 
 def register_calibrator(name: str, spec: CalibratorSpec) -> None:
     _CALIBRATORS[name] = spec
+
+
+def register_feature_provider(name: str, spec: FeatureProviderSpec) -> None:
+    _FEATURE_PROVIDERS[name] = spec
 
 
 def _lookup(registry: Mapping[str, _T], name: str, what: str) -> _T:
@@ -118,6 +148,10 @@ def fusion_spec(kind: str) -> FusionSpec:
 
 def calibrator_spec(kind: str) -> CalibratorSpec:
     return _lookup(_CALIBRATORS, kind, "calibrator")
+
+
+def feature_provider_spec(kind: str) -> FeatureProviderSpec:
+    return _lookup(_FEATURE_PROVIDERS, kind, "feature provider")
 
 
 # ------------------------------------------------------------------- factories
@@ -146,6 +180,15 @@ def build_fusion(config: FusionConfig) -> FusionModel:
 
 def build_calibrator(config: CalibrationConfig) -> ConfidenceCalibrator:
     return calibrator_spec(config.kind).build(config)
+
+
+def build_feature_providers(config: FeaturesConfig) -> List[FeatureProvider]:
+    """Build the (unfitted) custom feature providers named in ``config``, in order.
+
+    Returns ``[]`` when none are configured — the byte-for-byte-identical default.
+    The caller fits each provider (per fold for the OOF loop; on all data for the
+    deployment index)."""
+    return [feature_provider_spec(pc.kind).build(pc) for pc in config.providers]
 
 
 # ----------------------------------------------------------------- built-ins
@@ -239,5 +282,17 @@ register_calibrator(
         build=lambda cfg: BetaCalibrator(),
         filename="calibrator.pkl",
         load=BetaCalibrator.load,
+    ),
+)
+
+register_feature_provider(
+    "class-keyword",
+    FeatureProviderSpec(
+        # The sample T70 provider. `params` pass straight to the provider (and on
+        # to sklearn's CountVectorizer): e.g. {"ngram_range": [1, 2]} or a custom
+        # {"column": "..."}. Fit per fold by the pipeline (its lexicon is
+        # train-set-derived), so leakage-free like any corpus-dependent state.
+        build=lambda pc: ClassKeywordOverlapProvider(**pc.params),
+        load=lambda path, pc: ClassKeywordOverlapProvider.load(path),
     ),
 )

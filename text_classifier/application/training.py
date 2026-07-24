@@ -19,22 +19,25 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import StratifiedKFold
 
-from ..config import PipelineConfig
+from ..config import CalibrationConfig, PipelineConfig
 from ..domain import (
     AbstentionPolicy,
     CandidatePolicy,
+    ConfidenceCalibrator,
     CoverageReport,
-    FEATURE_NAMES,
+    FeatureProvider,
+    FusionModel,
     LabeledItem,
     LabelSpace,
     TextEncoder,
     ThresholdTuner,
+    composed_feature_names,
 )
 from ..infrastructure import (
     ArtifactRepository,
@@ -43,6 +46,7 @@ from ..infrastructure import (
     LexicalRetrieverAdapter,
     build_calibrator,
     build_encoder,
+    build_feature_providers,
     build_fusion,
     encoder_is_corpus_dependent,
     fit_encoder,
@@ -50,8 +54,47 @@ from ..infrastructure import (
 from .evaluation import build_manifest, evaluate_decisions, write_evaluation_artifacts
 from .features import FeatureAssembler
 from .scoring import add_confidence, top_per_item
+from .signal_report import signal_report
 
 log = logging.getLogger(__name__)
+
+
+def fit_calibration_and_abstention(
+    ca: pd.DataFrame,
+    fusion: FusionModel,
+    calibration_cfg: CalibrationConfig,
+    feature_names: Sequence[str],
+    target_precision: float,
+    per_class_min_support: int,
+) -> Tuple[ConfidenceCalibrator, AbstentionPolicy]:
+    """Fit a calibrator on ``fusion``'s raw scores for the calibration rows ``ca``,
+    then tune the global + per-class abstention thresholds for ``target_precision``.
+
+    ``ca`` must carry the raw feature columns (``feature_names``) plus ``is_true``
+    (whether that candidate is the item's true class) and ``candidate`` (its class
+    index) — the same shape as an out-of-fold or featurized-external frame.
+
+    This is the decision-layer half of ``TrainingPipeline._fit_fusion`` (the fusion
+    model itself is fit separately, before this is called), extracted so the
+    re-tune use case (T66) can reuse the identical threshold logic against a fresh
+    labeled set without duplicating it.
+    """
+    names = list(feature_names)
+    raw = fusion.predict_proba(ca[names].to_numpy(np.float32))
+    calibrator = build_calibrator(calibration_cfg)
+    calibrator.fit(raw, ca["is_true"].to_numpy())
+
+    decided = top_per_item(add_confidence(ca, fusion, calibrator, names))
+    global_thr = ThresholdTuner.threshold_for_precision(
+        decided["conf"].to_numpy(), decided["is_true"].to_numpy(), target_precision
+    )
+    per_class: Dict[int, float] = {}
+    for cls, grp in decided.groupby("candidate"):
+        if len(grp) >= per_class_min_support:
+            per_class[int(cls)] = ThresholdTuner.threshold_for_precision(
+                grp["conf"].to_numpy(), grp["is_true"].to_numpy(), target_precision
+            )
+    return calibrator, AbstentionPolicy(global_thr, per_class)
 
 
 class TrainingPipeline:
@@ -60,6 +103,11 @@ class TrainingPipeline:
         self.assembler: Optional[FeatureAssembler] = None
         # Optional injected encoder for the shared-encoder path (DI / offline tests).
         self._shared_override = shared_encoder
+        # Custom feature providers (T70) fitted on all training data, and the
+        # composed feature schema (core + provider columns). Populated when the
+        # deployment index is built; the fusion/eval steps select X by this list.
+        self._providers: List[FeatureProvider] = []
+        self._feature_names: List[str] = composed_feature_names()
 
     def _use_per_fold_encoder(self) -> bool:
         """Refit the encoder per fold when explicitly requested, or whenever the
@@ -123,12 +171,18 @@ class TrainingPipeline:
         roles = self.cfg.training.fold_roles(
             external_val=val_items is not None, external_test=test_items is not None
         )
-        oof = self._build_oof(texts, y, label_space)
 
         # Build the deployment index (encoder + dense/lexical over *all* training
         # items) once, up front: external val/test items are featurized against
         # it, and the finished DeployedArtifacts reuse the very same objects.
-        encoder, dense, lexical = self._build_deployment_index(texts, y, label_space)
+        if self.cfg.training.n_folds == 1:
+            # Leave-one-out: build the deployment index first, then featurize every
+            # training item against it with itself masked out — no k-fold loop.
+            encoder, dense, lexical = self._build_deployment_index(texts, y, label_space)
+            oof = self._build_loo(texts, y, label_space, encoder, dense, lexical)
+        else:
+            oof = self._build_oof(texts, y, label_space)
+            encoder, dense, lexical = self._build_deployment_index(texts, y, label_space)
         val_feats = None
         if val_items is not None:
             val_feats, _ = self._featurize_external(val_items, label_space, encoder, dense, lexical)
@@ -145,10 +199,26 @@ class TrainingPipeline:
         )
 
         artifacts = DeployedArtifacts(
-            self.cfg, label_space, encoder, dense, lexical, fusion, calibrator, abstention
+            self.cfg,
+            label_space,
+            encoder,
+            dense,
+            lexical,
+            fusion,
+            calibrator,
+            abstention,
+            feature_providers=self._providers,
         )
         if output_dir:
-            ArtifactRepository().save(artifacts, output_dir)
+            repo = ArtifactRepository()
+            repo.save(artifacts, output_dir)
+            if self.cfg.training.store_corpus:
+                repo.save_corpus(output_dir, items)
+            # Per-signal diagnostics from the leakage-free out-of-fold rows: how each
+            # retrieval technique performs *alone*, before fusion combines them. This
+            # is the "which signals carry my data" evidence a data scientist reads
+            # alongside the headline metrics.
+            evaluation = {**evaluation, "signal_report": signal_report(oof)}
             # Persist the held-out evaluation + a provenance manifest next to the
             # model so a trained directory carries its own evidence: how it scored,
             # on what, and with which version/config. This is what makes a deployed
@@ -310,6 +380,20 @@ class TrainingPipeline:
         fold_items = [LabeledItem(texts[i], label_space.key_at(int(y[i]))) for i in items_idx]
         return fit_encoder(self.cfg.encoder, fold_items, label_space)
 
+    def _fit_providers(self, items_idx: np.ndarray, texts, y, label_space) -> List[FeatureProvider]:
+        """Build and fit the custom feature providers (T70) on the rows in
+        ``items_idx`` only. Called per fold on that fold's *training* rows, so a
+        provider's training-derived state (e.g. a class lexicon) never includes the
+        held-out items it will score — the same out-of-fold discipline as
+        prototypes and indices. Returns ``[]`` when none are configured."""
+        providers = build_feature_providers(self.cfg.features)
+        if not providers:
+            return providers
+        fold_items = [LabeledItem(texts[i], label_space.key_at(int(y[i]))) for i in items_idx]
+        for provider in providers:
+            provider.fit(fold_items, label_space)
+        return providers
+
     def _build_oof(self, texts: List[str], y: np.ndarray, label_space: LabelSpace) -> pd.DataFrame:
         assert self.assembler is not None  # set in run() before this is called
         shared = None
@@ -328,6 +412,8 @@ class TrainingPipeline:
             lexical = LexicalRetrieverAdapter.build(
                 tr_texts, y[tr], label_space, self.cfg.retrieval
             )
+            # Providers are fit on this fold's training rows only (leakage-free).
+            providers = self._fit_providers(tr, texts, y, label_space)
 
             va_texts = [texts[i] for i in va]
             q_emb = enc.encode_queries(va_texts)
@@ -340,6 +426,7 @@ class TrainingPipeline:
                 query_ids=va,
                 query_labels=y[va],
                 chunk=self.cfg.retrieval.feature_chunk,
+                providers=providers,
             )
             feats["fold"] = fold
             frames.append(feats)
@@ -353,6 +440,49 @@ class TrainingPipeline:
         oof = pd.concat(frames, ignore_index=True)
         oof.attrs["candidate_recall"] = recall
         return oof
+
+    def _build_loo(self, texts, y, label_space, encoder, dense, lexical) -> pd.DataFrame:
+        """Leave-one-out featurization of the training items (``n_folds == 1``).
+
+        Every training item is scored against the *deployment* index — the same
+        dense/BM25 indices and prototypes that ship in the model, built over all
+        training items — with that item masked out of its own neighbors and its own
+        class prototype (see ``FeatureAssembler.assemble``'s ``self_ids``). This
+        gives each item the maximum-size, deployment-matching index while keeping
+        the out-of-fold leakage rule (an item never sees itself in its own index),
+        and reuses the single deployment index instead of rebuilding one per fold.
+
+        Valid only with both external splits (enforced in ``PipelineConfig.validate``
+        and reachable only via ``fold_roles(n_folds=1)``), so every row here trains
+        the fusion model; the frame carries a single synthetic ``fold = 0`` and no
+        custom providers (rejected upstream — there is no per-item fit hook). It is
+        the drop-in replacement for ``_build_oof``'s output on the LOO path.
+        """
+        assert self.assembler is not None  # set in run() before this is called
+        self_ids = np.arange(len(texts))
+        q_emb = encoder.encode_queries(texts)
+        feats = self.assembler.assemble(
+            texts,
+            q_emb,
+            dense,
+            lexical,
+            self.cfg.retrieval.k_neighbors,
+            query_ids=self_ids,
+            query_labels=y,
+            chunk=self.cfg.retrieval.feature_chunk,
+            providers=self._providers,
+            self_ids=self_ids,
+        )
+        feats["fold"] = 0
+        recall = float(feats.groupby("item_id")["is_true"].max().mean()) if len(feats) else 0.0
+        log.info(
+            "leave-one-out: %d items, %d feature rows; candidate recall = %.4f",
+            len(texts),
+            len(feats),
+            recall,
+        )
+        feats.attrs["candidate_recall"] = recall
+        return feats
 
     def _featurize_external(
         self,
@@ -389,6 +519,10 @@ class TrainingPipeline:
             query_ids=list(range(len(texts))),
             query_labels=y,
             chunk=self.cfg.retrieval.feature_chunk,
+            # The deployment providers (fit on all training data) — the same ones
+            # that ship in the model — so external items are scored under the
+            # production condition, exactly like the dense/lexical indices here.
+            providers=self._providers,
         )
         return feats, y
 
@@ -405,35 +539,31 @@ class TrainingPipeline:
         tr = oof[oof["fold"].isin(roles["train"])]
         ca = val_feats if val_feats is not None else oof[oof["fold"].isin(roles["calibration"])]
 
+        names = self._feature_names
         fusion = build_fusion(self.cfg.fusion)
         if getattr(fusion, "NEEDS_GROUPS", False):
             # Learning-to-rank: each item's candidate rows form one query group.
             # Sort so groups are contiguous, then pass run-length group sizes.
             tr = tr.sort_values("item_id", kind="stable")
             groups = tr.groupby("item_id", sort=False).size().to_numpy()
-            fusion.fit(
-                tr[FEATURE_NAMES].to_numpy(np.float32), tr["is_true"].to_numpy(), groups=groups
-            )
+            fusion.fit(tr[names].to_numpy(np.float32), tr["is_true"].to_numpy(), groups=groups)
         else:
-            fusion.fit(tr[FEATURE_NAMES].to_numpy(np.float32), tr["is_true"].to_numpy())
+            fusion.fit(tr[names].to_numpy(np.float32), tr["is_true"].to_numpy())
 
-        raw = fusion.predict_proba(ca[FEATURE_NAMES].to_numpy(np.float32))
-        calibrator = build_calibrator(self.cfg.calibration)
-        calibrator.fit(raw, ca["is_true"].to_numpy())
-
-        decided = top_per_item(add_confidence(ca, fusion, calibrator))
-        target = self.cfg.training.target_precision
-        global_thr = ThresholdTuner.threshold_for_precision(
-            decided["conf"].to_numpy(), decided["is_true"].to_numpy(), target
+        calibrator, abstention = fit_calibration_and_abstention(
+            ca,
+            fusion,
+            self.cfg.calibration,
+            names,
+            self.cfg.training.target_precision,
+            self.cfg.training.per_class_min_support,
         )
-        per_class = {}
-        for cls, grp in decided.groupby("candidate"):
-            if len(grp) >= self.cfg.training.per_class_min_support:
-                per_class[int(cls)] = ThresholdTuner.threshold_for_precision(
-                    grp["conf"].to_numpy(), grp["is_true"].to_numpy(), target
-                )
-        log.info("global threshold=%.4f, %d per-class thresholds", global_thr, len(per_class))
-        return fusion, calibrator, AbstentionPolicy(global_thr, per_class)
+        log.info(
+            "global threshold=%.4f, %d per-class thresholds",
+            abstention.global_threshold,
+            len(abstention.per_class),
+        )
+        return fusion, calibrator, abstention
 
     # ---------------------------------------------------------------- (4) evaluate
     def _evaluate(
@@ -469,7 +599,7 @@ class TrainingPipeline:
         else:
             te = oof[oof["fold"].isin(roles["test"])]
             true_y = y
-        decided = top_per_item(add_confidence(te, fusion, calibrator))
+        decided = top_per_item(add_confidence(te, fusion, calibrator, self._feature_names))
 
         item_ids = decided["item_id"].to_numpy(dtype=np.intp)
         pred_idx = decided["candidate"].to_numpy(dtype=np.intp)
@@ -532,4 +662,9 @@ class TrainingPipeline:
             encoder = self._load_shared_encoder()
         dense = DenseRetrieverAdapter.build(encoder, texts, y, label_space, self.cfg.retrieval)
         lexical = LexicalRetrieverAdapter.build(texts, y, label_space, self.cfg.retrieval)
+        # Custom feature providers (T70) fit on *all* training rows — the version
+        # that ships in the model and scores external val/test sets. The composed
+        # schema (core + provider columns) is what the fusion/eval steps select by.
+        self._providers = self._fit_providers(np.arange(len(texts)), texts, y, label_space)
+        self._feature_names = composed_feature_names(self._providers)
         return encoder, dense, lexical

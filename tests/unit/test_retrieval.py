@@ -373,6 +373,101 @@ def test_dense_class_freq_counts_correctly(dense_env):
     npt.assert_array_equal(freq[2], 0)  # empty class
 
 
+# =========================================================================== #
+#  Part D — leave-one-out self-masking (n_folds=1)
+# =========================================================================== #
+
+
+class TestSelfMaskExcludeHelper:
+    """`_exclude_self` drops the per-row self index, keeps real neighbours
+    best-first, and returns exactly width k."""
+
+    def test_drops_self_and_promotes_next(self):
+        from text_classifier.infrastructure.retrieval import _exclude_self
+
+        # Row 0's self is index 10 (its top neighbour); row 1 has no self (-1).
+        idx = np.array([[10, 11, 12], [20, 21, 22]])
+        score = np.array([[0.9, 0.8, 0.7], [0.6, 0.5, 0.4]], dtype=np.float32)
+        out_idx, out_score = _exclude_self(idx, score, np.array([10, -1]), k=2)
+        npt.assert_array_equal(out_idx[0], [11, 12])  # self (10) removed, rest promoted
+        npt.assert_allclose(out_score[0], [0.8, 0.7])
+        npt.assert_array_equal(out_idx[1], [20, 21])  # no self -> ordinary top-2
+        assert out_idx.shape == (2, 2)
+
+    def test_small_corpus_pads_after_removing_self(self):
+        from text_classifier.infrastructure.retrieval import _exclude_self
+
+        # Two neighbours, one is self -> one real neighbour, padded to width 3.
+        idx = np.array([[5, 6]])
+        score = np.array([[0.9, 0.8]], dtype=np.float32)
+        out_idx, out_score = _exclude_self(idx, score, np.array([5]), k=3)
+        npt.assert_array_equal(out_idx[0], [6, -1, -1])
+        assert np.isnan(out_score[0, 1]) and np.isnan(out_score[0, 2])
+
+
+def test_dense_knn_excludes_self(dense_env):
+    """Querying the pool's own items with exclude_idx never returns the self index;
+    without it, the top neighbour is the item itself (perfect self-match)."""
+    from text_classifier.infrastructure.retrieval import _exclude_self
+
+    adapter, _, enc, texts, _ = dense_env
+    q = enc.encode_queries(texts)
+    self_ids = np.arange(len(texts))
+
+    # Ordinary retrieval: each item is its own nearest neighbour (perfect match).
+    idx_plain, sim_plain = _dense_topk(q, adapter.state.example_emb, 3, 256)
+    npt.assert_array_equal(idx_plain[:, 0], self_ids)
+    npt.assert_allclose(sim_plain[:, 0], 1.0, atol=1e-5)
+
+    # Leave-one-out: the self index is gone from every row's neighbour list. Fetch
+    # k+1 and apply the same mask the adapter uses, then assert self is absent.
+    ex_idx, ex_sim = _dense_topk(q, adapter.state.example_emb, 4, 256)
+    ex_idx, _ = _exclude_self(ex_idx, ex_sim, self_ids, 3)
+    for i in range(len(texts)):
+        assert i not in set(ex_idx[i].tolist())
+
+
+def test_lexical_knn_excludes_self():
+    """BM25 kNN with exclude never self-retrieves the query's own document."""
+    label_space = LabelSpace(
+        [ClassDefinition("a", "fruit pastry"), ClassDefinition("b", "fruit loaf")]
+    )
+    texts = ["apple pie", "apple tart", "banana bread", "banana cake"]
+    labels = np.array([0, 0, 1, 1])
+    cfg = RetrievalConfig()
+    adapter = LexicalRetrieverAdapter.build(texts, labels, label_space, cfg)
+    self_ids = np.arange(len(texts))
+    idx, score = adapter._examples.top_k(texts, 3, exclude=self_ids)
+    for i in range(len(texts)):
+        assert i not in set(idx[i].tolist())
+
+
+def test_loo_prototype_leaves_self_out():
+    """LOO prototype for a 2-item class equals cosine to the *other* item; a
+    1-item class yields NaN (no prototype once its only example is removed)."""
+    enc = HashingEncoder(dim=64)
+    label_space = LabelSpace(
+        [ClassDefinition("pair", "pair"), ClassDefinition("solo", "solo")]
+    )
+    texts = ["pair one", "pair two", "solo only"]
+    labels = np.array([0, 0, 1])
+    cfg = RetrievalConfig(dense_chunk=256)
+    adapter = DenseRetrieverAdapter.build(enc, texts, labels, label_space, cfg)
+    emb = enc.encode_documents(texts)
+    q = enc.encode_queries(texts)
+    self_ids = np.arange(len(texts))
+
+    loo = adapter.loo_prototype_similarity(q, self_ids)
+    # Item 0's own-class (0) LOO prototype is just item 1's embedding (normalized).
+    expected01 = float(q[0] @ (emb[1] / np.linalg.norm(emb[1])))
+    npt.assert_allclose(loo[0, 0], expected01, atol=1e-5)
+    # Item 2 is the only member of class 1: its LOO own-class prototype is NaN.
+    assert np.isnan(loo[2, 1])
+    # A column that is not the query's own class is unchanged from the plain value.
+    plain = adapter.prototype_similarity(q)
+    npt.assert_allclose(loo[0, 1], plain[0, 1], atol=1e-6)
+
+
 def test_dense_knn_sorted_by_descending_similarity(dense_env):
     adapter, _, enc, texts, _ = dense_env
     q_emb = enc.encode([texts[0]])

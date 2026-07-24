@@ -49,6 +49,16 @@ class XGBoostFusionModel(FusionModel):
         assert self._model is not None, "fusion model not fitted"
         return self._model.predict_proba(np.asarray(X, dtype=np.float32))[:, 1]
 
+    def predict_contribs(self, X: np.ndarray) -> Optional[np.ndarray]:
+        """SHAP contributions from the booster: ``(n, n_features + 1)`` where each
+        row sums to the raw margin (last column is the bias). See the port default."""
+        assert self._model is not None, "fusion model not fitted"
+        from xgboost import DMatrix
+
+        booster = self._model.get_booster()
+        contribs = booster.predict(DMatrix(np.asarray(X, dtype=np.float32)), pred_contribs=True)
+        return np.asarray(contribs, dtype=np.float64)
+
     def save(self, path: str) -> None:
         assert self._model is not None
         self._model.save_model(path)  # native JSON
@@ -98,6 +108,14 @@ class LightGBMFusionModel(FusionModel):
         assert self._booster is not None, "fusion model not fitted"
         # For binary objective the Booster yields P(class==1) directly.
         return np.asarray(self._booster.predict(np.asarray(X, dtype=np.float32)), dtype=np.float64)
+
+    def predict_contribs(self, X: np.ndarray) -> Optional[np.ndarray]:
+        """SHAP contributions from the booster: ``(n, n_features + 1)`` where each
+        row sums to the raw margin (last column is the expected/base value). See
+        the port default."""
+        assert self._booster is not None, "fusion model not fitted"
+        contribs = self._booster.predict(np.asarray(X, dtype=np.float32), pred_contrib=True)
+        return np.asarray(contribs, dtype=np.float64)
 
     def save(self, path: str) -> None:
         assert self._booster is not None

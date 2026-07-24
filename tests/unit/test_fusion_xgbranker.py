@@ -54,6 +54,15 @@ def test_fit_predict_shape_and_range():
     assert float(proba.min()) >= 0.0 and float(proba.max()) <= 1.0
 
 
+def test_predict_contribs_returns_none():
+    """T69: the ranker's isotonic head breaks additivity, so it declines to attribute
+    (returns None) rather than reporting misleading contributions."""
+    X, y, g = _grouped_data()
+    m = XGBRankerFusionModel(_FAST)
+    m.fit(X, y, groups=g)
+    assert m.predict_contribs(X) is None
+
+
 def test_positive_scores_higher_overall():
     X, y, g = _grouped_data(n_groups=60)
     m = XGBRankerFusionModel(_FAST)

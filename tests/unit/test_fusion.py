@@ -52,6 +52,20 @@ class TestXGBoostFusionModel:
         proba = m.predict_proba(X)
         assert proba[y == 1].mean() > proba[y == 0].mean()
 
+    def test_predict_contribs_shape_and_additive_identity(self):
+        """T69: per-feature contributions sum (with the trailing bias) to the raw
+        margin — the SHAP additive identity XGBoost guarantees."""
+        from xgboost import DMatrix
+
+        X, y = _separable_xy(n=200)
+        m = XGBoostFusionModel(_FAST_PARAMS)
+        m.fit(X, y)
+        contribs = m.predict_contribs(X)
+        assert contribs is not None
+        assert contribs.shape == (len(y), X.shape[1] + 1)  # +1 bias column
+        raw_margin = m._model.get_booster().predict(DMatrix(X), output_margin=True)
+        np.testing.assert_allclose(contribs.sum(axis=1), raw_margin, atol=1e-4)
+
     def test_nan_tolerance_fit_and_predict(self):
         """Core invariant: NaN == 'not retrieved'; model must not crash or impute."""
         X, y = _separable_xy(n=200, nan_frac=0.3)

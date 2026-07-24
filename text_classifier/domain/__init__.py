@@ -10,6 +10,8 @@ from .models import (
 from .ports import (
     ConfidenceCalibrator,
     DenseRetriever,
+    FeatureContext,
+    FeatureProvider,
     FusionModel,
     LexicalRetriever,
     TextEncoder,
@@ -19,6 +21,7 @@ from .services import (
     AbstentionPolicy,
     CandidatePolicy,
     ThresholdTuner,
+    composed_feature_names,
 )
 
 __all__ = [
@@ -32,7 +35,10 @@ __all__ = [
     "LexicalRetriever",
     "FusionModel",
     "ConfidenceCalibrator",
+    "FeatureProvider",
+    "FeatureContext",
     "FEATURE_NAMES",
+    "composed_feature_names",
     "CandidatePolicy",
     "AbstentionPolicy",
     "ThresholdTuner",
