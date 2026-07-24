@@ -6,9 +6,10 @@ construction: a genuinely new item has no self-match in the index.
 
 from __future__ import annotations
 
-from typing import List, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
+import pandas as pd
 
 from ..config import PipelineConfig
 from ..domain import CandidatePolicy, LabelSpace, Prediction, composed_feature_names
@@ -143,7 +144,9 @@ class InferencePipeline:
         if not len(feats):
             return results
 
-        ranked = top_k_per_item(add_confidence(feats, a.fusion, a.calibrator, self._feature_names), k)
+        ranked = top_k_per_item(
+            add_confidence(feats, a.fusion, a.calibrator, self._feature_names), k
+        )
         item_ids = ranked["item_id"].to_numpy(dtype=np.intp)
         candidates = ranked["candidate"].to_numpy(dtype=np.intp)
         confidences = ranked["conf"].to_numpy(dtype=np.float64)
@@ -152,6 +155,70 @@ class InferencePipeline:
         for item_id, key, conf in zip(item_ids, keys, confidences):
             results[item_id].append((str(key), float(conf)))
         return results
+
+    def explain(self, texts: Sequence[str], top_k: Optional[int] = None) -> pd.DataFrame:
+        """Return the full per-(item, candidate) signal table behind ``predict``.
+
+        One row per (input item, candidate class) that survived candidate
+        selection, carrying every raw retrieval-signal feature *plus* the
+        calibrated ``conf`` the fusion model assigns — the numbers ``predict``
+        computes and then collapses to a single decision. This is the
+        data-scientist view: *why* each candidate scored the way it did, signal by
+        signal, before fusion picked a winner.
+
+        Columns, in order: ``item_id`` (row index into ``texts``), ``text``,
+        ``rank`` (1 = the item's most-confident candidate), ``candidate_key``
+        (class key), ``conf`` (calibrated P(correct)), then the effective feature
+        schema (the core ~28 signal columns plus any custom-provider columns).
+        A ``NaN`` in a signal column means that signal did not retrieve that class
+        — distinct from a true 0, exactly as the fusion model consumes it.
+
+        ``top_k`` keeps only each item's ``k`` most-confident candidates; ``None``
+        (default) returns every candidate. Reuses a single encode → assemble →
+        calibrate pass, so the values match ``predict``/``predict_topk`` exactly.
+        Items that retrieved no candidate contribute no rows.
+        """
+        texts = list(texts)
+        self._validate_texts(texts)
+        a = self._a
+        columns = ["item_id", "text", "rank", "candidate_key", "conf", *self._feature_names]
+        q_emb = a.encoder.encode_queries(texts)
+        feats = self._assembler.assemble(
+            texts,
+            q_emb,
+            a.dense,
+            a.lexical,
+            a.config.retrieval.k_neighbors,
+            query_ids=list(range(len(texts))),
+            query_labels=None,
+            chunk=a.config.retrieval.feature_chunk,
+            providers=self._providers,
+        )
+        if not len(feats):
+            return pd.DataFrame(columns=columns)
+
+        scored = add_confidence(feats, a.fusion, a.calibrator, self._feature_names)
+        scored = scored.sort_values(["item_id", "conf"], ascending=[True, False]).reset_index(
+            drop=True
+        )
+        scored["rank"] = scored.groupby("item_id", sort=False).cumcount() + 1
+        if top_k is not None:
+            scored = scored[scored["rank"] <= top_k].reset_index(drop=True)
+
+        item_ids = scored["item_id"].to_numpy(dtype=np.intp)
+        keys = np.asarray(a.label_space.keys)
+        out = pd.DataFrame(
+            {
+                "item_id": item_ids,
+                "text": np.asarray(texts, dtype=object)[item_ids],
+                "rank": scored["rank"].to_numpy(dtype=np.int64),
+                "candidate_key": keys[scored["candidate"].to_numpy(dtype=np.intp)],
+                "conf": scored["conf"].to_numpy(dtype=np.float64),
+            }
+        )
+        for name in self._feature_names:
+            out[name] = scored[name].to_numpy()
+        return out
 
     @staticmethod
     def _validate_texts(texts: List[str]) -> None:

@@ -13,6 +13,12 @@ Rows where the system abstained have an empty predicted_key (route to a human).
 With ``--top-k N`` (N > 1), additional wide columns ``top2_key``, ``top2_conf``,
 … ``topN_key``, ``topN_conf`` surface the next-best suggestions for a human
 reviewer; ``predicted_key``/``abstained`` stay a top-1 decision.
+
+With ``--explain PATH`` the full per-(item, candidate) signal table is written to
+PATH as CSV: one row per candidate class with every retrieval signal's raw score
+behind the prediction (NaN = "that signal did not retrieve this class"), for data
+scientists who want to inspect the signals before fusion. ``--top-k N`` bounds it
+to each item's N most-confident candidates.
 """
 
 from __future__ import annotations
@@ -39,6 +45,14 @@ def main() -> None:
         default=1,
         help="emit the top-k candidate suggestions per item (default: 1, "
         "today's output); adds top2_key/top2_conf..topN_key/topN_conf columns",
+    )
+    p.add_argument(
+        "--explain",
+        metavar="PATH",
+        default=None,
+        help="also write the full per-(item, candidate) signal table to PATH as "
+        "CSV: every retrieval signal's raw score behind each prediction. Bounded "
+        "to each item's --top-k best candidates when --top-k > 1.",
     )
     add_logging_arg(p)
     args = p.parse_args()
@@ -76,6 +90,11 @@ def main() -> None:
         f"wrote {len(out)} predictions to {args.output} "
         f"({accepted} accepted, {len(out) - accepted} abstained)"
     )
+
+    if args.explain:
+        detail = pipeline.explain(texts, top_k=args.top_k if args.top_k > 1 else None)
+        detail.to_csv(args.explain, index=False)
+        print(f"wrote {len(detail)} per-signal rows to {args.explain}")
 
 
 if __name__ == "__main__":

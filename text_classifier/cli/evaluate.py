@@ -28,6 +28,7 @@ import numpy as np
 
 from .. import InferencePipeline
 from ..application.evaluation import _json_safe, build_manifest, evaluate_decisions
+from ..application.signal_report import signal_report
 from ._common import add_logging_arg, configure_logging, read_items, read_label_space
 
 
@@ -116,6 +117,18 @@ def main() -> None:
         true_idx=true_idx,
         keys=keys,
     )
+    # Per-signal diagnostics on this labeled set: reuse the same encode → assemble →
+    # calibrate pass `explain` exposes, tag each candidate row with ground truth, and
+    # report how each retrieval signal does alone. Cheap, and it makes the eval report
+    # a drift-monitoring surface for the signals, not just the fused decision.
+    detail = pipeline.explain(texts)
+    if len(detail):
+        item_true = np.asarray(true_keys, dtype=object)[detail["item_id"].to_numpy(dtype=np.intp)]
+        detail = detail.assign(
+            is_true=(detail["candidate_key"].to_numpy() == item_true).astype(int)
+        )
+        evaluation["signal_report"] = signal_report(detail)
+
     manifest = build_manifest(
         n_training_items=len(items),
         n_classes=label_space.size,
@@ -146,6 +159,17 @@ def main() -> None:
             print(
                 f"  {r['key']:>12}  support={r['support']:<5} "
                 f"coverage={_pct(r['coverage'])}  precision={_pct(r['precision_on_accepted'])}"
+            )
+
+    sig = evaluation.get("signal_report") or {}
+    per_signal = sig.get("per_signal") or []
+    if per_signal:
+        print("\nper-signal top-1 accuracy (each retrieval signal alone):")
+        for e in per_signal:
+            print(
+                f"  {e['signal']:>17}  top1={_pct(e.get('top1_accuracy'))}  "
+                f"fires={_pct(e.get('fired_rate'))}  "
+                f"prec_when_fired={_pct(e.get('top1_precision_when_fired'))}"
             )
 
     if args.output:

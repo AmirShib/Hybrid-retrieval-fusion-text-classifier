@@ -360,10 +360,39 @@ def render_model_card(manifest: Dict[str, Any], evaluation: Dict[str, Any]) -> s
             "class(es) had enough calibration support for their own threshold; "
             "the rest fall back to the global one.",
         ]
+    sig = evaluation.get("signal_report") or {}
+    per_signal = sig.get("per_signal") or []
+    if per_signal:
+        lines += [
+            "",
+            "## Per-signal diagnostics (out-of-fold)",
+            "",
+            "How each retrieval signal performs *alone*, before fusion — the "
+            "evidence for which techniques carry this dataset. `Top-1 acc` is how "
+            "often the signal's own best pick is the true class; `Fires` is how "
+            "often it nominates a pick at all.",
+            "",
+            "| Signal | Top-1 acc | Fires | Precision when fired |",
+            "|--------|-----------|-------|----------------------|",
+        ]
+        for e in per_signal:
+            lines.append(
+                f"| {e.get('signal', '?')} | {pct(e.get('top1_accuracy'))} | "
+                f"{pct(e.get('fired_rate'))} | {pct(e.get('top1_precision_when_fired'))} |"
+            )
+        ag = sig.get("agreement") or {}
+        if ag:
+            lines += [
+                "",
+                f"- **Mean distinct top picks across signals:** "
+                f"{num(ag.get('mean_distinct_top_classes'))} "
+                "(1 = every firing signal agrees, up to 5 = all disagree)",
+                f"- **Full-consensus rate:** {pct(ag.get('consensus_rate'))}",
+            ]
     lines += [
         "",
         "See `evaluation.json` for the per-class breakdown, reliability table, "
-        "and risk-coverage curve.",
+        "risk-coverage curve, and full per-signal report.",
         "",
     ]
     return "\n".join(lines)

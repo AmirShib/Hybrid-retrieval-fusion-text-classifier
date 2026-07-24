@@ -9,6 +9,22 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 ## [Unreleased]
 
 ### Added
+- **Per-signal insight for data scientists** — see the individual retrieval
+  signals' scores *before* the fusion model, and how each technique performs
+  alone on your data:
+  - `InferencePipeline.explain(texts, top_k=None)` returns the full
+    per-(item, candidate) table `predict` computes and then discards: one row per
+    candidate class with every raw signal feature plus the calibrated `conf`,
+    ranked per item. `NaN` stays "this signal did not retrieve this class"
+    (distinct from a true 0), exactly as the fusion model sees it. The infer CLI
+    exposes it as `--explain PATH` (a CSV sidecar, bounded by `--top-k`).
+  - A **per-signal diagnostics report** (`application/signal_report.py`) computed
+    over the leakage-free out-of-fold rows: each signal's standalone top-1
+    accuracy, how often it fires, its precision when it fires, and how much the
+    signals agree. It is persisted into `evaluation.json` (key `signal_report`)
+    and summarized in `model_card.md` at train time, and printed / persisted by
+    the `eval` CLI for a labeled set — the evidence for which techniques carry a
+    given dataset. No model internals, no change to any existing output.
 - **Pluggable custom fusion features** via a `FeatureProvider` port
   (`config.features.providers`): contribute columns beyond the built-in ~28 (text
   length, a domain lexicon hit, an external score) that reach the fusion model at

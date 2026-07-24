@@ -52,6 +52,7 @@ from ..infrastructure import (
 from .evaluation import build_manifest, evaluate_decisions, write_evaluation_artifacts
 from .features import FeatureAssembler
 from .scoring import add_confidence, top_per_item
+from .signal_report import signal_report
 
 log = logging.getLogger(__name__)
 
@@ -170,6 +171,11 @@ class TrainingPipeline:
         )
         if output_dir:
             ArtifactRepository().save(artifacts, output_dir)
+            # Per-signal diagnostics from the leakage-free out-of-fold rows: how each
+            # retrieval technique performs *alone*, before fusion combines them. This
+            # is the "which signals carry my data" evidence a data scientist reads
+            # alongside the headline metrics.
+            evaluation = {**evaluation, "signal_report": signal_report(oof)}
             # Persist the held-out evaluation + a provenance manifest next to the
             # model so a trained directory carries its own evidence: how it scored,
             # on what, and with which version/config. This is what makes a deployed
@@ -331,9 +337,7 @@ class TrainingPipeline:
         fold_items = [LabeledItem(texts[i], label_space.key_at(int(y[i]))) for i in items_idx]
         return fit_encoder(self.cfg.encoder, fold_items, label_space)
 
-    def _fit_providers(
-        self, items_idx: np.ndarray, texts, y, label_space
-    ) -> List[FeatureProvider]:
+    def _fit_providers(self, items_idx: np.ndarray, texts, y, label_space) -> List[FeatureProvider]:
         """Build and fit the custom feature providers (T70) on the rows in
         ``items_idx`` only. Called per fold on that fold's *training* rows, so a
         provider's training-derived state (e.g. a class lexicon) never includes the
@@ -394,9 +398,7 @@ class TrainingPipeline:
         oof.attrs["candidate_recall"] = recall
         return oof
 
-    def _build_loo(
-        self, texts, y, label_space, encoder, dense, lexical
-    ) -> pd.DataFrame:
+    def _build_loo(self, texts, y, label_space, encoder, dense, lexical) -> pd.DataFrame:
         """Leave-one-out featurization of the training items (``n_folds == 1``).
 
         Every training item is scored against the *deployment* index — the same
@@ -623,8 +625,6 @@ class TrainingPipeline:
         # Custom feature providers (T70) fit on *all* training rows — the version
         # that ships in the model and scores external val/test sets. The composed
         # schema (core + provider columns) is what the fusion/eval steps select by.
-        self._providers = self._fit_providers(
-            np.arange(len(texts)), texts, y, label_space
-        )
+        self._providers = self._fit_providers(np.arange(len(texts)), texts, y, label_space)
         self._feature_names = composed_feature_names(self._providers)
         return encoder, dense, lexical
