@@ -90,7 +90,7 @@ def main() -> None:
         help="stop_words value for BM25's tokenizer (any value sklearn's "
         "CountVectorizer accepts, e.g. 'english'); 'none' explicitly disables "
         "stopword filtering. Default: no stopword removal (language-neutral) "
-        "-- use 'english' to restore the pre-T35 behaviour.",
+        "-- pass 'english' to filter English stopwords.",
     )
     p.add_argument(
         "--per-fold-encoder",

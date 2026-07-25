@@ -1,11 +1,11 @@
-"""Custom fusion-feature providers (T70).
+"""Custom fusion-feature providers.
 
 This module ships the *sample* provider that exercises the ``FeatureProvider``
-seam end to end. It is deliberately one provider, not a library (a library of
-extra providers is explicitly out of scope for T70): its job is to prove the
-contract — a train-set-derived, per-fold-fittable feature that reaches the fusion
-model at train *and* inference, in a persisted, air-gapped-portable form, with
-NaN-as-missing and out-of-fold leakage discipline.
+seam end to end. It is deliberately one provider, not a library: its job is to
+prove the contract — a train-set-derived, per-fold-fittable feature that
+reaches the fusion model at train *and* inference, in a persisted,
+air-gapped-portable form, with NaN-as-missing and out-of-fold leakage
+discipline.
 
 ``ClassKeywordOverlapProvider`` is a "domain-lexicon hit" feature: for each class
 it learns the set of tokens seen in that class's training examples, and for each
@@ -111,7 +111,7 @@ class ClassKeywordOverlapProvider(FeatureProvider):
         frac[tok == 0, :] = np.nan
 
         # Gather over the candidate grid. Guard against a label space widened
-        # after fit (added classes, T78): an out-of-range class simply stays NaN.
+        # after fit (added classes): an out-of-range class simply stays NaN.
         C = self._membership.shape[0]
         in_range = ctx.cols < C
         vals[in_range] = frac[ctx.rows[in_range], ctx.cols[in_range]]

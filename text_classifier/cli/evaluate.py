@@ -13,7 +13,7 @@ held-out set, or to monitor a deployed model for drift over time.
 
 With ``--classes classes.csv`` (columns: key, description) the model's label
 space is first widened with any class in the file it was not trained on, so a
-test set that references *new* classes can be scored end-to-end (T78). Added
+test set that references *new* classes can be scored end-to-end. Added
 classes are description-only — retrievable from their description but, lacking
 example support, low-confidence and prone to abstain — so this measures the
 floor a not-yet-retrained class reaches, not trained-class performance.

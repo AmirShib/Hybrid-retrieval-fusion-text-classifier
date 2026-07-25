@@ -130,7 +130,7 @@ class FusionModel(ABC):
 
     def predict_contribs(self, X: np.ndarray) -> Optional[np.ndarray]:
         """Optional per-feature contributions toward the *raw* (pre-calibration)
-        score, for prediction explanations (T69).
+        score, for prediction explanations.
 
         Returns ``(n, n_features + 1)``: columns ``0..n_features-1`` align to the
         fusion feature columns in order, and the trailing column is the bias/base
@@ -183,7 +183,7 @@ class FeatureContext:
     so exposing it costs nothing: ``query_texts``/``query_emb`` are the queries in
     this chunk (``query_emb`` is L2-normalized, so dot products are cosines), and
     ``label_space`` owns the canonical column↔class-key map. Retrieval indices are
-    deliberately *not* exposed here — that is a separate, later capability (T79)."""
+    deliberately *not* exposed here — that is a separate, later capability."""
 
     query_texts: Sequence[str]  # (n_queries,)
     query_emb: np.ndarray  # (n_queries, dim), L2-normalized
@@ -205,7 +205,7 @@ class FeatureContext:
 
 
 class FeatureProvider(ABC):
-    """A pluggable source of extra fusion features (T70).
+    """A pluggable source of extra fusion features.
 
     The five retrieval signals → ~28 core features are fixed; a provider adds
     columns *beyond* them (text length, a domain-lexicon hit, an external score).

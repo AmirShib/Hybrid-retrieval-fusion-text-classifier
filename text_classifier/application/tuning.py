@@ -1,4 +1,4 @@
-"""Re-tune calibration + abstention thresholds on a deployed model (T66).
+"""Re-tune calibration + abstention thresholds on a deployed model.
 
 The operating point (target precision -> thresholds) is normally baked in at
 train time (``TrainingPipeline._fit_fusion``). Moving the coverage/precision
@@ -43,7 +43,7 @@ log = logging.getLogger(__name__)
 # same (L2-normalized) vector. This can't detect paraphrases or genuinely new
 # near-duplicates, only exact-or-near-exact text reuse; it exists to catch the
 # one costly mistake this tool warns against (accidentally re-pointing it at
-# the training set), not to replace the exact-text corpus check T68 adds.
+# the training set), not to replace an exact-text corpus check.
 _OVERLAP_SIMILARITY_THRESHOLD = 0.999
 
 
@@ -78,7 +78,7 @@ def retune(
     retuned threshold would then under-abstain in production. This function
     logs a best-effort warning (``count_likely_overlap``) when tune-set items
     look like near-duplicates of an indexed example; it cannot check exact text
-    identity without the training corpus itself (a later capability — T68).
+    identity without the training corpus itself (a later capability).
     """
     items = list(items)
     if not items:
@@ -90,8 +90,7 @@ def retune(
         shown = unknown[:10]
         suffix = " ..." if len(unknown) > 10 else ""
         raise ValueError(
-            f"{len(unknown)} tune-set label(s) are not in the model's label space: "
-            f"{shown}{suffix}"
+            f"{len(unknown)} tune-set label(s) are not in the model's label space: {shown}{suffix}"
         )
 
     feature_names = composed_feature_names(artifacts.feature_providers)

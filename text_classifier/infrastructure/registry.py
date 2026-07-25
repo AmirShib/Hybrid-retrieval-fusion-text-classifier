@@ -94,7 +94,7 @@ class CalibratorSpec:
 
 @dataclass(frozen=True)
 class FeatureProviderSpec:
-    """How to build/persist a ``FeatureProvider`` (T70). Providers persist to a
+    """How to build/persist a ``FeatureProvider``. Providers persist to a
     *directory* (like encoders) so a backend can write several files; ``load``
     receives the provider's ``FeatureProviderConfig`` for symmetry with the other
     specs, even though the sample provider reconstructs entirely from disk."""
@@ -288,7 +288,7 @@ register_calibrator(
 register_feature_provider(
     "class-keyword",
     FeatureProviderSpec(
-        # The sample T70 provider. `params` pass straight to the provider (and on
+        # The sample provider. `params` pass straight to the provider (and on
         # to sklearn's CountVectorizer): e.g. {"ngram_range": [1, 2]} or a custom
         # {"column": "..."}. Fit per fold by the pipeline (its lexicon is
         # train-set-derived), so leakage-free like any corpus-dependent state.

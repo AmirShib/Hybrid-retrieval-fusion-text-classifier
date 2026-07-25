@@ -9,6 +9,19 @@ description = "Hybrid retrieval-fusion text classifier with calibrated abstentio
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+authors = [{ name = "Amirsh" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Text Processing :: Linguistic",
+]
 dependencies = [
     # Lower bounds only: these are conservative floors for the APIs the package
     # uses. For air-gapped reproducibility, pin exact versions in a lockfile /
@@ -23,12 +36,16 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest", "pytest-cov"]
-# Lint + type tooling (T51); versions match .pre-commit-config.yaml / CI.
+# Lint + type tooling; versions match .pre-commit-config.yaml / CI.
 dev = ["ruff==0.15.8", "mypy==1.19.1", "pre-commit"]
 # Optional alternative fusion backend (FusionConfig.kind="lightgbm"). Not a hard
 # dependency: air-gapped hosts may not have it, and the suite skips its tests when
 # it is absent.
 lightgbm = ["lightgbm"]
+
+[project.urls]
+Repository = "https://github.com/amirshib/hybrid-retrieval-fusion-text-classifier"
+Changelog = "https://github.com/amirshib/hybrid-retrieval-fusion-text-classifier/blob/main/CHANGELOG.md"
 
 [project.scripts]
 text-classifier-train = "text_classifier.cli.train:main"
