@@ -164,7 +164,7 @@ class LexicalRetrieverAdapter(LexicalRetriever):
         (the full, extended class-description list, existing classes first then
         the new ones).
 
-        Used to widen a trained model's label space at inference time (T78). BM25
+        Used to widen a trained model's label space at inference time. BM25
         IDF is corpus-global, so the description side must be *refit* over every
         description, not have a row appended — hence the full list. The example
         index and its labels are reused verbatim: a class added this way is
@@ -211,8 +211,8 @@ def _prototypes_and_freq(
     """Per-class prototype (L2-normalized mean example embedding) and example
     count, over ``n_classes`` classes. A class with no examples gets an
     all-``NaN`` prototype row (XGBoost reads NaN as "missing"). Shared by
-    ``DenseRetrieverAdapter.build`` (fresh) and ``with_added_examples`` (T68,
-    merged pool) so both compute prototypes identically."""
+    ``DenseRetrieverAdapter.build`` (fresh) and ``with_added_examples`` (merged
+    pool) so both compute prototypes identically."""
     dim = emb.shape[1]
     proto = np.full((n_classes, dim), np.nan, dtype=np.float32)
     freq = np.zeros(n_classes, dtype=np.int64)
@@ -286,9 +286,7 @@ class DenseRetrieverAdapter(DenseRetriever):
     def prototype_similarity(self, query_emb: np.ndarray) -> np.ndarray:
         return query_emb @ self._s.prototypes.T
 
-    def loo_prototype_similarity(
-        self, query_emb: np.ndarray, self_idx: np.ndarray
-    ) -> np.ndarray:
+    def loo_prototype_similarity(self, query_emb: np.ndarray, self_idx: np.ndarray) -> np.ndarray:
         """Prototype similarity with each query's own example left out of its own
         class prototype (see the port docstring).
 
@@ -332,7 +330,7 @@ class DenseRetrieverAdapter(DenseRetriever):
     def with_added_classes(
         self, encoder: TextEncoder, new_descriptions: Sequence[str]
     ) -> "DenseRetrieverAdapter":
-        """Return a copy extended with new, example-free classes (T78).
+        """Return a copy extended with new, example-free classes.
 
         Each new class is appended at the end so existing class indices stay
         stable. Its description is encoded with the frozen deployment encoder
@@ -367,7 +365,7 @@ class DenseRetrieverAdapter(DenseRetriever):
         self, encoder: TextEncoder, edits: dict
     ) -> "DenseRetrieverAdapter":
         """Return a copy with the description embeddings at ``edits``' class
-        indices re-encoded (T68): ``{class_index: new_description_text}``, for
+        indices re-encoded: ``{class_index: new_description_text}``, for
         editing an *existing* class's description in place. A brand-new class's
         description is added via ``with_added_classes``, not this method. Every
         row not named in ``edits`` is untouched."""
@@ -375,9 +373,7 @@ class DenseRetrieverAdapter(DenseRetriever):
             return DenseRetrieverAdapter(self._s, self._chunk)
         s = self._s
         idxs = list(edits.keys())
-        new_rows = np.asarray(
-            encoder.encode_documents([edits[i] for i in idxs]), dtype=np.float32
-        )
+        new_rows = np.asarray(encoder.encode_documents([edits[i] for i in idxs]), dtype=np.float32)
         description_emb = s.description_emb.copy()
         description_emb[idxs] = new_rows
         updated = DenseState(
@@ -393,7 +389,7 @@ class DenseRetrieverAdapter(DenseRetriever):
         n_classes: int,
     ) -> "DenseRetrieverAdapter":
         """Return a copy whose example pool is extended with ``new_texts``/
-        ``new_labels`` (T68). Only ``new_texts`` is encoded — the existing
+        ``new_labels``. Only ``new_texts`` is encoded — the existing
         ``example_emb`` is reused verbatim (the encoder is frozen, so
         re-encoding it would reproduce the same vectors at needless cost, and
         for an expensive sentence-transformer encoder that cost is the whole
@@ -411,9 +407,7 @@ class DenseRetrieverAdapter(DenseRetriever):
         else:
             new_emb = np.zeros((0, s.example_emb.shape[1]), dtype=s.example_emb.dtype)
         merged_emb = np.concatenate([s.example_emb, new_emb], axis=0)
-        merged_labels = np.concatenate(
-            [s.example_labels, np.asarray(new_labels, dtype=np.int64)]
-        )
+        merged_labels = np.concatenate([s.example_labels, np.asarray(new_labels, dtype=np.int64)])
         proto, freq = _prototypes_and_freq(merged_emb, merged_labels, n_classes)
         updated = DenseState(merged_emb, merged_labels, proto, s.description_emb, freq)
         return DenseRetrieverAdapter(updated, self._chunk)

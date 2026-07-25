@@ -1,5 +1,5 @@
 """Update a deployed model's classes and/or labeled examples, without
-retraining the fusion model or calibrator (T68).
+retraining the fusion model or calibrator.
 
 The fusion model is class-agnostic by construction: every feature in
 ``FEATURE_NAMES`` is a per-*candidate* retrieval signal (a similarity, a rank,
@@ -13,7 +13,7 @@ Three independent things ``update`` can do, any subset at once:
 
 1. **Add new classes** (``classes`` includes keys not yet in the label space):
    appended at the end (existing indices never move), description-only until
-   examples arrive — the same in-memory operation ``with_added_classes`` (T78)
+   examples arrive — the same in-memory operation ``with_added_classes``
    performs, just persisted this time.
 2. **Edit an existing class's description** (``classes`` includes an existing
    key with different text): only that description is re-embedded.
@@ -123,9 +123,7 @@ def update(
         dense = dense.with_updated_descriptions(encoder, edited)
     if new_defs or edited:
         lexical = lexical.with_added_descriptions(label_space.descriptions)
-        log.info(
-            "classes: %d new, %d description edit(s)", len(new_defs), len(edited)
-        )
+        log.info("classes: %d new, %d description edit(s)", len(new_defs), len(edited))
 
     # -------------------------------------------------------- 2. new examples
     updated_corpus: Optional[List[LabeledItem]]

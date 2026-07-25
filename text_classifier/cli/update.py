@@ -91,9 +91,7 @@ def main() -> None:
     )
     p.add_argument("--model", required=True, help="trained model directory")
     p.add_argument("--out", default=None, help="write the updated model to this new directory")
-    p.add_argument(
-        "--in-place", action="store_true", help="overwrite --model instead of --out"
-    )
+    p.add_argument("--in-place", action="store_true", help="overwrite --model instead of --out")
     p.add_argument(
         "--classes",
         default=None,
@@ -102,9 +100,7 @@ def main() -> None:
         "key is appended; an existing key with changed description text is "
         "re-embedded.",
     )
-    p.add_argument(
-        "--items", default=None, help="new labeled examples CSV (text,label) to add"
-    )
+    p.add_argument("--items", default=None, help="new labeled examples CSV (text,label) to add")
     p.add_argument(
         "--base-items",
         default=None,

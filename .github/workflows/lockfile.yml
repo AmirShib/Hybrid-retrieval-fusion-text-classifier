@@ -1,7 +1,7 @@
 name: lockfile
 
 # Proves requirements.lock still installs, offline, exactly as documented in
-# the README (T50): wheelhouse from the hash-locked pins, then a no-index
+# the README: wheelhouse from the hash-locked pins, then a no-index
 # install and an offline smoke test. Scheduled monthly (catches yanked or
 # re-uploaded wheels before an air-gapped deployment day) and on demand.
 # Not part of per-push CI: the wheelhouse is multiple GB (torch + CUDA libs).

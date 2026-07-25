@@ -44,7 +44,7 @@ from .retrieval import DenseRetrieverAdapter, DenseState, LexicalRetrieverAdapte
 log = logging.getLogger(__name__)
 
 
-# Defaults for model dirs written before component kinds were recorded (T23).
+# Defaults for model dirs written before component kinds were recorded.
 _LEGACY_COMPONENTS = {
     "encoder": "sentence-transformers",
     "fusion": "xgboost",
@@ -70,7 +70,7 @@ class DeployedArtifacts:
     fusion: FusionModel
     calibrator: ConfidenceCalibrator
     abstention: AbstentionPolicy
-    # Custom fusion-feature providers (T70), fitted on all training data. Empty
+    # Custom fusion-feature providers, fitted on all training data. Empty
     # for a model with no custom features — the byte-for-byte-identical default.
     # A trailing field with a default keeps every positional construction valid.
     feature_providers: List[FeatureProvider] = field(default_factory=list)
@@ -160,7 +160,7 @@ class ArtifactRepository:
         artifacts.fusion.save(os.path.join(directory, fus_spec.filename))
         artifacts.calibrator.save(os.path.join(directory, cal_spec.filename))
 
-        # Custom feature providers (T70): each persists to its own subdirectory,
+        # Custom feature providers: each persists to its own subdirectory,
         # indexed so two providers of the same kind can't collide. The manifest
         # records kind + relative path + declared names so load rebuilds them in
         # order; the composed feature-name list below is the authoritative schema.
@@ -198,7 +198,7 @@ class ArtifactRepository:
         n_items: int,
     ) -> None:
         """Persist a re-tuned calibrator + abstention policy into an existing
-        model directory (T66), touching only the decision layer.
+        model directory, touching only the decision layer.
 
         Unlike ``save`` (a full rewrite), this writes just the calibrator file
         (via its recorded registry kind — retuning never changes the calibrator
@@ -241,7 +241,7 @@ class ArtifactRepository:
     def save_corpus(directory: str, items: Sequence[LabeledItem]) -> None:
         """Persist the raw training corpus as gzip-compressed JSONL (one
         ``{"text": ..., "label": ...}`` object per line) so a later
-        ``update`` (T68) can add labeled examples without needing
+        ``update`` can add labeled examples without needing
         ``--base-items``: appending examples to BM25 requires refitting on the
         *full* corpus (its IDF is corpus-global), and the model dir otherwise
         keeps no raw text at all (``dense.npz`` is embeddings, ``lexical.pkl``
@@ -268,7 +268,7 @@ class ArtifactRepository:
 
     @staticmethod
     def read_meta(directory: str) -> Dict:
-        """Read a model dir's raw ``meta.json`` dict — used by ``update`` (T68)
+        """Read a model dir's raw ``meta.json`` dict — used by ``update``
         to carry forward provenance (``updates``/``retunes``) that a fresh
         ``save()`` would otherwise drop, read *before* that rewrite happens
         (which matters for ``--in-place``, where source and target are the
@@ -279,7 +279,7 @@ class ArtifactRepository:
     @staticmethod
     def apply_update_provenance(target_dir: str, prior_meta: Dict, entry: Dict) -> None:
         """After ``save()`` rewrites ``target_dir``'s ``meta.json`` from
-        scratch (part of ``update``, T68), carry forward ``prior_meta``'s
+        scratch (part of ``update``), carry forward ``prior_meta``'s
         ``updates``/``retunes`` provenance history — dropped by the fresh
         rewrite, since ``save()`` builds ``meta.json`` from nothing — and
         append ``entry`` to ``updates``. Call with ``prior_meta`` read via
@@ -300,7 +300,7 @@ class ArtifactRepository:
         """Persist each feature provider to ``features/NN_<kind>/`` and return the
         manifest (kind + relative path + declared names, in order). Empty in, empty
         out — a model with no providers writes no ``features/`` directory, so its
-        on-disk layout is byte-for-byte the pre-T70 one."""
+        on-disk layout is byte-for-byte the one with no custom features."""
         if not providers:
             return []
         provider_cfgs = cfg.features.providers
@@ -323,7 +323,8 @@ class ArtifactRepository:
     ) -> List[FeatureProvider]:
         """Rebuild the feature providers from the manifest, in order, dispatching
         each through the registry by its recorded kind. Returns ``[]`` for a model
-        dir with no ``feature_providers`` block (every pre-T70 model)."""
+        dir with no ``feature_providers`` block (any model saved with no custom
+        feature providers configured)."""
         manifest = meta.get("feature_providers") or []
         provider_cfgs = config.features.providers
         providers: List[FeatureProvider] = []
@@ -331,7 +332,9 @@ class ArtifactRepository:
             spec = feature_provider_spec(entry["kind"])
             # Pass the matching config entry when present so a provider's load can
             # honour its params; fall back to a bare config for the entry's kind.
-            pc = provider_cfgs[i] if i < len(provider_cfgs) else FeatureProviderConfig(entry["kind"])
+            pc = (
+                provider_cfgs[i] if i < len(provider_cfgs) else FeatureProviderConfig(entry["kind"])
+            )
             providers.append(spec.load(os.path.join(directory, entry["path"]), pc))
         return providers
 
@@ -406,7 +409,7 @@ class ArtifactRepository:
     def _components_from_meta(meta: Dict) -> Dict[str, str]:
         """Resolve each component's ``kind`` for load dispatch.
 
-        Prefers the explicit ``components`` block (written since T23); falls back
+        Prefers the explicit ``components`` block; falls back
         to the kinds embedded in ``config``; finally to the built-in defaults so
         a model directory written before this change still loads.
         """

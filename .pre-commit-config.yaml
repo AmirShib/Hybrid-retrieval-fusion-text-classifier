@@ -1,4 +1,4 @@
-# Lint + type gate (T51). Install with: pip install .[dev] && pre-commit install
+# Lint + type gate. Install with: pip install .[dev] && pre-commit install
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.8

@@ -6,7 +6,7 @@ on:
 
 jobs:
   lint:
-    # ruff (lint + format) and mypy (T51). mypy needs the real dependencies
+    # ruff (lint + format) and mypy. mypy needs the real dependencies
     # installed to resolve numpy/pandas imports, hence the full install.
     runs-on: ubuntu-latest
     steps:
@@ -48,14 +48,14 @@ jobs:
 
       - name: Run tests
         # No PYTHONHASHSEED pinning needed: HashingEncoder hashes tokens with
-        # hashlib.sha256 (T21), so embeddings are deterministic across processes,
+        # hashlib.sha256, so embeddings are deterministic across processes,
         # Python versions, and platforms. The quality-benchmark marker runs in
         # its own job below, not here.
         run: pytest -q -m "not quality" --cov=text_classifier
 
   quality-benchmark:
     # Trains the full pipeline on a fixed synthetic task and asserts metric
-    # floors (T52): catches changes that are correct code but a worse model
+    # floors: catches changes that are correct code but a worse model
     # (candidate-generation or decision-path regressions the unit suite cannot
     # see). Torch-free subset so it stays fast and offline.
     runs-on: ubuntu-latest

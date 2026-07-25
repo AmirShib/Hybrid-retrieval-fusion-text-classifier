@@ -76,7 +76,7 @@ def fit_calibration_and_abstention(
 
     This is the decision-layer half of ``TrainingPipeline._fit_fusion`` (the fusion
     model itself is fit separately, before this is called), extracted so the
-    re-tune use case (T66) can reuse the identical threshold logic against a fresh
+    re-tune use case can reuse the identical threshold logic against a fresh
     labeled set without duplicating it.
     """
     names = list(feature_names)
@@ -103,7 +103,7 @@ class TrainingPipeline:
         self.assembler: Optional[FeatureAssembler] = None
         # Optional injected encoder for the shared-encoder path (DI / offline tests).
         self._shared_override = shared_encoder
-        # Custom feature providers (T70) fitted on all training data, and the
+        # Custom feature providers fitted on all training data, and the
         # composed feature schema (core + provider columns). Populated when the
         # deployment index is built; the fusion/eval steps select X by this list.
         self._providers: List[FeatureProvider] = []
@@ -344,7 +344,7 @@ class TrainingPipeline:
         - No exact-text overlap with the training items. An overlapping item sits
           in the deployed index the external set is scored against, self-retrieves
           with a perfect match, and silently inflates calibration/evaluation — the
-          leakage trap T66 warns about. This is a hard error, not a warning.
+          same leakage trap the retune CLI warns about. This is a hard error, not a warning.
         """
         if ext_items is None:
             return
@@ -381,7 +381,7 @@ class TrainingPipeline:
         return fit_encoder(self.cfg.encoder, fold_items, label_space)
 
     def _fit_providers(self, items_idx: np.ndarray, texts, y, label_space) -> List[FeatureProvider]:
-        """Build and fit the custom feature providers (T70) on the rows in
+        """Build and fit the custom feature providers on the rows in
         ``items_idx`` only. Called per fold on that fold's *training* rows, so a
         provider's training-derived state (e.g. a class lexicon) never includes the
         held-out items it will score — the same out-of-fold discipline as
@@ -662,7 +662,7 @@ class TrainingPipeline:
             encoder = self._load_shared_encoder()
         dense = DenseRetrieverAdapter.build(encoder, texts, y, label_space, self.cfg.retrieval)
         lexical = LexicalRetrieverAdapter.build(texts, y, label_space, self.cfg.retrieval)
-        # Custom feature providers (T70) fit on *all* training rows — the version
+        # Custom feature providers fit on *all* training rows — the version
         # that ships in the model and scores external val/test sets. The composed
         # schema (core + provider columns) is what the fusion/eval steps select by.
         self._providers = self._fit_providers(np.arange(len(texts)), texts, y, label_space)

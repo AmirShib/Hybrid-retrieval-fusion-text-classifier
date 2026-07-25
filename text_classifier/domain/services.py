@@ -14,13 +14,12 @@ if TYPE_CHECKING:  # avoid a runtime import cycle; only needed for type hints
     from .ports import FeatureProvider
 
 # Canonical, ordered schema of the *core* features — the five retrieval signals'
-# ~28 columns. This is the "core provider's" ``names()`` (T70): with no custom
-# FeatureProviders configured it is the entire schema, byte-for-byte as before.
-# When providers are active the *effective* schema is composed at runtime (core +
-# each provider's names, in order) and persisted into ``meta.json``; that composed
-# list — not this constant alone — is the source of truth inference rebuilds from.
-# Adding/removing/reordering a core feature touches this list *and*
-# ``application/features.py``.
+# ~28 columns. This is the "core provider's" ``names()``: with no custom
+# FeatureProviders configured it is the entire schema. When providers are active
+# the *effective* schema is composed at runtime (core + each provider's names, in
+# order) and persisted into ``meta.json``; that composed list — not this constant
+# alone — is the source of truth inference rebuilds from. Adding/removing/
+# reordering a core feature touches this list *and* ``application/features.py``.
 FEATURE_NAMES: List[str] = [
     "d_desc_sim",
     "d_proto_sim",
@@ -59,8 +58,7 @@ def composed_feature_names(providers: Sequence["FeatureProvider"] = ()) -> List[
 
     This is *the* column order the fusion model is trained and scored on, and it is
     persisted into ``meta.json`` at save time so inference rebuilds the identical
-    order (T70). With no providers it is exactly ``FEATURE_NAMES`` — byte-for-byte
-    the schema before custom features existed. Raises ``ValueError`` on a name
+    order. With no providers it is exactly ``FEATURE_NAMES``. Raises ``ValueError`` on a name
     collision (a provider colliding with a core column, or two providers colliding),
     because a duplicate column name would silently overwrite data in the assembled
     frame — the worst kind of train/infer disagreement."""

@@ -31,7 +31,7 @@ class InferencePipeline:
         self._assembler = FeatureAssembler(
             artifacts.label_space, CandidatePolicy(artifacts.config.candidate_top_n)
         )
-        # Custom feature providers (T70) shipped with the model, plus the composed
+        # Custom feature providers shipped with the model, plus the composed
         # schema (core + provider columns) the fusion model was trained on. Empty /
         # core-only for a model with no custom features.
         self._providers = artifacts.feature_providers
@@ -234,7 +234,7 @@ class InferencePipeline:
         include_contributions: bool = False,
         n_neighbors: int = 5,
     ) -> List[Dict[str, Any]]:
-        """Per-item explanation payloads for review UIs and debugging (T69).
+        """Per-item explanation payloads for review UIs and debugging.
 
         One JSON-clean dict per input, assembled from a single feature pass (the
         plain ``predict`` path is untouched). Each payload carries:

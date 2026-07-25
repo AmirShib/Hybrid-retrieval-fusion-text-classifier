@@ -120,8 +120,8 @@ class FeatureAssembler:
     ) -> pd.DataFrame:
         """Assemble the (item, candidate) feature table.
 
-        ``providers`` (T70) contribute extra columns appended after the core ~28,
-        in provider order; with none the output is byte-for-byte the pre-T70
+        ``providers`` contribute extra columns appended after the core ~28,
+        in provider order; with none configured the output is exactly the core
         schema. Each provider must already be fitted (the caller fits per fold to
         stay leakage-free).
 
@@ -256,7 +256,7 @@ class FeatureAssembler:
             "n_signal_agreement": n_agree[rows],
         }
         df = pd.DataFrame({col: np.asarray(data[col], dtype=np.float32) for col in FEATURE_NAMES})
-        # Custom providers (T70) append their columns after the core ~28. Each
+        # Custom providers append their columns after the core ~28. Each
         # gathers over the same (rows, cols) grid; a provider that "did not fire"
         # for a candidate emits NaN, which XGBoost consumes as missing.
         for col, values in self._provider_columns(providers, texts, q_emb, rows, cols).items():

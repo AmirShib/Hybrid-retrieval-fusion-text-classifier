@@ -1,12 +1,74 @@
 # Hybrid retrieval-fusion text classifier
 
-Classifies short free text into one of many text-described classes — and
-**abstains when it isn't confident enough**, routing those items to a human
-instead of guessing. Five retrieval signals (dense + lexical, over class
-descriptions + labeled examples) are fused by a small XGBoost model into a
-calibrated `P(correct)`, and the abstention threshold is tuned to hold a target
-accuracy on what it accepts. Built for **imbalanced data**, **air-gapped
-deployment**, and **taxonomies that grow after the model ships**.
+You give it short text and a list of classes described in plain language —
+support tickets, product names, user intents, whatever you're sorting — and it
+tells you which class an item belongs to. When it isn't confident enough to be
+right, it says so instead of guessing, and routes the item to a human instead
+of quietly getting it wrong.
+
+Under the hood it combines five different ways of matching text to a class
+(semantic and keyword-based) and fuses them into a single, calibrated
+confidence score. You decide how confident is confident enough — the
+coverage/accuracy trade-off is a knob you turn, not a number we picked for
+you — and the system holds that bar in production.
+
+It's built for the kind of data real teams actually have: classes with wildly
+different amounts of training data, taxonomies that grow after the model has
+already shipped, and — if you need it — zero internet access at deploy time.
+
+## Quickstart
+
+```bash
+pip install .
+text-classifier-train --items items.csv --classes classes.csv --out model_dir/
+text-classifier-infer --model model_dir/ --input new_items.csv --output preds.csv
+```
+
+`items.csv` is `text,label`; `classes.csv` is `key,description`. `preds.csv`
+carries a prediction and a calibrated confidence per row; abstained rows have
+an empty `predicted_key` — that's your human-review queue.
+
+No data yet? `python -m scripts.demo` runs an offline end-to-end smoke test —
+no downloads, nothing to configure.
+
+## What it looks like in practice
+
+Two runnable examples live in [`examples/`](examples/); each has its own
+README with the exact commands to reproduce it.
+
+**[CLINC150](examples/clinc150/)** — 150 user intents, plus a set of queries
+that are deliberately **out of scope** for all of them. This is where
+abstention earns its keep: a good system recognizes when nothing fits and asks
+for help, instead of forcing an answer. The numbers below are a 40-intent
+subsample scored with a fully offline TF-IDF encoder — the floor a real
+bi-encoder would only improve on, so treat them as illustrative rather than a
+ceiling. What doesn't move with the subsample is the shape of the trade-off:
+you pick the target, and the threshold is tuned to hit it.
+
+| operating point | in-scope coverage | accuracy on accepted | OOS routed to human |
+|---|---|---|---|
+| `--target-precision 0.99` | 76.5% | 96.5% | 88.6% |
+| `--target-precision 0.999` | 58.8% | 97.9% | 96.7% |
+
+**[COICOP Hebrew](examples/coicop_hebrew/)** — short, messy Hebrew retail
+product names: real-world noisy text, not clean benchmark queries. First run
+**zero-shot**: Hebrew items matched straight against English-language COICOP
+2018 category descriptions with a multilingual encoder, no labeled data at
+all. Then **trained** on ~160k labeled items across an 81-category retail
+taxonomy: the full pipeline reaches **~61% coverage at ~90%
+accuracy-on-accepted** on the held-out split — meaning roughly 61% of a real
+product catalog gets auto-coded at production-grade precision, and the rest is
+queued for a human to check.
+
+The risk–coverage trade-off is the actual product here: every trained model
+ships an `evaluation.json` with the full curve, so you set the operating point
+from *your* cost of a wrong answer versus a human review — not ours.
+
+## How it works
+
+For every item, five signals each nominate and score candidate classes — a mix
+of semantic (embedding) and keyword (BM25) matching, run against both the
+class descriptions and any labeled examples you have:
 
 ```mermaid
 flowchart LR
@@ -19,119 +81,24 @@ flowchart LR
     T -->|no| H[human review]
 ```
 
-## Results
-
-From the two runnable examples in [`examples/`](examples/) (commands to
-reproduce are in each example's README).
-
-**[CLINC150](examples/clinc150/)** — 150 user intents plus an explicit
-**out-of-scope (OOS)** set. 40-intent subsample, fully offline TF-IDF encoder
-(the floor a real bi-encoder improves on); illustrative — exact numbers vary
-with subsample and seed. The operating point is a knob — the threshold is tuned
-so accepted items hit the target accuracy:
-
-| operating point | in-scope coverage | accuracy on accepted | OOS routed to human |
-|---|---|---|---|
-| `--target-precision 0.99` | 76.5% | 96.5% | 88.6% |
-| `--target-precision 0.999` | 58.8% | 97.9% | 96.7% |
-
-**[COICOP Hebrew](examples/coicop_hebrew/)** — short, messy Hebrew retail
-product names. First **zero-shot**: Hebrew items matched against
-English-language COICOP 2018 category descriptions with a multilingual
-encoder — no labeled data at all. Then **trained**: on ~160k labeled items
-across an 81-category retail taxonomy, the full pipeline reaches **~61%
-coverage at ~90% accuracy-on-accepted** on the held-out split — i.e. ~61% of a
-real product catalog auto-coded at production precision, the rest queued for
-human review.
-
-The risk–coverage trade-off is the product: every trained model ships an
-`evaluation.json` with the full curve, so you pick the operating point from
-*your* cost of a wrong answer vs. a human review.
-
-## Quickstart
-
-```bash
-pip install .
-text-classifier-train --items items.csv --classes classes.csv --out model_dir/
-text-classifier-infer --model model_dir/ --input new_items.csv --output preds.csv
-```
-
-`items.csv` is `text,label`; `classes.csv` is `key,description`. `preds.csv`
-carries a prediction + calibrated confidence per row; abstained rows have an
-empty `predicted_key` — that's the human-review queue. No data yet?
-`python -m scripts.demo` runs an offline end-to-end smoke test (no downloads).
-
-## How it works
-
-Five retrieval signals are scored for every item against a candidate set of
-classes, then a single pointwise model fuses them into a calibrated
-`P(this candidate is the true class)`:
-
 1. dense item ↔ class-**description** similarity (bi-encoder)
 2. dense item ↔ class-**prototype** similarity (mean of a class's example embeddings)
-3. dense **kNN** over training examples
+3. dense **k-nearest-neighbors** over training examples
 4. BM25 item ↔ class-description
-5. BM25 **kNN** over training examples
+5. BM25 **k-nearest-neighbors** over training examples
 
-Description and prototype are kept separate on purpose: their disagreement is a
-useful feature. The candidate set is the union of each signal's top-N, so
-**candidate recall is the ceiling on accuracy** and is reported every run.
+Description and prototype are kept as separate signals on purpose: when they
+disagree, that disagreement is itself useful information. Every signal's top
+candidates go into one shared pool — candidate recall (whether the right
+answer even made it into the pool) is reported on every run, since it's the
+hard ceiling on how accurate the system can possibly be.
 
-The fusion model is **pointwise** — one shared binary model over ~28 features per
-(item, candidate). 
-
-Confidence is isotonic-calibrated, and a threshold is tuned for a target
-accuracy (max coverage subject to accuracy ≥ target), with per-class thresholds
-where a class had enough calibration support.
-
-### Leakage control
-
-* **Out-of-fold features** — each item is scored against indices/prototypes built
-  from *other* folds (`StratifiedKFold`).
-* **Held-out calibration/test** — thresholds and the coverage report come from
-  folds the fusion model never trained on.
-* **Encoder** — by default a single shared encoder is used (cheap). For full
-  rigor, set `use_per_fold_encoder=True` to fine-tune a fresh encoder per fold.
-  The encoder is fine-tuned with `MultipleNegativesSymmetricRankingLoss` on
-  (item, class-description) pairs.
-
-## Layout (domain-driven / hexagonal)
-
-```
-text_classifier/
-  domain/           framework-free core
-    models.py         value objects + LabelSpace aggregate
-    ports.py          abstract interfaces (encoder, retrievers, fusion, calibrator)
-    services.py       feature schema, candidate/abstention policies, threshold tuner
-  infrastructure/   adapters implementing the ports
-    encoder.py        SentenceTransformer + MNR-symmetric fine-tuning
-    retrieval.py      BM25 (precomputed weight matrix) + dense retriever w/ prototypes
-    fusion.py         XGBoost fusion model + isotonic calibrator
-    persistence.py    save/load a model directory
-  application/      use cases
-    features.py       vectorized (item, candidate) feature assembler
-    scoring.py        confidence + per-item argmax (shared by both pipelines)
-    training.py       TrainingPipeline   <-- training entry point
-    inference.py      InferencePipeline  <-- inference entry point
-  config.py         configuration dataclasses
-scripts/
-  train.py          CLI: train from CSVs -> model directory
-  infer.py          CLI: model directory + CSV -> predictions
-  demo.py           offline smoke test (HashingEncoder double; no model download)
-```
-
-The domain layer imports no ML framework; infrastructure depends on the domain;
-the application layer orchestrates through the ports. The two pipelines are the
-public entry points.
-
-## Efficiency notes
-
-* Every signal is computed as a `(batch × n_classes)` matrix; candidate rows are
-  gathered with numpy fancy-indexing — no per-row Python loops.
-* BM25 precomputes a per-(doc, term) weight matrix `W`; because query-term
-  frequency is ignored, scoring a query batch is the sparse mat-mul
-  `Q_binary @ W.T`.
-* kNN and feature assembly are query-chunked to bound peak memory.
+One shared model — scored independently on every (item, candidate) pair, over
+around 28 features per pair — fuses all five signals into a single raw score.
+That score is calibrated with isotonic regression into `P(correct)`, and the
+abstention threshold is tuned to whatever coverage/accuracy trade-off you ask
+for, with a per-class threshold wherever a class had enough calibration data
+to support one.
 
 ## Install
 
@@ -458,8 +425,9 @@ directory.
 
 ### Worked examples
 
-The two demos behind the [Results](#results) table, each with a cell-by-cell
-notebook walkthrough and a command-line equivalent in its README:
+The two demos behind the [Results](#what-it-looks-like-in-practice) table, each
+with a cell-by-cell notebook walkthrough and a command-line equivalent in its
+README:
 
 - **[`examples/clinc150/`](examples/clinc150/)** — calibrated abstention on
   CLINC150, fully offline: raising the confidence bar routes more out-of-scope
@@ -485,10 +453,68 @@ print(report)  # coverage / accuracy-on-accepted / candidate recall
 preds = InferencePipeline.from_directory("model_dir/").predict(["where is my refund"])
 ```
 
+## Design notes
+
+The rest of this README is a usage reference. This section is for readers who
+want to know *why* the system is built this way — skip it if you just want to
+run the tool.
+
+**Keeping the numbers honest.** It would be easy for a system like this to
+cheat: let an item see itself in its own retrieval index at evaluation time,
+and every metric looks better than production will actually be. Three things
+guard against that:
+
+* **Out-of-fold features** — each item is scored against indices/prototypes
+  built from *other* folds (`StratifiedKFold`).
+* **Held-out calibration/test** — thresholds and the coverage report come from
+  folds the fusion model never trained on.
+* **Encoder** — by default a single shared encoder is used (cheap). For full
+  rigor, set `use_per_fold_encoder=True` to fine-tune a fresh encoder per fold.
+  The encoder is fine-tuned with `MultipleNegativesSymmetricRankingLoss` on
+  (item, class-description) pairs.
+
+**Why it's fast.** The whole scoring path is vectorized — no per-item Python
+loops:
+
+* Every signal is computed as a `(batch × n_classes)` matrix; candidate rows
+  are gathered with numpy fancy-indexing.
+* BM25 precomputes a per-(doc, term) weight matrix `W`; because query-term
+  frequency is ignored, scoring a query batch is the sparse mat-mul
+  `Q_binary @ W.T`.
+* kNN and feature assembly are query-chunked to bound peak memory.
+
+**Project layout** (domain-driven / hexagonal):
+
+```
+text_classifier/
+  domain/           framework-free core
+    models.py         value objects + LabelSpace aggregate
+    ports.py          abstract interfaces (encoder, retrievers, fusion, calibrator)
+    services.py       feature schema, candidate/abstention policies, threshold tuner
+  infrastructure/   adapters implementing the ports
+    encoder.py        SentenceTransformer + MNR-symmetric fine-tuning
+    retrieval.py      BM25 (precomputed weight matrix) + dense retriever w/ prototypes
+    fusion.py         XGBoost fusion model + isotonic calibrator
+    persistence.py    save/load a model directory
+  application/      use cases
+    features.py       vectorized (item, candidate) feature assembler
+    scoring.py        confidence + per-item argmax (shared by both pipelines)
+    training.py       TrainingPipeline   <-- training entry point
+    inference.py      InferencePipeline  <-- inference entry point
+  config.py         configuration dataclasses
+scripts/
+  train.py          CLI: train from CSVs -> model directory
+  infer.py          CLI: model directory + CSV -> predictions
+  demo.py           offline smoke test (HashingEncoder double; no model download)
+```
+
+The domain layer imports no ML framework; infrastructure depends on the domain;
+the application layer orchestrates through the ports. The two pipelines are the
+public entry points — if you're extending the system, start there.
+
 ## Contributing / releasing
 
 See `CONTRIBUTING.md` for dev setup, the test/lint/type gates, and the
 `.claude/tasks/` ticket workflow. See `CHANGELOG.md` for what changed between
 versions, and `RELEASING.md` for how a version is cut and built. Report
 security issues per `SECURITY.md` rather than as a public issue.
-

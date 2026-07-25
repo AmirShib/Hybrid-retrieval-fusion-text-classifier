@@ -80,7 +80,7 @@ class FusionConfig:
         }
     )
     auto_scale_pos_weight: bool = True  # set scale_pos_weight = n_neg / n_pos at fit time
-    # Generic params block read by non-xgboost backends (e.g. LightGBM in T41).
+    # Generic params block read by non-xgboost backends (e.g. LightGBM).
     params: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -92,7 +92,7 @@ class CalibrationConfig:
 
 @dataclass
 class FeatureProviderConfig:
-    """One custom feature provider (T70): a registry ``kind`` plus its params.
+    """One custom feature provider: a registry ``kind`` plus its params.
     ``params`` is forwarded to the provider's factory (see
     ``infrastructure/registry.py``)."""
 
@@ -102,10 +102,11 @@ class FeatureProviderConfig:
 
 @dataclass
 class FeaturesConfig:
-    """Custom fusion features (T70). ``providers`` is an *ordered* list — the
+    """Custom fusion features. ``providers`` is an *ordered* list — the
     provider columns are appended to the core ~28 in this order, and that composed
     order is persisted into ``meta.json``. Empty (the default) means the feature
-    schema and outputs are byte-for-byte identical to a build without T70."""
+    schema and outputs are byte-for-byte identical to a build with no custom
+    providers configured."""
 
     providers: List[FeatureProviderConfig] = field(default_factory=list)
 
@@ -118,7 +119,7 @@ class TrainingConfig:
     use_per_fold_encoder: bool = False  # True = rigorous (refit encoder per fold), expensive
     random_state: int = 0
     # Persist the raw training corpus (text + label, gzip-compressed JSONL) into
-    # the model dir as corpus.jsonl.gz (T68). `text-classifier-update` needs it
+    # the model dir as corpus.jsonl.gz. `text-classifier-update` needs it
     # to add labeled examples later without retraining (BM25's IDF is
     # corpus-global, so appending examples requires the full corpus to refit
     # against). Opt out via --no-store-corpus for privacy/size; an update on a
