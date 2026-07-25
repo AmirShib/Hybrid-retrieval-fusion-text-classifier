@@ -8,7 +8,7 @@ indexing. Queries are processed in chunks to bound peak memory.
 
 from __future__ import annotations
 
-from typing import Any, Optional, Sequence
+from typing import Any, Optional, Sequence, Union
 
 import warnings
 
@@ -112,7 +112,7 @@ class FeatureAssembler:
         dense: DenseRetriever,
         lexical: LexicalRetriever,
         k_neighbors: int,
-        query_ids: Sequence[Any],
+        query_ids: Union[Sequence[Any], np.ndarray],
         query_labels: Optional[np.ndarray] = None,
         chunk: int = 4096,
         providers: Sequence[FeatureProvider] = (),
