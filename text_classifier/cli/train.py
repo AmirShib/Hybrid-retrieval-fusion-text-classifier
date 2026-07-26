@@ -7,6 +7,7 @@ Usage:
         --classes classes.csv \       # columns: key,description
         --out model_dir/ \
         [--encoder-kind tfidf] [--per-fold-encoder] [--target-precision 0.95] [--folds 5] \
+        [--encoder-epochs 10] [--encoder-epoch-holdout 0.1] [--encoder-patience 3] \
         [--val-items val.csv] [--test-items test.csv]
 
 `label` in items.csv must match a `key` in classes.csv. Writes a portable model
@@ -19,6 +20,13 @@ same schema as `--items`, must be disjoint from it). With both, every internal
 fold trains the fusion model, so `--folds 2` suffices. This is the supported
 path for a temporal split — calibrate on a later slice, evaluate on a later one
 still — while keeping the persisted evaluation evidence.
+
+Multi-epoch encoder fine-tuning picks its own best epoch: with
+`--encoder-epochs 20`, a stratified `--encoder-epoch-holdout` slice of the
+fine-tuning items is withheld from the gradient updates and re-scored after every
+epoch, and the best-scoring epoch is the one saved (per-epoch table:
+`<out>/encoder/encoder_training.json`). `--encoder-patience` stops early once the
+metric stalls.
 
 Every field of `PipelineConfig` (fusion kind + xgb_params, calibration kind,
 bm25_token_kwargs, encoder params, ...) is reachable via `--config config.json`
@@ -34,6 +42,7 @@ import json
 import logging
 
 from .. import TrainingPipeline
+from ..domain import ENCODER_SELECTION_METRICS
 from ..infrastructure.registry import encoder_spec
 from ._common import (
     add_config_args,
@@ -65,6 +74,40 @@ def main() -> None:
         help="model name/path for the sentence-transformers encoder; "
         "ignored by corpus-fitted encoders such as tfidf "
         "(default: sentence-transformers/all-MiniLM-L6-v2)",
+    )
+    p.add_argument(
+        "--encoder-epochs",
+        type=int,
+        default=None,
+        help="fine-tuning epochs for the sentence-transformers encoder "
+        "(default: 1). Only used on the fine-tuning path (--per-fold-encoder, or "
+        "a corpus-fitted encoder kind); >1 enables best-epoch selection, see "
+        "--encoder-epoch-holdout",
+    )
+    p.add_argument(
+        "--encoder-epoch-holdout",
+        type=float,
+        default=None,
+        help="fraction of the fine-tuning items held out of the gradient updates "
+        "and re-scored after every epoch, so the *best* epoch is the one kept "
+        "instead of the last (default: 0.1). 0 disables selection: every item "
+        "trains and the final epoch wins. Ignored when --encoder-epochs is 1",
+    )
+    p.add_argument(
+        "--encoder-select-metric",
+        default=None,
+        choices=list(ENCODER_SELECTION_METRICS),
+        help="held-out metric the best epoch is chosen by (default: desc_acc@1, "
+        "nearest class description is the true class). 'knn_acc@1' scores nearest "
+        "labeled example instead — closer to the d_knn_* signals, but it re-encodes "
+        "the fine-tuning pool every epoch",
+    )
+    p.add_argument(
+        "--encoder-patience",
+        type=int,
+        default=None,
+        help="stop fine-tuning after this many consecutive epochs without an "
+        "improvement in --encoder-select-metric (default: 0 = run every epoch)",
     )
     p.add_argument(
         "--folds",
@@ -143,6 +186,14 @@ def main() -> None:
         cfg.encoder.kind = args.encoder_kind
     if args.encoder is not None:
         cfg.encoder.model_name_or_path = args.encoder
+    if args.encoder_epochs is not None:
+        cfg.encoder.train_epochs = args.encoder_epochs
+    if args.encoder_epoch_holdout is not None:
+        cfg.encoder.train_holdout_ratio = args.encoder_epoch_holdout
+    if args.encoder_select_metric is not None:
+        cfg.encoder.train_select_metric = args.encoder_select_metric
+    if args.encoder_patience is not None:
+        cfg.encoder.train_early_stopping_patience = args.encoder_patience
     if args.folds is not None:
         cfg.training.n_folds = args.folds
     if args.target_precision is not None:

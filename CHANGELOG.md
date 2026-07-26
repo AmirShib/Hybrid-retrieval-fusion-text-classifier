@@ -9,6 +9,31 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 ## [Unreleased]
 
 ### Added
+- **Best-epoch selection for encoder fine-tuning (T80)** — a multi-epoch
+  fine-tune no longer returns whatever the last epoch happened to produce. With
+  `encoder.train_epochs > 1`, a stratified `encoder.train_holdout_ratio`
+  (default `0.1`) of the fine-tuning items is withheld from the gradient updates
+  and re-scored after every epoch; the epoch scoring best on
+  `encoder.train_select_metric` is the one returned and saved.
+  `encoder.train_early_stopping_patience` stops the run once the metric stalls
+  (default `0` = run every epoch), and `encoder.train_select_min_delta` sets how
+  much an epoch must improve by to count. New train-CLI flags:
+  `--encoder-epochs` (the epoch count was previously reachable only via
+  `--config`), `--encoder-epoch-holdout`, `--encoder-select-metric`,
+  `--encoder-patience`. Selectable metrics (`domain/services.py`:
+  `ENCODER_SELECTION_METRICS`, computed by `encoder_retrieval_metrics`) are
+  `desc_acc@1` (default), `desc_mrr`, `desc_pos_sim`, and `knn_acc@1`. The
+  per-epoch table travels with the encoder and is written to
+  `<model_dir>/encoder/encoder_training.json` alongside which epoch won.
+  Decision logic lives in the framework-free `EpochSelectionPolicy` (ties go to
+  the earlier epoch); the per-epoch loop is `EncoderEpochTracker`, driven by one
+  evaluator call per epoch from `SentenceTransformer.fit`. Leakage-neutral: the
+  holdout comes out of the caller's own items (in the out-of-fold loop, one
+  fold's training rows), so withheld-from-the-gradient is still in-fold, and the
+  fusion model's rows are untouched. Defaults are behaviour-preserving —
+  `train_epochs` is still `1`, where there is nothing to select between; a
+  holdout too small to rank epochs by (< 4 items) disables selection with a
+  warning rather than picking on noise.
 - **Add classes/examples to a deployed model without retraining (T68)** — a
   `text-classifier-update` console script (+ `application/updating.py::update`)
   that rebuilds only the cheap, class-indexed retrieval state (dense

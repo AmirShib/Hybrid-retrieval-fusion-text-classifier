@@ -264,6 +264,47 @@ dense/description-similarity signals, pick a multilingual sentence-transformer
 model via `--encoder` — see `examples/coicop_hebrew/` for a worked
 cross-lingual example.
 
+**Fine-tuning the encoder for more than one epoch:** the encoder is only
+fine-tuned on the paths that ask for it (`--per-fold-encoder`, or a
+corpus-fitted encoder kind), and `--encoder-epochs` sets how long. More epochs
+is not monotone — a bi-encoder on a small, imbalanced corpus starts overfitting
+the class descriptions well before epoch 20 — so a multi-epoch run picks its own
+epoch instead of trusting the last one:
+
+```bash
+text-classifier-train --items items.csv --classes classes.csv --out model_dir/ \
+    --per-fold-encoder --encoder-epochs 20 --encoder-patience 3
+```
+
+A stratified 10% of the fine-tuning items (`--encoder-epoch-holdout`) is
+withheld from the gradient updates and re-scored after every epoch; the
+best-scoring epoch is the one saved, and `--encoder-patience` stops the run
+once the metric has stalled for that many epochs. The per-epoch table is written
+to `model_dir/encoder/encoder_training.json`:
+
+```json
+{
+  "select_metric": "desc_acc@1", "best_epoch": 6, "epochs_run": 9,
+  "early_stopped": true, "n_fit_items": 4212, "n_holdout_items": 468,
+  "epochs": [{"epoch": 1, "desc_acc@1": 0.61, "desc_mrr": 0.72, "desc_pos_sim": 0.44}, "..."]
+}
+```
+
+`--encoder-select-metric` chooses what "best" means: `desc_acc@1` (default —
+the item's nearest class description *is* its class, the direct analogue of the
+`d_desc_sim` signal), `desc_mrr` (smoother, better at separating epochs on a
+small holdout), `desc_pos_sim` (a diagnostic — it can rise while ranking
+degrades), or `knn_acc@1` (nearest labeled *example* shares the label, closest
+to the `d_knn_*` signals, but it re-encodes the fine-tuning pool every epoch).
+Set `--encoder-epoch-holdout 0` to disable selection entirely: every item trains
+and the final epoch wins, as before. Selection is inert at the default
+`--encoder-epochs 1` — one epoch, nothing to choose between.
+
+The holdout is carved out of the items the encoder was already entitled to (in
+the out-of-fold loop, one fold's training rows), so it does not weaken the
+leakage guarantees below: withheld-from-the-gradient is still in-fold, and the
+rows the fusion model trains on are untouched.
+
 **Instruction-tuned encoders (E5/BGE/GTE...):** these models expect role
 prefixes — queries and documents encoded differently. Configure them via
 `--config`; the prompts persist into the model dir, so inference applies them
@@ -471,7 +512,9 @@ guard against that:
 * **Encoder** — by default a single shared encoder is used (cheap). For full
   rigor, set `use_per_fold_encoder=True` to fine-tune a fresh encoder per fold.
   The encoder is fine-tuned with `MultipleNegativesSymmetricRankingLoss` on
-  (item, class-description) pairs.
+  (item, class-description) pairs. A multi-epoch fine-tune scores a held-out
+  slice of its own training rows after every epoch and keeps the best epoch, so
+  "train longer" cannot quietly ship an overfitted encoder.
 
 **Why it's fast.** The whole scoring path is vectorized — no per-item Python
 loops:

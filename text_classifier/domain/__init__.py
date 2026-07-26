@@ -17,11 +17,14 @@ from .ports import (
     TextEncoder,
 )
 from .services import (
+    ENCODER_SELECTION_METRICS,
     FEATURE_NAMES,
     AbstentionPolicy,
     CandidatePolicy,
+    EpochSelectionPolicy,
     ThresholdTuner,
     composed_feature_names,
+    encoder_retrieval_metrics,
 )
 
 __all__ = [
@@ -42,4 +45,7 @@ __all__ = [
     "CandidatePolicy",
     "AbstentionPolicy",
     "ThresholdTuner",
+    "ENCODER_SELECTION_METRICS",
+    "EpochSelectionPolicy",
+    "encoder_retrieval_metrics",
 ]

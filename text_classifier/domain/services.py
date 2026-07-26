@@ -5,8 +5,9 @@ primitive, not a framework) and contain no IO.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, List, Sequence
+from typing import TYPE_CHECKING, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -123,3 +124,152 @@ class ThresholdTuner:
         if acceptable.size == 0:
             return float(conf[0] + 1e-6)  # nothing meets target -> accept nothing
         return float(conf[acceptable[-1]])  # deepest acceptable point
+
+
+# --------------------------------------------------------------- encoder epochs
+# Metrics an encoder fine-tune can be *scored* on after each epoch, so a
+# multi-epoch run can return its best epoch instead of blindly its last. All are
+# "higher is better" and all are measured on a held-out slice of the fine-tuning
+# items (see ``encoder_retrieval_metrics``):
+#
+#   desc_acc@1   -- fraction of items whose nearest class *description* is their
+#                   true class. The direct analogue of the `d_desc_sim` signal,
+#                   and the closest cheap proxy for downstream accuracy.
+#   desc_mrr     -- mean reciprocal rank of the true class among descriptions.
+#                   Smoother than acc@1, so it separates epochs on small holdouts
+#                   where acc@1 plateaus.
+#   desc_pos_sim -- mean cosine to the item's own class description. Moves even
+#                   when no ranking changes; useful as a diagnostic, weak as a
+#                   selection target (it can rise while ranking degrades).
+#   knn_acc@1    -- fraction whose nearest *example* in the fine-tuning pool
+#                   shares its label — the analogue of the `d_knn_*` signals.
+#                   Requires re-encoding the example pool each epoch, so it is
+#                   only computed when a pool is supplied.
+ENCODER_SELECTION_METRICS: Tuple[str, ...] = (
+    "desc_acc@1",
+    "desc_mrr",
+    "desc_pos_sim",
+    "knn_acc@1",
+)
+
+
+def encoder_retrieval_metrics(
+    query_emb: np.ndarray,
+    desc_emb: np.ndarray,
+    true_idx: np.ndarray,
+    *,
+    pool_emb: Optional[np.ndarray] = None,
+    pool_labels: Optional[np.ndarray] = None,
+) -> Dict[str, float]:
+    """Score an encoder's retrieval quality on a labeled holdout.
+
+    ``query_emb`` (n, d) are the holdout items, ``desc_emb`` (C, d) the class
+    descriptions in ``LabelSpace`` order, and ``true_idx`` (n,) each item's true
+    class index. All embeddings are expected L2-normalized (the package-wide
+    invariant), so the dot products below *are* cosines. ``pool_emb`` (m, d) with
+    ``pool_labels`` (m,) optionally adds the nearest-example metric; the pool must
+    not contain the holdout items themselves, or every query self-retrieves and
+    ``knn_acc@1`` reads 1.0.
+
+    Returns a ``{metric: value}`` dict over ``ENCODER_SELECTION_METRICS`` (the
+    ``knn_`` key only when a pool is given). An empty holdout yields NaNs rather
+    than raising — the caller decides whether an unscoreable epoch is fatal.
+
+    Ranks are *optimistic* on ties (``rank = #{strictly better} + 1``), while
+    ``desc_acc@1`` follows ``argmax`` and so breaks ties by lowest class index.
+    The two therefore disagree slightly on a degenerate encoder that maps
+    everything to the same vector; neither is used to make claims about such a
+    model beyond "this epoch is not the one to keep".
+    """
+    q = np.asarray(query_emb, dtype=np.float64)
+    d = np.asarray(desc_emb, dtype=np.float64)
+    t = np.asarray(true_idx, dtype=np.intp)
+    metrics: Dict[str, float] = {}
+    if q.shape[0] == 0 or d.shape[0] == 0:
+        metrics.update({name: float("nan") for name in ENCODER_SELECTION_METRICS[:3]})
+        if pool_emb is not None:
+            metrics["knn_acc@1"] = float("nan")
+        return metrics
+
+    sims = q @ d.T  # (n, C) cosine to every class description
+    own = sims[np.arange(sims.shape[0]), t]  # (n,) cosine to the true class
+    rank = (sims > own[:, None]).sum(axis=1) + 1  # optimistic rank of the true class
+    metrics["desc_acc@1"] = float((sims.argmax(axis=1) == t).mean())
+    metrics["desc_mrr"] = float((1.0 / rank).mean())
+    metrics["desc_pos_sim"] = float(own.mean())
+
+    if pool_emb is not None:
+        p = np.asarray(pool_emb, dtype=np.float64)
+        labels = np.asarray(pool_labels, dtype=np.intp)
+        if p.shape[0] == 0:
+            metrics["knn_acc@1"] = float("nan")
+        else:
+            nearest = (q @ p.T).argmax(axis=1)  # (n,) index of the closest example
+            metrics["knn_acc@1"] = float((labels[nearest] == t).mean())
+    return metrics
+
+
+@dataclass(frozen=True, slots=True)
+class EpochSelectionPolicy:
+    """Which epoch of a multi-epoch fit to keep, given the per-epoch scores.
+
+    A pure decision rule over a history of ``{metric: value}`` dicts (one per
+    epoch, in order) — it holds no model state and does no IO, so the same rule
+    drives selection during training and can be re-derived from a persisted
+    history afterwards.
+
+    - ``metric`` names the entry to select on (one of ``ENCODER_SELECTION_METRICS``).
+    - ``min_delta`` is how much a later epoch must beat the incumbent by to be
+      considered an improvement — it suppresses churn from noise on a small
+      holdout, and (with ``patience``) defines what "no progress" means.
+    - ``patience`` > 0 requests early stopping after that many consecutive
+      non-improving epochs; 0 trains every epoch and just picks the best.
+
+    Ties go to the *earlier* epoch: equal measured quality from less training is
+    the cheaper, less-overfit model.
+    """
+
+    metric: str = "desc_acc@1"
+    min_delta: float = 0.0
+    patience: int = 0
+
+    def score(self, metrics: Mapping[str, float]) -> float:
+        """This policy's metric out of one epoch's record.
+
+        Raises ``KeyError`` naming what was available: a missing metric means the
+        history was produced under a different measurement (e.g. selecting on
+        ``knn_acc@1`` with no example pool supplied), which must not silently
+        degrade into "no epoch is better than any other".
+        """
+        try:
+            return float(metrics[self.metric])
+        except KeyError:
+            raise KeyError(
+                f"epoch metric {self.metric!r} was not measured; recorded metrics: "
+                f"{sorted(metrics)}"
+            ) from None
+
+    def best_epoch(self, history: Sequence[Mapping[str, float]]) -> int:
+        """The 1-based epoch to keep, or 0 if no epoch produced a usable score.
+
+        0 is a real answer, not an error: it says "selection has nothing to go
+        on" (an empty history, or every score NaN), and the caller falls back to
+        whatever the fit produced last.
+        """
+        best_epoch, best_score = 0, -math.inf
+        for epoch, metrics in enumerate(history, start=1):
+            score = self.score(metrics)
+            if math.isnan(score):
+                continue
+            if best_epoch == 0 or score > best_score + self.min_delta:
+                best_epoch, best_score = epoch, score
+        return best_epoch
+
+    def should_stop(self, history: Sequence[Mapping[str, float]]) -> bool:
+        """Whether ``patience`` non-improving epochs have elapsed since the best."""
+        if self.patience <= 0 or not history:
+            return False
+        best = self.best_epoch(history)
+        if best == 0:
+            return False
+        return len(history) - best >= self.patience

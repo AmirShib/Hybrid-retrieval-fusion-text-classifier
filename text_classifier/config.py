@@ -7,6 +7,11 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Dict, List, Optional, Type, TypeVar
 
+# The domain layer owns the set of encoder-epoch metrics; import it rather than
+# restate it, so a new metric is valid in config the moment it can be measured.
+# (Acyclic: `domain` imports neither config nor infrastructure.)
+from .domain.services import ENCODER_SELECTION_METRICS
+
 _T = TypeVar("_T")
 
 
@@ -20,6 +25,26 @@ class EncoderConfig:
     train_epochs: int = 1
     train_batch_size: int = 64
     warmup_ratio: float = 0.1
+    # Best-epoch selection. With train_epochs > 1, `train_holdout_ratio` of the
+    # fine-tuning items are held out from the gradient updates and re-scored after
+    # every epoch; the epoch scoring best on `train_select_metric` is the one
+    # returned and saved, instead of blindly the last. 0.0 turns selection off
+    # (last epoch wins, and every item trains). Ignored when train_epochs == 1,
+    # where there is nothing to choose between -- so the package default is
+    # unchanged by these fields.
+    train_holdout_ratio: float = 0.1
+    # One of domain.services.ENCODER_SELECTION_METRICS. "knn_acc@1" additionally
+    # re-encodes the fine-tuning pool each epoch (slower, closer to the d_knn_*
+    # signals); the desc_* metrics only re-encode the holdout + descriptions.
+    train_select_metric: str = "desc_acc@1"
+    # How much an epoch must beat the incumbent by to count as an improvement --
+    # noise suppression on small holdouts.
+    train_select_min_delta: float = 0.0
+    # Stop after this many consecutive non-improving epochs (0 = train them all).
+    train_early_stopping_patience: int = 0
+    # Seed for the stratified fine-tune/holdout split, so a rerun holds out the
+    # same items (the determinism invariant).
+    train_holdout_seed: int = 0
     # Backend-specific kwargs. For kind="tfidf" these pass straight to sklearn's
     # TfidfVectorizer (e.g. {"ngram_range": [1, 2], "max_features": 50000}). For
     # kind="sentence-transformers" these pass straight to the SentenceTransformer
@@ -249,6 +274,43 @@ class PipelineConfig:
                 self.encoder.encode_batch_size,
                 self.encoder.encode_batch_size >= 1,
                 ">= 1",
+            ),
+            (
+                "encoder.train_epochs",
+                self.encoder.train_epochs,
+                self.encoder.train_epochs >= 1,
+                ">= 1",
+            ),
+            (
+                "encoder.train_batch_size",
+                self.encoder.train_batch_size,
+                self.encoder.train_batch_size >= 1,
+                ">= 1",
+            ),
+            (
+                "encoder.train_holdout_ratio",
+                self.encoder.train_holdout_ratio,
+                0.0 <= self.encoder.train_holdout_ratio <= 0.5,
+                "in [0, 0.5] (0 disables best-epoch selection; a holdout larger "
+                "than half the data starves the fine-tune)",
+            ),
+            (
+                "encoder.train_select_metric",
+                self.encoder.train_select_metric,
+                self.encoder.train_select_metric in ENCODER_SELECTION_METRICS,
+                f"one of {list(ENCODER_SELECTION_METRICS)}",
+            ),
+            (
+                "encoder.train_select_min_delta",
+                self.encoder.train_select_min_delta,
+                self.encoder.train_select_min_delta >= 0.0,
+                ">= 0",
+            ),
+            (
+                "encoder.train_early_stopping_patience",
+                self.encoder.train_early_stopping_patience,
+                self.encoder.train_early_stopping_patience >= 0,
+                ">= 0 (0 trains every epoch)",
             ),
         ]
         problems = [

@@ -3,7 +3,8 @@ pickle + numpy + json so there is no extra dependency and the directory is
 portable to the air-gapped host.
 
 Layout:
-    <dir>/encoder/         SentenceTransformer.save() output
+    <dir>/encoder/         SentenceTransformer.save() output (+ encoder_training.json:
+                           the per-epoch table when a fine-tune selected its best epoch)
     <dir>/dense.npz        dense retriever numeric state
     <dir>/lexical.pkl      pickled LexicalRetrieverAdapter (vectorizers + BM25 weights)
     <dir>/fusion.json      XGBoost model
