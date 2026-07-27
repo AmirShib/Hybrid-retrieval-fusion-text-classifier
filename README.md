@@ -117,16 +117,37 @@ can equivalently run `python -m scripts.train` / `scripts.infer` /
 
 `requirements.lock` pins the full transitive dependency tree (torch included)
 with sha256 hashes, resolved for the reference platform: **Linux x86_64,
-CPython 3.11**. On a connected host, build a wheelhouse:
+CPython 3.11**.
+
+**Easiest path — one file in, one command out.** On a connected host matching
+the reference platform:
+
+```bash
+scripts/build_airgap_bundle.sh
+```
+
+This writes a single `text-classifier-airgap-bundle.tar.gz` containing every
+wheel, the lockfile, and an installer. Move that one file to the air-gapped
+host and run:
+
+```bash
+tar xzf text-classifier-airgap-bundle.tar.gz
+./wheelhouse/install.sh
+```
+
+`install.sh` just wraps the two `pip install --no-index` calls below —
+`--require-hashes` guarantees the installed wheels are byte-identical to the
+ones that were tested.
+
+**Manual path**, if you want the wheelhouse directory instead of the bundled
+archive (e.g. to inspect or re-sign it before transfer):
 
 ```bash
 pip download --require-hashes -r requirements.lock -d wheelhouse/
 pip wheel . --no-deps -w wheelhouse/     # the package itself
 ```
 
-Move `wheelhouse/` to the air-gapped host, then install with no index access —
-`--require-hashes` guarantees the installed wheels are byte-identical to the
-ones that were tested:
+Move `wheelhouse/` to the air-gapped host, then install with no index access:
 
 ```bash
 pip install --no-index --find-links wheelhouse/ --require-hashes -r requirements.lock
