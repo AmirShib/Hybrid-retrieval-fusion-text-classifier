@@ -93,10 +93,18 @@ exactly, so these deltas are not platform drift):
 | tfidf — 28 feat | 1.0000 | 0.9875 | 0.8354 | 0.8250 |
 | tfidf — 36 feat | 1.0000 | **1.0000** | 0.8250 | 0.8250 |
 
-Hashing: +1.3pp accuracy on accepted at identical coverage — a real gain.
+Hashing: +1.3pp accuracy on accepted at identical coverage — read at the time as
+a real gain; see the T82 note below, which retracts that reading.
 TFIDF: a wash. Coverage rises to 1.0 and accuracy falls by ~1pp, and the product
 is unchanged to four decimals — the same operating curve, a different point on
 it, chosen by the threshold tuner.
+
+**Superseded by T82 (2026-07-29).** A seeded retrain ablation puts this
+benchmark's own seed-to-seed spread at +/-0.0156 (hashing) / +/-0.0278 (tfidf),
+which is *larger* than the +1.3pp above. Dropping all eight columns is
+indistinguishable from keeping them on both encoders. The single-run gain
+recorded here was noise and should not be cited. The columns are retained on the
+design argument, not on a measured effect; see T82 for the numbers.
 
 Honest reading: one small synthetic benchmark (30 classes, items truncated to two
 tokens). Its own docstring warns the five-signal ensemble is redundant enough to

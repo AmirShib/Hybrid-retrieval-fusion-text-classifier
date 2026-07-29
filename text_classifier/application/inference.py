@@ -12,7 +12,13 @@ import numpy as np
 import pandas as pd
 
 from ..config import PipelineConfig
-from ..domain import CandidatePolicy, LabelSpace, Prediction, composed_feature_names
+from ..domain import (
+    CandidatePolicy,
+    LabelSpace,
+    Prediction,
+    composed_feature_names,
+    fusion_feature_names,
+)
 from ..infrastructure import ArtifactRepository, DeployedArtifacts
 from ..infrastructure.persistence import NewClass
 from .evaluation import _json_safe
@@ -36,7 +42,18 @@ class InferencePipeline:
         # schema (core + provider columns) the fusion model was trained on. Empty /
         # core-only for a model with no custom features.
         self._providers = artifacts.feature_providers
-        self._feature_names = composed_feature_names(self._providers)
+        # Two schemas, deliberately: `_feature_names` is what the fusion model was
+        # fitted on (the composed schema minus `fusion.drop_features`) and drives
+        # scoring + contribution alignment; `_assembled_names` is every column the
+        # assembler produces. They differ only when features were dropped, and the
+        # diagnostic surface (`explain`, and `signal_report` downstream of it)
+        # follows the *assembled* list — a dropped column is still measured, it
+        # just did not reach the model, and hiding it would break a report that
+        # reads core signal columns by name.
+        self._feature_names = fusion_feature_names(
+            self._providers, artifacts.config.fusion.drop_features
+        )
+        self._assembled_names = composed_feature_names(self._providers)
 
     @classmethod
     def from_directory(cls, directory: str) -> "InferencePipeline":
@@ -188,7 +205,7 @@ class InferencePipeline:
         texts = list(texts)
         self._validate_texts(texts)
         a = self._a
-        columns = ["item_id", "text", "rank", "candidate_key", "conf", *self._feature_names]
+        columns = ["item_id", "text", "rank", "candidate_key", "conf", *self._assembled_names]
         q_emb = a.encoder.encode_queries(texts)
         feats = self._assembler.assemble(
             texts,
@@ -223,7 +240,7 @@ class InferencePipeline:
                 "conf": scored["conf"].to_numpy(dtype=np.float64),
             }
         )
-        for name in self._feature_names:
+        for name in self._assembled_names:
             out[name] = scored[name].to_numpy()
         return out
 

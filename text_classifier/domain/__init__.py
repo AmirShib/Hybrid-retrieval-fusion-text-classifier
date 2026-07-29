@@ -25,6 +25,7 @@ from .services import (
     ThresholdTuner,
     composed_feature_names,
     encoder_retrieval_metrics,
+    fusion_feature_names,
 )
 
 __all__ = [
@@ -42,6 +43,7 @@ __all__ = [
     "FeatureContext",
     "FEATURE_NAMES",
     "composed_feature_names",
+    "fusion_feature_names",
     "CandidatePolicy",
     "AbstentionPolicy",
     "ThresholdTuner",

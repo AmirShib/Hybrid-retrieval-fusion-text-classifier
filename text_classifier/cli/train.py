@@ -128,6 +128,14 @@ def main() -> None:
     p.add_argument("--candidate-top-n", type=int, default=None, help="default: 10")
     p.add_argument("--k-neighbors", type=int, default=None, help="default: 20")
     p.add_argument(
+        "--drop-features",
+        default=None,
+        help="comma-separated feature columns to withhold from the fusion model "
+        "(they are still computed, just not fitted on). Use to retrain without a "
+        "column and compare -- the retrain-based counterpart to "
+        "text-classifier-importance's masking ablation. Default: drop nothing.",
+    )
+    p.add_argument(
         "--bm25-stop-words",
         default=None,
         help="stop_words value for BM25's tokenizer (any value sklearn's "
@@ -202,6 +210,8 @@ def main() -> None:
         cfg.candidate_top_n = args.candidate_top_n
     if args.k_neighbors is not None:
         cfg.retrieval.k_neighbors = args.k_neighbors
+    if args.drop_features is not None:
+        cfg.fusion.drop_features = [n.strip() for n in args.drop_features.split(",") if n.strip()]
     if args.bm25_stop_words is not None:
         if args.bm25_stop_words.lower() == "none":
             cfg.retrieval.bm25_token_kwargs.pop("stop_words", None)

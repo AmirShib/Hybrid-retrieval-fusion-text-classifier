@@ -9,6 +9,25 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 ## [Unreleased]
 
 ### Added
+- **Retrain-based feature ablation (T82)** — `FusionConfig.drop_features` (plus
+  `--drop-features` on the train CLI) withholds named columns from the fusion
+  model, and `text-classifier-retrain-ablate` trains each arm plus a paired
+  no-drop baseline once per seed to report the effect with error bars. This is
+  the counterpart to T40's masking ablation: masking a column on an
+  already-trained model answers "what if this signal fails at inference?", while
+  training without it answers "should this column be in the schema?" — a model
+  fitted with a column has splits on it either way. Deltas are paired by seed
+  (removing the fold-split variance both arms saw), reported against
+  `accepted_correct` (coverage x accuracy, which does not move when the tuned
+  threshold slides without the model changing), and turned into an
+  `earns_place` / `redundant` / `inconclusive` verdict only when the effect
+  exceeds the spread of its own per-seed differences. Dropping narrows the model
+  only: the assembler still computes every column, so `explain`, `signal_report`
+  and the masking ablation keep working on a subset-trained model. The drop list
+  rides in `meta.json` and is re-applied at load, so inference rebuilds the exact
+  column list the model was fitted on. Empty (the default) is byte-for-byte the
+  existing behaviour.
+
 - **Competition features for the fusion model (T81)** — eight new core columns
   (`FEATURE_NAMES` grows 28 → 36) giving the pointwise fusion model information
   about how a candidate compares to the rest of *its own query*, which it
@@ -27,10 +46,15 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
   `NaN` (undefined) rather than `0.0` (a tie). Pure transforms of the `(b, C)`
   signal matrices already computed per chunk (`_row_margin` in
   `application/features.py`, top-2 by `argpartition`): no new retrieval, no new
-  persisted state, and no leakage surface. On the offline quality benchmark the
-  hashing encoder gains +1.3pp accuracy-on-accepted at identical coverage; the
-  tfidf encoder trades coverage for accuracy along the same operating curve at
-  an unchanged product.
+  persisted state, and no leakage surface. **Effect not established:** a single
+  run showed +1.3pp accuracy-on-accepted for the hashing encoder, but the seeded
+  retrain-ablation added in T82 puts the benchmark's own seed-to-seed spread at
+  +/-1.6pp and finds dropping all eight columns indistinguishable from keeping
+  them on both encoders. The columns are retained on the design argument (a
+  pointwise model cannot otherwise see the top1-top2 gap that drives abstention),
+  not on a measured gain; the offline benchmark is too small to resolve
+  feature-level effects below ~2-3pp, so the question is open pending a run on
+  real data.
 
 - **Best-epoch selection for encoder fine-tuning (T80)** — a multi-epoch
   fine-tune no longer returns whatever the last epoch happened to produce. With

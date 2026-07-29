@@ -27,7 +27,7 @@ from ..domain import (
     ConfidenceCalibrator,
     LabeledItem,
     LabelSpace,
-    composed_feature_names,
+    fusion_feature_names,
 )
 from ..infrastructure import DeployedArtifacts
 from .evaluation import evaluate_decisions
@@ -93,7 +93,9 @@ def retune(
             f"{len(unknown)} tune-set label(s) are not in the model's label space: {shown}{suffix}"
         )
 
-    feature_names = composed_feature_names(artifacts.feature_providers)
+    feature_names = fusion_feature_names(
+        artifacts.feature_providers, artifacts.config.fusion.drop_features
+    )
     assembler = FeatureAssembler(label_space, CandidatePolicy(artifacts.config.candidate_top_n))
     texts = [it.text for it in items]
     y = np.array(label_space.encode_labels([it.label for it in items]), dtype=np.int64)

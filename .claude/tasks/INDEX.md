@@ -107,6 +107,7 @@ signal once T34 phase 2 lands.
 | T43 | 4    | Threshold tuner: add target-coverage mode alongside target-precision          | todo |
 | T44 | 4    | Alternative fusion model (XGBRanker) behind `FusionModel` port (needs T23)     | done |
 | T80 | 4    | Track + select the best epoch of an encoder fine-tune (needs T24)              | in-review |
+| T82 | 4    | Retrain-based feature ablation: `drop_features` + seeded sweep harness (needs T40) | in-review |
 | T45 | 4    | Per-class calibration behind `ConfidenceCalibrator` port (needs T42)           | todo |
 | T50 | 5    | Pin requirements for air-gapped reproducibility (hash-locked)                  | done |
 | T51 | 5    | ruff + mypy + pre-commit; type-clean the package                               | done |

@@ -107,6 +107,16 @@ class FusionConfig:
     auto_scale_pos_weight: bool = True  # set scale_pos_weight = n_neg / n_pos at fit time
     # Generic params block read by non-xgboost backends (e.g. LightGBM).
     params: Dict[str, Any] = field(default_factory=dict)
+    # Feature columns withheld from the fusion model. The assembler still
+    # *computes* the full schema (signal_report/explain/the masking ablation all
+    # read core columns by name); this narrows only what the model is fitted on
+    # and scored with, which is what makes a retrain-based ablation possible —
+    # "is the model better without this column?" as opposed to the masking
+    # ablation's "what if this signal fails at inference?". Persisted here inside
+    # meta.json's config block and re-applied at load, so inference rebuilds the
+    # exact column list the model was fitted on. Empty (the default) is the
+    # ordinary path and leaves the schema byte-for-byte unchanged.
+    drop_features: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -311,6 +321,21 @@ class PipelineConfig:
                 self.encoder.train_early_stopping_patience,
                 self.encoder.train_early_stopping_patience >= 0,
                 ">= 0 (0 trains every epoch)",
+            ),
+            # Membership in the schema is checked later, by fusion_feature_names,
+            # which is the only place the *composed* schema (core + providers) is
+            # known. Here we only reject shapes that are wrong on their face.
+            (
+                "fusion.drop_features",
+                self.fusion.drop_features,
+                all(isinstance(n, str) and n.strip() for n in self.fusion.drop_features),
+                "a list of non-empty feature-column names",
+            ),
+            (
+                "fusion.drop_features",
+                self.fusion.drop_features,
+                len(set(self.fusion.drop_features)) == len(self.fusion.drop_features),
+                "free of duplicates",
             ),
         ]
         problems = [

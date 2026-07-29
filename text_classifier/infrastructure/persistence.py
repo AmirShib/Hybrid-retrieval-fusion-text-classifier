@@ -37,7 +37,7 @@ from ..domain import (
     LabeledItem,
     LabelSpace,
     TextEncoder,
-    composed_feature_names,
+    fusion_feature_names,
 )
 from .registry import calibrator_spec, encoder_spec, feature_provider_spec, fusion_spec
 from .retrieval import DenseRetrieverAdapter, DenseState, LexicalRetrieverAdapter
@@ -166,7 +166,7 @@ class ArtifactRepository:
         # records kind + relative path + declared names so load rebuilds them in
         # order; the composed feature-name list below is the authoritative schema.
         provider_manifest = self._save_providers(directory, cfg, artifacts.feature_providers)
-        feature_names = composed_feature_names(artifacts.feature_providers)
+        feature_names = fusion_feature_names(artifacts.feature_providers, cfg.fusion.drop_features)
 
         meta = {
             "feature_names": feature_names,
@@ -357,7 +357,8 @@ class ArtifactRepository:
         # is core + provider columns, so the providers must exist to compute it.
         feature_providers = self._load_providers(directory, meta, config)
         self._check_feature_schema(
-            meta.get("feature_names"), composed_feature_names(feature_providers)
+            meta.get("feature_names"),
+            fusion_feature_names(feature_providers, config.fusion.drop_features),
         )
 
         label_space = LabelSpace(

@@ -37,7 +37,7 @@ from ..domain import (
     LabelSpace,
     TextEncoder,
     ThresholdTuner,
-    composed_feature_names,
+    fusion_feature_names,
 )
 from ..infrastructure import (
     ArtifactRepository,
@@ -107,7 +107,9 @@ class TrainingPipeline:
         # composed feature schema (core + provider columns). Populated when the
         # deployment index is built; the fusion/eval steps select X by this list.
         self._providers: List[FeatureProvider] = []
-        self._feature_names: List[str] = composed_feature_names()
+        self._feature_names: List[str] = fusion_feature_names(
+            drop=self.cfg.fusion.drop_features
+        )
 
     def _use_per_fold_encoder(self) -> bool:
         """Refit the encoder per fold when explicitly requested, or whenever the
@@ -666,5 +668,5 @@ class TrainingPipeline:
         # that ships in the model and scores external val/test sets. The composed
         # schema (core + provider columns) is what the fusion/eval steps select by.
         self._providers = self._fit_providers(np.arange(len(texts)), texts, y, label_space)
-        self._feature_names = composed_feature_names(self._providers)
+        self._feature_names = fusion_feature_names(self._providers, self.cfg.fusion.drop_features)
         return encoder, dense, lexical

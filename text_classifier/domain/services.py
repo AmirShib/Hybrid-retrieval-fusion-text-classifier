@@ -107,6 +107,48 @@ def composed_feature_names(providers: Sequence["FeatureProvider"] = ()) -> List[
     return names
 
 
+def fusion_feature_names(
+    providers: Sequence["FeatureProvider"] = (), drop: Sequence[str] = ()
+) -> List[str]:
+    """The columns the *fusion model* is trained and scored on: the composed
+    schema (``composed_feature_names``) minus ``drop``, order otherwise preserved.
+
+    This is deliberately a different question from ``composed_feature_names``.
+    The assembler always produces the full schema — ``signal_report``, ``explain``
+    and the ablation report all read core columns by name, and a dropped column
+    that vanished from the frame would break them. ``drop`` narrows only what
+    reaches the model, which is what makes a *retrain-based* ablation possible:
+    train without a column, and compare against a model trained with it.
+
+    ``drop`` is persisted (via ``FusionConfig.drop_features`` inside ``meta.json``)
+    and re-applied at load, so inference reconstructs the identical column list
+    the model was fitted on — the same train/infer parity contract the composed
+    schema already carries.
+
+    Raises ``ValueError`` on a name that is not in the schema (a typo would
+    otherwise silently drop nothing and quietly invalidate an experiment) and on
+    a ``drop`` that would empty the schema.
+    """
+    names = composed_feature_names(providers)
+    if not drop:
+        return names
+    known = set(names)
+    unknown = sorted(set(drop) - known)
+    if unknown:
+        raise ValueError(
+            f"cannot drop unknown feature(s) {unknown}: not in the composed schema. "
+            f"Available columns: {names}"
+        )
+    dropped = set(drop)
+    kept = [n for n in names if n not in dropped]
+    if not kept:
+        raise ValueError(
+            "cannot drop every feature: the fusion model needs at least one column "
+            f"(tried to drop all {len(names)})"
+        )
+    return kept
+
+
 @dataclass(frozen=True, slots=True)
 class CandidatePolicy:
     """How many classes each signal may nominate. The candidate set is the union
