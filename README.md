@@ -355,6 +355,16 @@ Each trained model directory carries its own evidence: `evaluation.json` (the
 full held-out report) and `model_card.md` (a human-readable summary with the
 package version, dataset shape, headline metrics, and the abstention thresholds).
 
+**Which features are pulling their weight?** `text-classifier-importance` scores
+a labeled set against a trained model as-is (no retraining) and reports two
+things: mean per-feature contribution to the raw fusion score, and — for each
+feature — the accuracy/coverage change from masking it to `NaN` (the domain's
+own "signal did not retrieve this" encoding) and re-scoring:
+
+```bash
+text-classifier-importance --model model_dir/ --input labeled.csv --output importance.json
+```
+
 **Move the coverage/precision operating point without retraining:** the target
 precision → abstention threshold is normally baked in at train time. Moving
 that knob — or responding to drift `text-classifier-eval` surfaced — does not

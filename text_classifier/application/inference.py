@@ -17,6 +17,7 @@ from ..infrastructure import ArtifactRepository, DeployedArtifacts
 from ..infrastructure.persistence import NewClass
 from .evaluation import _json_safe
 from .features import FeatureAssembler
+from .importance import ablation_report, global_feature_importance
 from .scoring import add_confidence, top_k_per_item, top_per_item
 from .signal_report import SIGNALS
 
@@ -225,6 +226,60 @@ class InferencePipeline:
         for name in self._feature_names:
             out[name] = scored[name].to_numpy()
         return out
+
+    def importance_report(self, texts: Sequence[str], true_keys: Sequence[str]) -> Dict[str, Any]:
+        """Feature importance + per-feature ablation against a freshly labeled set.
+
+        Combines ``application.importance.global_feature_importance`` (mean
+        additive contribution per column, aggregated from the same attribution
+        ``explain_records(..., include_contributions=True)`` exposes per row) with
+        ``ablation_report`` (mask each column to ``NaN`` — the domain's own
+        "signal missing" encoding — and re-score with this unchanged model, to
+        measure the actual accuracy/coverage cost of losing it). Neither retrains;
+        both reuse a single encode -> assemble pass.
+
+        ``true_keys`` must align 1:1 with ``texts``; every key must be in
+        ``label_space.keys`` or this raises ``KeyError`` naming the unknown keys,
+        matching the ``evaluate`` CLI's fail-fast validation.
+        """
+        texts = list(texts)
+        self._validate_texts(texts)
+        a = self._a
+        key_to_idx = {k: i for i, k in enumerate(a.label_space.keys)}
+        unknown = sorted({k for k in true_keys if k not in key_to_idx})
+        if unknown:
+            shown = unknown[:10]
+            suffix = " ..." if len(unknown) > 10 else ""
+            raise KeyError(f"label(s) not in model's label space: {shown}{suffix}")
+        true_idx_by_item = np.array([key_to_idx[k] for k in true_keys], dtype=np.intp)
+
+        q_emb = a.encoder.encode_queries(texts)
+        feats = self._assembler.assemble(
+            texts,
+            q_emb,
+            a.dense,
+            a.lexical,
+            a.config.retrieval.k_neighbors,
+            query_ids=list(range(len(texts))),
+            query_labels=None,
+            chunk=a.config.retrieval.feature_chunk,
+            providers=self._providers,
+        )
+        if not len(feats):
+            empty = {
+                "n_items": 0,
+                "coverage": None,
+                "accuracy_on_accepted": None,
+                "accuracy_if_no_abstain": None,
+            }
+            return {"importance": None, "ablation": {"baseline": empty, "ablations": []}}
+
+        X = feats[self._feature_names].to_numpy(dtype=np.float32)
+        importance = global_feature_importance(a.fusion, X, self._feature_names)
+        ablation = ablation_report(
+            feats, a.fusion, a.calibrator, a.abstention, self._feature_names, true_idx_by_item
+        )
+        return {"importance": importance, "ablation": ablation}
 
     def explain_records(
         self,

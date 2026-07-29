@@ -101,7 +101,7 @@ signal once T34 phase 2 lands.
 
 | ID  | Tier | Title                                                                        | Status |
 |-----|------|------------------------------------------------------------------------------|--------|
-| T40 | 4    | Feature ablation + importance reporting harness — **now the gating item for the T81 follow-ups** | todo |
+| T40 | 4    | Feature ablation + importance reporting harness                              | done |
 | T41 | 4    | Alternative fusion model (LightGBM) behind `FusionModel` port (needs T23)      | done |
 | T42 | 4    | Calibration comparison (isotonic vs Platt vs beta) (needs T23)                 | done |
 | T43 | 4    | Threshold tuner: add target-coverage mode alongside target-precision          | todo |
