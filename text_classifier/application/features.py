@@ -8,7 +8,7 @@ indexing. Queries are processed in chunks to bound peak memory.
 
 from __future__ import annotations
 
-from typing import Any, Optional, Sequence, Union
+from typing import Any, Optional, Sequence, Tuple, Union
 
 import warnings
 
@@ -88,6 +88,58 @@ def _row_minmax(M: np.ndarray, cand_mask: np.ndarray) -> np.ndarray:
         hi = np.nanmax(Mc, axis=1)
     rng = np.where(hi > lo, hi - lo, 1.0)
     return (M - lo[:, None]) / rng[:, None]
+
+
+def _row_margin(M: np.ndarray, cand_mask: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Competition features for one signal: per-candidate margins and the per-row
+    top1-top2 gap.
+
+    Returns ``(margin (b, C), gap (b,))``.
+
+    ``margin[r, c]`` is ``M[r, c]`` minus the best *other* candidate's value in
+    row ``r`` — so the row's leader gets ``top1 - top2`` (positive, its winning
+    margin) and every other candidate gets ``value - top1`` (non-positive, its
+    deficit). ``gap[r]`` is that same ``top1 - top2``, carried as a per-query
+    column so trailing candidates also see how contested the lead is.
+
+    Only candidates (``cand_mask``) with a non-NaN value compete; NaN is "this
+    signal did not retrieve this class" and must never be read as a low score.
+    Both outputs are NaN where no margin is *defined*:
+
+    - ``margin`` is NaN wherever ``M`` is NaN (the signal did not fire here), and
+      NaN for the leader of a row with only one scored candidate — there is no
+      competitor to measure against, which is a different statement from a
+      margin of 0.0 (a tie).
+    - ``gap`` is NaN for a row with fewer than two scored candidates.
+
+    Ties are handled the obvious way: two candidates tied at the top both get
+    margin 0.0, and the row's gap is 0.0.
+    """
+    b, C = M.shape
+    Mc = np.where(cand_mask & ~np.isnan(M), M, -np.inf)
+    if C == 1:
+        # A single class: it is its own row's leader and has no competitor ever.
+        top1 = Mc[:, 0]
+        top2 = np.full(b, -np.inf)
+        best_other = top2[:, None]
+    else:
+        # Top-2 by partition (O(C)) rather than a full sort — only the two best
+        # values in each row matter here.
+        part = np.argpartition(-Mc, 1, axis=1)[:, :2]
+        rows = np.arange(b)[:, None]
+        vals = Mc[rows, part]
+        swap = vals[:, 0] < vals[:, 1]
+        leader = np.where(swap, part[:, 1], part[:, 0])
+        top1 = np.where(swap, vals[:, 1], vals[:, 0])
+        top2 = np.where(swap, vals[:, 0], vals[:, 1])
+        # The leader competes against #2; everyone else competes against #1.
+        is_leader = np.arange(C)[None, :] == leader[:, None]
+        best_other = np.where(is_leader, top2[:, None], top1[:, None])
+
+    with np.errstate(invalid="ignore"):  # -inf - -inf on all-missing rows -> NaN
+        margin = np.where(np.isfinite(best_other) & ~np.isnan(M), M - best_other, np.nan)
+        gap = np.where(np.isfinite(top1) & np.isfinite(top2), top1 - top2, np.nan)
+    return margin, gap
 
 
 def _argmax_or_missing(M: np.ndarray, require_positive: bool = False) -> np.ndarray:
@@ -221,6 +273,13 @@ class FeatureAssembler:
         nm_dd = _row_minmax(desc_d, mask)
         nm_bd = _row_minmax(bdesc, mask)
 
+        # ---- competition: margin to the best rival + the query's top1-top2 gap ----
+        mg_dd, gap_dd = _row_margin(desc_d, mask)
+        mg_dp, _ = _row_margin(proto, mask)
+        mg_dk, gap_dk = _row_margin(d_sum, mask)
+        mg_bd, gap_bd = _row_margin(bdesc, mask)
+        mg_bk, _ = _row_margin(b_sum, mask)
+
         # ---- gather one value per (row, col) ----
         def g(M):  # gather helper
             return M[rows, cols]
@@ -254,6 +313,14 @@ class FeatureAssembler:
             "norm_d_desc": g(nm_dd),
             "norm_b_desc": g(nm_bd),
             "n_signal_agreement": n_agree[rows],
+            "margin_d_desc": g(mg_dd),
+            "margin_d_proto": g(mg_dp),
+            "margin_d_knn": g(mg_dk),
+            "margin_b_desc": g(mg_bd),
+            "margin_b_knn": g(mg_bk),
+            "q_gap_d_desc": gap_dd[rows],
+            "q_gap_d_knn": gap_dk[rows],
+            "q_gap_b_desc": gap_bd[rows],
         }
         df = pd.DataFrame({col: np.asarray(data[col], dtype=np.float32) for col in FEATURE_NAMES})
         # Custom providers append their columns after the core ~28. Each

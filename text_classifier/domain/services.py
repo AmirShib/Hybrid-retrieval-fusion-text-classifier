@@ -15,7 +15,7 @@ if TYPE_CHECKING:  # avoid a runtime import cycle; only needed for type hints
     from .ports import FeatureProvider
 
 # Canonical, ordered schema of the *core* features — the five retrieval signals'
-# ~28 columns. This is the "core provider's" ``names()``: with no custom
+# ~36 columns. This is the "core provider's" ``names()``: with no custom
 # FeatureProviders configured it is the entire schema. When providers are active
 # the *effective* schema is composed at runtime (core + each provider's names, in
 # order) and persisted into ``meta.json``; that composed list — not this constant
@@ -50,11 +50,40 @@ FEATURE_NAMES: List[str] = [
     "norm_d_desc",
     "norm_b_desc",
     "n_signal_agreement",
+    # --- competition features (T81) ---------------------------------------
+    # The fusion model is *pointwise*: one row per (item, candidate), scored
+    # independently. Anything about how a candidate compares to the rest of its
+    # own query has to be written into the row, or the model cannot see it. The
+    # rank/min-max columns above do part of that job; these do the part they
+    # cannot. ``d_desc_sim=0.85`` against a runner-up of 0.84 and the same 0.85
+    # against a runner-up of 0.40 are identical in every column above — and one
+    # is a coin flip while the other is decided.
+    #
+    # ``margin_*``: this candidate's signal value minus the best *other*
+    # candidate's value for the same signal. Positive only for that signal's
+    # leader, where it equals the top1-top2 gap; negative elsewhere, measuring
+    # how far behind the leader this candidate sits. NaN when the signal did not
+    # retrieve this candidate, and NaN for a lone candidate (no competitor, so
+    # no margin is defined) — both are "missing" to XGBoost.
+    "margin_d_desc",
+    "margin_d_proto",
+    "margin_d_knn",
+    "margin_b_desc",
+    "margin_b_knn",
+    # ``q_gap_*``: per-*query* top1-top2 gap for a signal, identical across that
+    # query's rows. Redundant with ``margin_*`` on the leader's row, but new
+    # information on every other row: a trailing candidate's own margin says how
+    # far back it is, not whether the lead itself is contested. This is the
+    # classic abstention feature — how decided is this query, before asking
+    # anything about the candidate at hand.
+    "q_gap_d_desc",
+    "q_gap_d_knn",
+    "q_gap_b_desc",
 ]
 
 
 def composed_feature_names(providers: Sequence["FeatureProvider"] = ()) -> List[str]:
-    """The effective, ordered feature schema: the core ~28 columns (``FEATURE_NAMES``)
+    """The effective, ordered feature schema: the core ~36 columns (``FEATURE_NAMES``)
     followed by each provider's ``names()``, in provider order.
 
     This is *the* column order the fusion model is trained and scored on, and it is

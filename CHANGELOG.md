@@ -9,6 +9,29 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 ## [Unreleased]
 
 ### Added
+- **Competition features for the fusion model (T81)** — eight new core columns
+  (`FEATURE_NAMES` grows 28 → 36) giving the pointwise fusion model information
+  about how a candidate compares to the rest of *its own query*, which it
+  previously could not infer. `margin_d_desc`, `margin_d_proto`, `margin_d_knn`,
+  `margin_b_desc`, `margin_b_knn` hold each candidate's signal value minus the
+  best *other* candidate's value for that signal — positive only for the
+  signal's leader, where it is the top1−top2 gap, and negative elsewhere as a
+  deficit behind the leader. `q_gap_d_desc`, `q_gap_d_knn`, `q_gap_b_desc` carry
+  that top1−top2 gap as a per-query column, so trailing candidates also see how
+  contested the lead is. Previously a leader at `0.85` over a `0.84` rival and
+  one at `0.85` over `0.40` were identical in every column — one a coin flip,
+  the other decided — which matters most for calibrated abstention, where
+  top1−top2 is the classic confidence signal. `NaN` discipline is preserved
+  throughout: a signal that did not retrieve a candidate yields a `NaN` margin
+  and does not compete for the top-2, and a candidate with no rival at all gets
+  `NaN` (undefined) rather than `0.0` (a tie). Pure transforms of the `(b, C)`
+  signal matrices already computed per chunk (`_row_margin` in
+  `application/features.py`, top-2 by `argpartition`): no new retrieval, no new
+  persisted state, and no leakage surface. On the offline quality benchmark the
+  hashing encoder gains +1.3pp accuracy-on-accepted at identical coverage; the
+  tfidf encoder trades coverage for accuracy along the same operating curve at
+  an unchanged product.
+
 - **Best-epoch selection for encoder fine-tuning (T80)** — a multi-epoch
   fine-tune no longer returns whatever the last epoch happened to produce. With
   `encoder.train_epochs > 1`, a stratified `encoder.train_holdout_ratio`
@@ -152,6 +175,11 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
   unaffected (defaults are byte-identical to previous behavior).
 
 ### Changed
+- **Model directories trained before T81 must be retrained.** The core feature
+  schema grew from 28 to 36 columns, so a `meta.json` written before it no
+  longer matches the schema the code composes and loading raises the existing
+  `_check_feature_schema` error. That is the guard working as designed — the
+  alternative is silently feeding XGBoost mislabelled columns.
 - **Behavior change:** `RetrievalConfig.bm25_token_kwargs` now defaults to
   `{}` (no stopword removal) instead of `{"stop_words": "english"}`. BM25
   silently applied English stopword removal to every corpus regardless of

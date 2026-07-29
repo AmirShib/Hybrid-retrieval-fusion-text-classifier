@@ -95,12 +95,13 @@ signal once T34 phase 2 lands.
 | T33 | 3    | Optional cross-encoder reranker as 6th retrieval signal (needs T03, optional)  | todo |
 | T34 | 3    | Pluggable retrieval signals + retrievers behind the registry (needs T23, T03)  | todo |
 | T35 | 3    | Language-neutral BM25 defaults (drop hidden English stopwords)                | done |
+| T81 | 3    | Competition features: per-candidate margins + per-query top1−top2 gap (needs T03) | in-review |
 
 ## Tier 4+ — Stubs (T41/T42/T44 done; rest expand when picked up)
 
 | ID  | Tier | Title                                                                        | Status |
 |-----|------|------------------------------------------------------------------------------|--------|
-| T40 | 4    | Feature ablation + importance reporting harness                               | todo |
+| T40 | 4    | Feature ablation + importance reporting harness — **now the gating item for the T81 follow-ups** | todo |
 | T41 | 4    | Alternative fusion model (LightGBM) behind `FusionModel` port (needs T23)      | done |
 | T42 | 4    | Calibration comparison (isotonic vs Platt vs beta) (needs T23)                 | done |
 | T43 | 4    | Threshold tuner: add target-coverage mode alongside target-precision          | todo |
