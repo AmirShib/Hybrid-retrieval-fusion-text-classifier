@@ -128,6 +128,12 @@ class FusionModel(ABC):
     def predict_proba(self, X: np.ndarray) -> np.ndarray:  # (n,) P(class==1)
         ...
 
+    def set_device(self, device: Optional[str]) -> None:
+        """Pin inference to a specific device (e.g. "cuda", "cpu"), overriding
+        auto-detection. ``None`` restores auto-detection. No-op (the default)
+        for backends with no device concept -- e.g. LightGBM's CPU-only wheel."""
+        return None
+
     def predict_contribs(self, X: np.ndarray) -> Optional[np.ndarray]:
         """Optional per-feature contributions toward the *raw* (pre-calibration)
         score, for prediction explanations.

@@ -36,6 +36,7 @@ from ..domain import (
     TextEncoder,
     encoder_retrieval_metrics,
 )
+from .device import resolve_device
 
 if TYPE_CHECKING:  # torch-free at runtime; the type is only for checkers
     from sentence_transformers import SentenceTransformer
@@ -120,6 +121,9 @@ class SentenceTransformerEncoder(TextEncoder):
     ) -> "SentenceTransformerEncoder":
         from sentence_transformers import SentenceTransformer
 
+        # device=None lets SentenceTransformer do its own torch.cuda.is_available()
+        # check; resolve_device here is only to log what that resolves to.
+        logger.info("loading SentenceTransformer encoder on device=%s", resolve_device(device))
         return cls(
             SentenceTransformer(model_name_or_path, device=device, **kwargs),
             batch_size,
@@ -523,6 +527,9 @@ def train_encoder(
         fit_idx = np.arange(len(items), dtype=np.intp)
         holdout_idx = np.empty(0, dtype=np.intp)
 
+    logger.info(
+        "fine-tuning SentenceTransformer encoder on device=%s", resolve_device(config.device)
+    )
     model = SentenceTransformer(config.model_name_or_path, device=config.device, **config.params)
     encode_options = _encode_options(config)
     encoder = SentenceTransformerEncoder(model, config.encode_batch_size, **encode_options)

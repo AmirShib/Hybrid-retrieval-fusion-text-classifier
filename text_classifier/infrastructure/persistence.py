@@ -339,7 +339,16 @@ class ArtifactRepository:
             providers.append(spec.load(os.path.join(directory, entry["path"]), pc))
         return providers
 
-    def load(self, directory: str) -> DeployedArtifacts:
+    def load(self, directory: str, device: Optional[str] = None) -> DeployedArtifacts:
+        """Load a trained model directory.
+
+        ``device`` (e.g. ``"cuda"``, ``"cpu"``) overrides auto-detection for both
+        the encoder and the fusion model, on top of whatever the model was
+        *trained* on -- useful to pin inference to a device explicitly rather
+        than letting each component probe ``torch.cuda.is_available()`` for
+        itself. ``None`` (the default) keeps auto-detection: the persisted
+        ``encoder.device`` (usually unset) and per-call fusion auto-detection.
+        """
         if not os.path.isdir(directory):
             raise FileNotFoundError(f"model directory not found: {directory!r}")
         meta_path = os.path.join(directory, "meta.json")
@@ -353,6 +362,8 @@ class ArtifactRepository:
         self._check_package_version(meta.get("package_version"))
 
         config = PipelineConfig.from_dict(meta["config"])
+        if device is not None:
+            config.encoder.device = device
         # Rebuild feature providers before the schema check: the effective schema
         # is core + provider columns, so the providers must exist to compute it.
         feature_providers = self._load_providers(directory, meta, config)
@@ -389,6 +400,7 @@ class ArtifactRepository:
             lexical: LexicalRetrieverAdapter = pickle.load(fh)
 
         fusion = fus_spec.load(os.path.join(directory, fus_spec.filename))
+        fusion.set_device(device)
         calibrator = cal_spec.load(os.path.join(directory, cal_spec.filename))
 
         abstention = AbstentionPolicy(

@@ -56,8 +56,14 @@ class InferencePipeline:
         self._assembled_names = composed_feature_names(self._providers)
 
     @classmethod
-    def from_directory(cls, directory: str) -> "InferencePipeline":
-        return cls(ArtifactRepository().load(directory))
+    def from_directory(cls, directory: str, device: Optional[str] = None) -> "InferencePipeline":
+        """Load a trained model directory for inference.
+
+        ``device`` (e.g. ``"cuda"``, ``"cpu"``) pins both the encoder and the
+        fusion model to that device, overriding auto-detection. ``None`` (the
+        default) auto-detects: GPU if one is visible on this host, else CPU.
+        """
+        return cls(ArtifactRepository().load(directory, device=device))
 
     @property
     def label_space(self) -> LabelSpace:

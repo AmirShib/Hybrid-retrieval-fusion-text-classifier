@@ -14,6 +14,7 @@ base class and tend to be more robust than isotonic on a small calibration fold.
 
 from __future__ import annotations
 
+import logging
 import os
 import pickle
 from typing import Any, Dict, Optional
@@ -23,6 +24,9 @@ from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
 
 from ..domain import ConfidenceCalibrator, FusionModel
+from .device import resolve_device
+
+logger = logging.getLogger(__name__)
 
 
 class XGBoostFusionModel(FusionModel):
@@ -30,6 +34,10 @@ class XGBoostFusionModel(FusionModel):
         self._params = dict(params)
         self._auto_spw = auto_scale_pos_weight
         self._model: Any = None  # lazily created in fit/load (xgboost.XGBClassifier)
+        self._device_override: Optional[str] = None  # set via set_device(); None = auto-detect
+
+    def set_device(self, device: Optional[str]) -> None:
+        self._device_override = device
 
     def fit(self, X: np.ndarray, y: np.ndarray, *, groups: Optional[np.ndarray] = None) -> None:
         from xgboost import XGBClassifier
@@ -38,6 +46,10 @@ class XGBoostFusionModel(FusionModel):
         # Deterministic by default: subsample/colsample draw from an RNG, and an
         # unseeded run cannot be reproduced. An explicit user seed always wins.
         params.setdefault("random_state", 0)
+        # GPU if one is visible, else CPU -- an explicit xgb_params["device"]
+        # always wins. tree_method="hist" (the package default) runs on either.
+        params["device"] = resolve_device(params.get("device"))
+        logger.info("fitting XGBoostFusionModel on device=%s", params["device"])
         if self._auto_spw:
             pos = float((y == 1).sum())
             neg = float((y == 0).sum())
@@ -47,6 +59,7 @@ class XGBoostFusionModel(FusionModel):
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         assert self._model is not None, "fusion model not fitted"
+        self._model.set_params(device=resolve_device(self._device_override))
         return self._model.predict_proba(np.asarray(X, dtype=np.float32))[:, 1]
 
     def predict_contribs(self, X: np.ndarray) -> Optional[np.ndarray]:
@@ -55,6 +68,7 @@ class XGBoostFusionModel(FusionModel):
         assert self._model is not None, "fusion model not fitted"
         from xgboost import DMatrix
 
+        self._model.set_params(device=resolve_device(self._device_override))
         booster = self._model.get_booster()
         contribs = booster.predict(DMatrix(np.asarray(X, dtype=np.float32)), pred_contribs=True)
         return np.asarray(contribs, dtype=np.float64)
@@ -67,6 +81,11 @@ class XGBoostFusionModel(FusionModel):
     def load(cls, path: str) -> "XGBoostFusionModel":
         from xgboost import XGBClassifier
 
+        # Device is deliberately *not* resolved/set here: `load` is also used by
+        # `update` to re-save a fusion model verbatim (byte-identical, no refit),
+        # and set_params(device=...) would perturb save_model()'s output even
+        # though nothing about the trained model changed. It is instead resolved
+        # lazily in predict_proba/predict_contribs, right before it matters.
         obj = cls(params={}, auto_scale_pos_weight=False)
         model = XGBClassifier()
         model.load_model(path)
@@ -153,6 +172,10 @@ class XGBRankerFusionModel(FusionModel):
         self._params = dict(params)
         self._model: Any = None  # xgboost.XGBRanker
         self._iso: Optional[IsotonicRegression] = None
+        self._device_override: Optional[str] = None  # set via set_device(); None = auto-detect
+
+    def set_device(self, device: Optional[str]) -> None:
+        self._device_override = device
 
     def fit(self, X: np.ndarray, y: np.ndarray, *, groups: Optional[np.ndarray] = None) -> None:
         if groups is None:
@@ -169,6 +192,8 @@ class XGBRankerFusionModel(FusionModel):
         params = dict(self._params)
         params.setdefault("objective", "rank:pairwise")
         params.setdefault("random_state", 0)
+        params["device"] = resolve_device(params.get("device"))
+        logger.info("fitting XGBRankerFusionModel on device=%s", params["device"])
         self._model = XGBRanker(**params)
         self._model.fit(X, np.asarray(y), group=groups)
 
@@ -178,6 +203,7 @@ class XGBRankerFusionModel(FusionModel):
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         assert self._model is not None and self._iso is not None, "fusion model not fitted"
+        self._model.set_params(device=resolve_device(self._device_override))
         raw = np.asarray(self._model.predict(np.asarray(X, dtype=np.float32)), dtype=np.float64)
         return np.clip(self._iso.transform(raw), 0.0, 1.0)
 
@@ -192,6 +218,9 @@ class XGBRankerFusionModel(FusionModel):
     def load(cls, path: str) -> "XGBRankerFusionModel":
         from xgboost import XGBRanker
 
+        # See XGBoostFusionModel.load: device is deliberately left unresolved
+        # here (resolved lazily in predict_proba) so a load-then-resave (e.g.
+        # `update`, which reuses the fusion model verbatim) stays byte-identical.
         obj = cls(params={})
         model = XGBRanker()
         model.load_model(os.path.join(path, cls._MODEL_NAME))
