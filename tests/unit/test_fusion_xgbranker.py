@@ -143,6 +143,42 @@ def test_predict_before_fit_raises():
         XGBRankerFusionModel(_FAST).predict_proba(np.zeros((5, 3), dtype=np.float32))
 
 
+def test_save_writes_no_pickle_isotonic_head(tmp_path):
+    """T67: fresh saves persist the isotonic head as npz, not pickle."""
+    X, y, g = _grouped_data(n_groups=60)
+    m = XGBRankerFusionModel(_FAST)
+    m.fit(X, y, groups=g)
+    d = str(tmp_path / "fusion_ranker")
+    m.save(d)
+    import os
+
+    assert not os.path.isfile(os.path.join(d, "isotonic.pkl"))
+    assert os.path.isfile(os.path.join(d, XGBRankerFusionModel._ISO_NAME))
+
+
+def test_legacy_pickle_isotonic_head_loads_with_warning(tmp_path, caplog):
+    """A pre-T67 model dir has only isotonic.pkl; load() must still work."""
+    import logging
+    import os
+    import pickle
+
+    X, y, g = _grouped_data(n_groups=60)
+    m = XGBRankerFusionModel(_FAST)
+    m.fit(X, y, groups=g)
+    original = m.predict_proba(X)
+
+    d = str(tmp_path / "fusion_ranker")
+    os.makedirs(d, exist_ok=True)
+    m._model.save_model(os.path.join(d, XGBRankerFusionModel._MODEL_NAME))
+    with open(os.path.join(d, "isotonic.pkl"), "wb") as fh:
+        pickle.dump(m._iso, fh)
+
+    with caplog.at_level(logging.WARNING):
+        loaded = XGBRankerFusionModel.load(d).predict_proba(X)
+    np.testing.assert_allclose(original, loaded, atol=1e-6)
+    assert any("legacy pickle" in rec.message for rec in caplog.records)
+
+
 def test_registry_builds_xgbranker():
     model = build_fusion(FusionConfig(kind="xgbranker", params=dict(_FAST)))
     assert isinstance(model, XGBRankerFusionModel)

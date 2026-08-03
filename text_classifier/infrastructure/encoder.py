@@ -175,11 +175,14 @@ class TfidfEncoder(TextEncoder):
     dot product == cosine, honoring the core invariant; an empty or fully-OOV
     text maps to an all-zero (finite, never NaN) vector.
 
-    Persistence is a pickled fitted vectorizer — stdlib + sklearn only, no torch
-    and no download, so a model directory stays portable to an air-gapped host.
+    Persistence is the vocabulary + IDF weights (JSON + npz, no pickle) plus the
+    vectorizer kwargs — sklearn only, no torch and no download, so a model
+    directory stays portable to an air-gapped host and inert to load.
     """
 
-    _PICKLE_NAME = "tfidf.pkl"
+    _VOCAB_NAME = "tfidf_vocab.json"
+    _IDF_NAME = "tfidf_idf.npz"
+    _PICKLE_NAME = "tfidf.pkl"  # legacy fallback
 
     def __init__(self, vectorizer: Any = None, tfidf_kwargs: dict | None = None):
         self._vectorizer = vectorizer
@@ -209,14 +212,47 @@ class TfidfEncoder(TextEncoder):
 
     def save(self, directory: str) -> None:
         os.makedirs(directory, exist_ok=True)
-        with open(os.path.join(directory, self._PICKLE_NAME), "wb") as fh:
-            pickle.dump(self._vectorizer, fh)
+        vec = self._vectorizer
+        try:
+            json.dumps(self._kwargs)
+        except TypeError as exc:
+            raise ValueError(
+                f"TfidfEncoder's tfidf_kwargs must be JSON-serializable to persist "
+                f"without pickle; got {self._kwargs!r}"
+            ) from exc
+        vocab = {term: int(col) for term, col in vec.vocabulary_.items()}
+        with open(os.path.join(directory, self._VOCAB_NAME), "w") as fh:
+            json.dump({"vocabulary": vocab, "kwargs": self._kwargs}, fh)
+        with open(os.path.join(directory, self._IDF_NAME), "wb") as fh:
+            np.savez_compressed(fh, idf=vec.idf_)
 
     @classmethod
     def load(cls, directory: str, batch_size: int = 64, device=None) -> "TfidfEncoder":
         """Signature mirrors SentenceTransformerEncoder.load for registry parity."""
-        with open(os.path.join(directory, cls._PICKLE_NAME), "rb") as fh:
-            return cls(vectorizer=pickle.load(fh))
+        vocab_path = os.path.join(directory, cls._VOCAB_NAME)
+        idf_path = os.path.join(directory, cls._IDF_NAME)
+        if os.path.isfile(vocab_path) and os.path.isfile(idf_path):
+            from sklearn.feature_extraction.text import TfidfVectorizer
+
+            with open(vocab_path) as fh:
+                meta = json.load(fh)
+            vec = TfidfVectorizer(vocabulary=meta["vocabulary"], **meta["kwargs"])
+            with open(idf_path, "rb") as fh:
+                vec.idf_ = np.load(fh)["idf"]
+            return cls(vectorizer=vec, tfidf_kwargs=meta["kwargs"])
+        pkl_path = os.path.join(directory, cls._PICKLE_NAME)
+        if os.path.isfile(pkl_path):
+            logger.warning(
+                "loading legacy pickle artifact %r; re-save this model directory "
+                "to upgrade to the pickle-free format",
+                pkl_path,
+            )
+            with open(pkl_path, "rb") as fh:
+                return cls(vectorizer=pickle.load(fh))
+        raise FileNotFoundError(
+            f"no TF-IDF vectorizer found in {directory!r} "
+            f"(expected {cls._VOCAB_NAME}+{cls._IDF_NAME}, or legacy {cls._PICKLE_NAME})"
+        )
 
 
 class HashingEncoder(TextEncoder):

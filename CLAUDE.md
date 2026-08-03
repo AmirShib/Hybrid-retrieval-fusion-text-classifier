@@ -30,8 +30,10 @@ Dependency rule: `domain` imports no ML framework. `infrastructure` depends on `
   fusion model never trained on. Never let an item see itself in its own index.
 - **Embeddings are L2-normalized** so dot product == cosine. Encoders must preserve this.
 - **`LabelSpace` owns the canonical key↔index map.** Column `c` always means `key_at(c)`.
-- A trained **model directory must be portable** (stdlib pickle + numpy + json + native
-  XGBoost/SentenceTransformer formats only) — it ships to an air-gapped host.
+- A trained **model directory must be portable** (numpy + json + native
+  XGBoost/SentenceTransformer formats only; no pickle) — it ships to an air-gapped
+  host, so loading it must never execute embedded code. Directories saved before
+  this invariant still load via a legacy pickle fallback, with a warning.
 
 ## Commands
 - Offline smoke test (no network, no torch): `python -m scripts.demo`

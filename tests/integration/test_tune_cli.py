@@ -156,11 +156,11 @@ def test_meta_and_calibrator_change_other_artifacts_untouched(tmp_path):
     )
     after = _file_hashes(out)
 
-    for changed in ("calibrator.pkl", "meta.json", "evaluation.json", "model_card.md"):
+    for changed in ("calibrator.npz", "meta.json", "evaluation.json", "model_card.md"):
         assert before[changed] != after[changed], f"{changed} should have changed"
 
-    # everything else (encoder/, dense.npz, lexical.pkl, fusion file) untouched
-    untouched = set(before) - {"calibrator.pkl", "meta.json", "evaluation.json", "model_card.md"}
+    # everything else (encoder/, dense.npz, lexical.npz/.json, fusion file) untouched
+    untouched = set(before) - {"calibrator.npz", "meta.json", "evaluation.json", "model_card.md"}
     assert untouched, "expected other artifacts to exist"
     for path in untouched:
         assert before[path] == after[path], f"{path} should be byte-identical after retune"

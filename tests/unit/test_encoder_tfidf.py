@@ -82,6 +82,40 @@ def test_save_load_roundtrip_identical(tmp_path):
     np.testing.assert_allclose(before, after, atol=1e-6)
 
 
+def test_save_writes_no_pickle_file(tmp_path):
+    """T67: a fresh save contains no .pkl artifact."""
+    enc = _fitted()
+    d = tmp_path / "encoder"
+    enc.save(str(d))
+    assert not (d / TfidfEncoder._PICKLE_NAME).exists()
+    assert (d / TfidfEncoder._VOCAB_NAME).exists()
+    assert (d / TfidfEncoder._IDF_NAME).exists()
+    with open(d / TfidfEncoder._VOCAB_NAME) as fh:
+        import json
+
+        json.load(fh)  # must parse as JSON
+
+
+def test_legacy_pickle_fallback_loads_with_warning(tmp_path, caplog):
+    """A pre-T67 model dir has only tfidf.pkl; load() must still work."""
+    import logging
+    import pickle
+
+    enc = _fitted()
+    before = enc.encode(["apple banana", "grape kiwi lemon"])
+
+    d = tmp_path / "encoder"
+    d.mkdir()
+    with open(d / TfidfEncoder._PICKLE_NAME, "wb") as fh:
+        pickle.dump(enc._vectorizer, fh)
+
+    with caplog.at_level(logging.WARNING):
+        restored = TfidfEncoder.load(str(d))
+    after = restored.encode(["apple banana", "grape kiwi lemon"])
+    np.testing.assert_allclose(before, after, atol=1e-6)
+    assert any("legacy pickle" in rec.message for rec in caplog.records)
+
+
 # --------------------------------------------------------------------------- #
 # registry wiring
 # --------------------------------------------------------------------------- #

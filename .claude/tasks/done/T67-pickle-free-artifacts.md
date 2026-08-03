@@ -1,6 +1,6 @@
 # T67 — Pickle-free model artifacts (loading a model dir must not execute code)
 
-status: todo
+status: done
 tier: 6
 depends_on: T60
 

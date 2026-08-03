@@ -269,6 +269,64 @@ def test_lexical_description_score_shape(lex_env):
     assert sm.shape == (2, label_space.size)
 
 
+# --------------------------------------------------------------- persistence (T67)
+def test_bm25_state_roundtrip_reproduces_scores():
+    texts = ["apple apple fruit", "orange fruit", "salmon fish ocean", "eagle falcon sky"]
+    idx = BM25Index(1.5, 0.75).fit(texts)
+    queries = ["apple orange", "salmon", "falcon eagle sky", "unseen gibberish"]
+    before = idx.score_matrix(queries)
+
+    arrays, meta = idx.to_state()
+    restored = BM25Index.from_state(arrays, meta)
+    after = restored.score_matrix(queries)
+
+    npt.assert_array_equal(before, after)
+    assert restored.k1 == idx.k1 and restored.b == idx.b and restored.n_docs == idx.n_docs
+
+
+def test_bm25_state_rejects_non_json_clean_cv_kwargs():
+    idx = BM25Index(1.5, 0.75, analyzer=lambda t: t.split())
+    idx.fit(["a b c", "d e f"])
+    with pytest.raises(ValueError):
+        idx.to_state()
+
+
+def test_lexical_adapter_state_roundtrip_reproduces_everything(lex_env):
+    adapter, label_space, _ = lex_env
+    queries = ["apple orange", "salmon trout", "eagle sky", "gibberish unseen"]
+
+    before_desc = adapter.description_score(queries)
+    before_knn = adapter.knn_example_labels(queries, k=2)
+
+    arrays, meta = adapter.to_state()
+    restored = LexicalRetrieverAdapter.from_state(arrays, meta)
+
+    npt.assert_array_equal(restored.description_score(queries), before_desc)
+    after_labels, after_scores = restored.knn_example_labels(queries, k=2)
+    npt.assert_array_equal(after_labels, before_knn[0])
+    npt.assert_array_equal(after_scores, before_knn[1])
+
+
+def test_lexical_adapter_state_roundtrip_via_npz(lex_env, tmp_path):
+    """The exact round-trip persistence.py performs: pack to npz, reload from disk."""
+    adapter, _, _ = lex_env
+    queries = ["apple orange", "salmon trout"]
+    before = adapter.description_score(queries)
+
+    arrays, meta = adapter.to_state()
+    npz_path = tmp_path / "lexical.npz"
+    np.savez_compressed(npz_path, **arrays)
+    import json
+
+    json_path = tmp_path / "lexical.json"
+    json_path.write_text(json.dumps(meta))
+
+    loaded_arrays = dict(np.load(npz_path))
+    loaded_meta = json.loads(json_path.read_text())
+    restored = LexicalRetrieverAdapter.from_state(loaded_arrays, loaded_meta)
+    npt.assert_array_equal(restored.description_score(queries), before)
+
+
 def test_lexical_description_score_values_plausible(lex_env):
     adapter, label_space, _ = lex_env
     sm = adapter.description_score(["apple fruit"])

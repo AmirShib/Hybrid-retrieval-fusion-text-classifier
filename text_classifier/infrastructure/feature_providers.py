@@ -120,8 +120,9 @@ class ClassKeywordOverlapProvider(FeatureProvider):
     # --------------------------------------------------------------- persistence
     def save(self, path: str) -> None:
         """Persist to directory ``path``. Portable: stdlib pickle over a fitted
-        ``CountVectorizer`` + ``scipy`` sparse membership (same dependency surface
-        the shipped ``lexical.pkl`` already relies on)."""
+        ``CountVectorizer`` + ``scipy`` sparse membership. Unlike the built-in
+        lexical/calibrator/encoder artifacts (pickle-free since T67), a custom
+        feature provider may still use pickle for its own persistence."""
         os.makedirs(path, exist_ok=True)
         with open(os.path.join(path, "provider.pkl"), "wb") as fh:
             pickle.dump(self, fh)

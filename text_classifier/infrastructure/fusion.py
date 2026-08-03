@@ -14,6 +14,7 @@ base class and tend to be more robust than isotonic on a small calibration fold.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import pickle
@@ -27,6 +28,33 @@ from ..domain import ConfidenceCalibrator, FusionModel
 from .device import resolve_device
 
 logger = logging.getLogger(__name__)
+
+
+def _legacy_path(path: str) -> str:
+    """The pre-T67 pickle path for an artifact now saved at ``path``."""
+    return os.path.splitext(path)[0] + ".pkl"
+
+
+def _save_npz(path: str, **arrays: np.ndarray) -> None:
+    # np.savez_compressed appends ".npz" to `path` unless it already ends in
+    # that suffix; writing through an open file handle instead saves to the
+    # exact path the caller (the component registry) asked for.
+    with open(path, "wb") as fh:
+        np.savez_compressed(fh, **arrays)
+
+
+def _load_npz(path: str) -> Dict[str, np.ndarray]:
+    with open(path, "rb") as fh:
+        return dict(np.load(fh))
+
+
+def _isotonic_from_breakpoints(x_thresholds: np.ndarray, y_thresholds: np.ndarray) -> IsotonicRegression:
+    """Rebuild a fitted IsotonicRegression from its own breakpoints: fitting on
+    the breakpoints reproduces the interpolant exactly, so this is an exact
+    (not approximate) reload."""
+    iso = IsotonicRegression(out_of_bounds="clip")
+    iso.fit(x_thresholds, y_thresholds)
+    return iso
 
 
 class XGBoostFusionModel(FusionModel):
@@ -96,11 +124,22 @@ class XGBoostFusionModel(FusionModel):
 class LightGBMFusionModel(FusionModel):
     """Pointwise gradient-boosting fusion on LightGBM (optional dependency).
 
-    Mirrors XGBoostFusionModel's contract, including native NaN-as-missing and
-    `auto_scale_pos_weight` for imbalance. Persists via LightGBM's portable native
-    text model format. Prediction goes through the trained Booster so save/load is
-    exact.
+    Mirrors XGBoostFusionModel's contract, including native NaN-as-missing,
+    `auto_scale_pos_weight` for imbalance, and GPU auto-detection via
+    ``resolve_device``. Persists via LightGBM's portable native text model
+    format. Prediction goes through the trained Booster so save/load is exact.
+
+    GPU is a build-time feature for LightGBM's official PyPI wheel (unlike
+    XGBoost's, which ships CUDA support by default): a host with a visible GPU
+    can still have a CPU-only LightGBM install. So unlike ``XGBoostFusionModel``,
+    an *auto-detected* GPU that the installed LightGBM build rejects falls back
+    to CPU with a warning instead of failing the run; an *explicit*
+    ``xgb_params={"device": "cuda"}`` (checked before ``resolve_device`` runs)
+    is a deliberate user choice and is left to fail loudly, matching every
+    other explicit-device path in this package.
     """
+
+    _BUILD_UNSUPPORTED = "Tree Learner was not enabled in this build"
 
     def __init__(self, params: Dict[str, Any], auto_scale_pos_weight: bool = True):
         self._params = dict(params)
@@ -110,6 +149,7 @@ class LightGBMFusionModel(FusionModel):
 
     def fit(self, X: np.ndarray, y: np.ndarray, *, groups: Optional[np.ndarray] = None) -> None:
         from lightgbm import LGBMClassifier
+        from lightgbm.basic import LightGBMError
 
         params = dict(self._params)
         params.setdefault("verbosity", -1)
@@ -119,8 +159,27 @@ class LightGBMFusionModel(FusionModel):
             neg = float((y == 0).sum())
             self._scale_pos_weight = (neg / pos) if pos > 0 else 1.0
             params["scale_pos_weight"] = self._scale_pos_weight
-        model = LGBMClassifier(**params)
-        model.fit(np.asarray(X, dtype=np.float32), np.asarray(y))
+        explicit_device = params.get("device")
+        params["device"] = resolve_device(explicit_device)
+        logger.info("fitting LightGBMFusionModel on device=%s", params["device"])
+
+        X = np.asarray(X, dtype=np.float32)
+        y = np.asarray(y)
+        try:
+            model = LGBMClassifier(**params)
+            model.fit(X, y)
+        except LightGBMError as exc:
+            if explicit_device is not None or self._BUILD_UNSUPPORTED not in str(exc):
+                raise
+            logger.warning(
+                "installed LightGBM was not built with GPU support (device=%r "
+                "auto-detected); falling back to device=cpu for this fit. Install "
+                "a GPU-enabled LightGBM build to use the detected GPU.",
+                params["device"],
+            )
+            params["device"] = "cpu"
+            model = LGBMClassifier(**params)
+            model.fit(X, y)
         self._booster = model.booster_
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
@@ -157,14 +216,14 @@ class XGBRankerFusionModel(FusionModel):
     [0, 1] to satisfy `predict_proba`. Requires a per-query `groups` array at fit
     time (one count per item, summing to len(X)); raises if it is missing.
 
-    Persists to a directory: the native XGBoost model plus the pickled isotonic
-    head, so save/load round-trips exactly.
+    Persists to a directory: the native XGBoost model plus the isotonic head's
+    breakpoints (npz), so save/load round-trips exactly with no pickle.
     """
 
     NEEDS_GROUPS = True
 
     _MODEL_NAME = "ranker.ubj"
-    _ISO_NAME = "isotonic.pkl"
+    _ISO_NAME = "isotonic.npz"
 
     def __init__(self, params: Dict[str, Any], auto_scale_pos_weight: bool = True):
         # auto_scale_pos_weight is accepted for signature parity but unused: a
@@ -211,8 +270,11 @@ class XGBRankerFusionModel(FusionModel):
         assert self._model is not None and self._iso is not None
         os.makedirs(path, exist_ok=True)
         self._model.save_model(os.path.join(path, self._MODEL_NAME))
-        with open(os.path.join(path, self._ISO_NAME), "wb") as fh:
-            pickle.dump(self._iso, fh)
+        _save_npz(
+            os.path.join(path, self._ISO_NAME),
+            X_thresholds=self._iso.X_thresholds_,
+            y_thresholds=self._iso.y_thresholds_,
+        )
 
     @classmethod
     def load(cls, path: str) -> "XGBRankerFusionModel":
@@ -225,8 +287,19 @@ class XGBRankerFusionModel(FusionModel):
         model = XGBRanker()
         model.load_model(os.path.join(path, cls._MODEL_NAME))
         obj._model = model
-        with open(os.path.join(path, cls._ISO_NAME), "rb") as fh:
-            obj._iso = pickle.load(fh)
+        iso_path = os.path.join(path, cls._ISO_NAME)
+        if os.path.isfile(iso_path):
+            data = _load_npz(iso_path)
+            obj._iso = _isotonic_from_breakpoints(data["X_thresholds"], data["y_thresholds"])
+        else:
+            legacy = os.path.join(path, "isotonic.pkl")
+            logger.warning(
+                "loading legacy pickle artifact %r; re-save this model directory "
+                "to upgrade to the pickle-free format",
+                legacy,
+            )
+            with open(legacy, "rb") as fh:
+                obj._iso = pickle.load(fh)
         return obj
 
 
@@ -243,15 +316,26 @@ class IsotonicCalibrator(ConfidenceCalibrator):
         return self._iso.transform(np.asarray(scores, dtype=np.float64))
 
     def save(self, path: str) -> None:
-        with open(path, "wb") as fh:
-            pickle.dump(self._iso, fh)
+        _save_npz(path, X_thresholds=self._iso.X_thresholds_, y_thresholds=self._iso.y_thresholds_)
 
     @classmethod
     def load(cls, path: str) -> "IsotonicCalibrator":
         obj = cls()
-        with open(path, "rb") as fh:
-            obj._iso = pickle.load(fh)
-        return obj
+        if os.path.isfile(path):
+            data = _load_npz(path)
+            obj._iso = _isotonic_from_breakpoints(data["X_thresholds"], data["y_thresholds"])
+            return obj
+        legacy = _legacy_path(path)
+        if os.path.isfile(legacy):
+            logger.warning(
+                "loading legacy pickle artifact %r; re-save this model directory "
+                "to upgrade to the pickle-free format",
+                legacy,
+            )
+            with open(legacy, "rb") as fh:
+                obj._iso = pickle.load(fh)
+            return obj
+        raise FileNotFoundError(f"calibrator artifact not found: {path!r} (legacy {legacy!r} also missing)")
 
 
 class _ParametricCalibrator(ConfidenceCalibrator):
@@ -293,17 +377,49 @@ class _ParametricCalibrator(ConfidenceCalibrator):
         return np.clip(p, 0.0, 1.0)
 
     def save(self, path: str) -> None:
-        with open(path, "wb") as fh:
-            pickle.dump({"lr": self._lr, "constant": self._constant}, fh)
+        if self._lr is not None:
+            fitted = {
+                "coef": self._lr.coef_.tolist(),
+                "intercept": self._lr.intercept_.tolist(),
+                "classes": self._lr.classes_.tolist(),
+            }
+        else:
+            fitted = None
+        with open(path, "w") as fh:
+            json.dump({"fitted": fitted, "constant": self._constant}, fh)
 
     @classmethod
     def load(cls, path: str) -> "_ParametricCalibrator":
         obj = cls()
-        with open(path, "rb") as fh:
-            state = pickle.load(fh)
-        obj._lr = state["lr"]
-        obj._constant = state["constant"]
-        return obj
+        if os.path.isfile(path):
+            with open(path) as fh:
+                state = json.load(fh)
+            obj._constant = state["constant"]
+            fitted = state["fitted"]
+            if fitted is not None:
+                # These three fitted attributes have been stable in scikit-learn
+                # for a decade; setting them directly avoids re-fitting (and thus
+                # reproduces the saved decision boundary exactly).
+                lr = LogisticRegression(max_iter=1000)
+                lr.coef_ = np.array(fitted["coef"])
+                lr.intercept_ = np.array(fitted["intercept"])
+                lr.classes_ = np.array(fitted["classes"])
+                lr.n_features_in_ = lr.coef_.shape[1]
+                obj._lr = lr
+            return obj
+        legacy = _legacy_path(path)
+        if os.path.isfile(legacy):
+            logger.warning(
+                "loading legacy pickle artifact %r; re-save this model directory "
+                "to upgrade to the pickle-free format",
+                legacy,
+            )
+            with open(legacy, "rb") as fh:
+                state = pickle.load(fh)
+            obj._lr = state["lr"]
+            obj._constant = state["constant"]
+            return obj
+        raise FileNotFoundError(f"calibrator artifact not found: {path!r} (legacy {legacy!r} also missing)")
 
 
 class PlattCalibrator(_ParametricCalibrator):

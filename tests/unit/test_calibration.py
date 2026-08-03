@@ -115,6 +115,37 @@ class TestParametricCalibrators:
         cal.save(path)
         np.testing.assert_allclose(original, cls.load(path).transform(scores), atol=1e-6)
 
+    def test_save_writes_json_not_pickle(self, cls, tmp_path):
+        """T67: fresh saves are inert JSON, not a pickle stream."""
+        cal, scores = self._fit_monotone(cls)
+        path = str(tmp_path / "calibrator.json")
+        cal.save(path)
+        with open(path, "rb") as fh:
+            head = fh.read(1)
+        assert head != b"\x80"  # 0x80 is pickle's PROTO opcode; JSON never starts with it
+        import json
+
+        with open(path) as fh:
+            json.load(fh)  # must parse as JSON
+
+    def test_legacy_pickle_fallback_loads_with_warning(self, cls, tmp_path, caplog):
+        """A pre-T67 model dir has only calibrator.pkl; load() must still work."""
+        import logging
+        import pickle
+
+        cal, scores = self._fit_monotone(cls)
+        original = cal.transform(scores)
+
+        legacy_path = tmp_path / "calibrator.pkl"
+        with open(legacy_path, "wb") as fh:
+            pickle.dump({"lr": cal._lr, "constant": cal._constant}, fh)
+
+        new_path = str(tmp_path / "calibrator.json")  # does not exist
+        with caplog.at_level(logging.WARNING):
+            loaded = cls.load(new_path)
+        np.testing.assert_allclose(original, loaded.transform(scores), atol=1e-6)
+        assert any("legacy pickle" in rec.message for rec in caplog.records)
+
 
 # --------------------------------------------------------------------------- #
 # Registry wiring

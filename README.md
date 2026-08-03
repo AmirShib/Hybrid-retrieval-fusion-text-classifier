@@ -399,7 +399,7 @@ text-classifier-tune --model model_dir/ --input fresh_labeled.csv \
 # --dry-run prints the would-be coverage/accuracy/thresholds and writes nothing
 ```
 
-This updates `calibrator.pkl` and `meta.json`'s abstention block in place, and
+This updates the calibrator file and `meta.json`'s abstention block in place, and
 writes a fresh `evaluation.json`/`model_card.md` reflecting the new operating
 point (with a `retunes` provenance entry recording when and on how many items).
 

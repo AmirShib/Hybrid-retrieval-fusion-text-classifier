@@ -1,14 +1,18 @@
-"""Persistence: writes/reads a self-contained model directory. Uses only stdlib
-pickle + numpy + json so there is no extra dependency and the directory is
-portable to the air-gapped host.
+"""Persistence: writes/reads a self-contained model directory. Uses only numpy +
+json + native model formats (no pickle) so a directory loaded on the air-gapped
+host is inert data, never attacker-controlled code. Directories written before
+this change fall back to a legacy pickle loader (with a warning) for the one or
+two files that used to be pickled.
 
 Layout:
     <dir>/encoder/         SentenceTransformer.save() output (+ encoder_training.json:
                            the per-epoch table when a fine-tune selected its best epoch)
     <dir>/dense.npz        dense retriever numeric state
-    <dir>/lexical.pkl      pickled LexicalRetrieverAdapter (vectorizers + BM25 weights)
+    <dir>/lexical.npz      BM25 weight matrices + example labels (see lexical.json)
+    <dir>/lexical.json     BM25 vocab/analyzer config + scalars, pairs with lexical.npz
     <dir>/fusion.json      XGBoost model
-    <dir>/calibrator.pkl   calibrator (isotonic | platt | beta)
+    <dir>/calibrator.npz   isotonic calibrator breakpoints (kind == "isotonic")
+    <dir>/calibrator.json  parametric calibrator coefficients (kind in platt|beta)
     <dir>/meta.json        label space, thresholds, config, feature schema
     <dir>/corpus.jsonl.gz  optional: raw training corpus (text+label), see TrainingConfig.store_corpus
 """
@@ -155,8 +159,10 @@ class ArtifactRepository:
             description_emb=s.description_emb,
             class_freq=s.class_freq,
         )
-        with open(os.path.join(directory, "lexical.pkl"), "wb") as fh:
-            pickle.dump(artifacts.lexical, fh)
+        arrays, lex_meta = artifacts.lexical.to_state()
+        np.savez_compressed(os.path.join(directory, "lexical.npz"), **arrays)
+        with open(os.path.join(directory, "lexical.json"), "w") as fh:
+            json.dump(lex_meta, fh)
 
         artifacts.fusion.save(os.path.join(directory, fus_spec.filename))
         artifacts.calibrator.save(os.path.join(directory, cal_spec.filename))
@@ -245,8 +251,9 @@ class ArtifactRepository:
         ``update`` can add labeled examples without needing
         ``--base-items``: appending examples to BM25 requires refitting on the
         *full* corpus (its IDF is corpus-global), and the model dir otherwise
-        keeps no raw text at all (``dense.npz`` is embeddings, ``lexical.pkl``
-        a fitted vectorizer). Opt out via ``TrainingConfig.store_corpus=False``."""
+        keeps no raw text at all (``dense.npz`` is embeddings, ``lexical.npz``/
+        ``.json`` a fitted vectorizer's numeric state). Opt out via
+        ``TrainingConfig.store_corpus=False``."""
         path = os.path.join(directory, "corpus.jsonl.gz")
         with gzip.open(path, "wt", encoding="utf-8") as fh:
             for it in items:
@@ -293,6 +300,31 @@ class ArtifactRepository:
             meta["retunes"] = list(prior_meta["retunes"]) + list(meta.get("retunes", []))
         with open(target_meta_path, "w") as fh:
             json.dump(meta, fh, indent=2)
+
+    @staticmethod
+    def _load_lexical(directory: str) -> LexicalRetrieverAdapter:
+        """Load ``lexical.npz``/``.json``, falling back to a legacy ``lexical.pkl``
+        (with a warning) for a model directory saved before this format existed."""
+        npz_path = os.path.join(directory, "lexical.npz")
+        json_path = os.path.join(directory, "lexical.json")
+        if os.path.isfile(npz_path) and os.path.isfile(json_path):
+            arrays = dict(np.load(npz_path))
+            with open(json_path) as fh:
+                meta = json.load(fh)
+            return LexicalRetrieverAdapter.from_state(arrays, meta)
+        pkl_path = os.path.join(directory, "lexical.pkl")
+        if os.path.isfile(pkl_path):
+            log.warning(
+                "loading legacy pickle artifact %r; re-save this model directory "
+                "to upgrade to the pickle-free format",
+                pkl_path,
+            )
+            with open(pkl_path, "rb") as fh:
+                return pickle.load(fh)
+        raise FileNotFoundError(
+            f"no lexical index found in {directory!r} "
+            f"(expected lexical.npz+.json, or legacy lexical.pkl)"
+        )
 
     @staticmethod
     def _save_providers(
@@ -396,8 +428,7 @@ class ArtifactRepository:
             ),
             chunk=config.retrieval.dense_chunk,
         )
-        with open(os.path.join(directory, "lexical.pkl"), "rb") as fh:
-            lexical: LexicalRetrieverAdapter = pickle.load(fh)
+        lexical = self._load_lexical(directory)
 
         fusion = fus_spec.load(os.path.join(directory, fus_spec.filename))
         fusion.set_device(device)

@@ -12,8 +12,9 @@ query-chunked cosine mat-mul.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
-from typing import Any, Sequence, Tuple
+from typing import Any, Dict, Sequence, Tuple
 
 import numpy as np
 from scipy import sparse
@@ -126,6 +127,52 @@ class BM25Index:
             return _exclude_self(out_idx, out_score, exclude, k)
         return out_idx, out_score
 
+    def to_state(self) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
+        """Split this index into npz-able arrays and a JSON-clean meta dict.
+
+        ``cv_kwargs`` must itself be JSON-clean (str/int/float/bool/list/dict of
+        those) — a custom callable analyzer can't round-trip through this format
+        (it never round-tripped safely under pickle-by-value semantics either)."""
+        try:
+            json.dumps(self.cv_kwargs)
+        except TypeError as exc:
+            raise ValueError(
+                f"BM25Index.cv_kwargs must be JSON-serializable to persist without "
+                f"pickle; got {self.cv_kwargs!r}"
+            ) from exc
+        Wt = self._Wt.tocsr()
+        arrays = {
+            "Wt_data": Wt.data.astype(np.float32),
+            "Wt_indices": Wt.indices.astype(np.int64),
+            "Wt_indptr": Wt.indptr.astype(np.int64),
+        }
+        meta = {
+            "Wt_shape": list(Wt.shape),
+            "k1": self.k1,
+            "b": self.b,
+            "n_docs": self.n_docs,
+            "cv_kwargs": self.cv_kwargs,
+            "vocabulary": {term: int(col) for term, col in self.vectorizer.vocabulary_.items()},
+        }
+        return arrays, meta
+
+    @classmethod
+    def from_state(cls, arrays: Dict[str, np.ndarray], meta: Dict[str, Any]) -> "BM25Index":
+        obj = cls(meta["k1"], meta["b"], **meta["cv_kwargs"])
+        obj.n_docs = meta["n_docs"]
+        # A fixed vocabulary means CountVectorizer.transform() works without a
+        # prior fit() call, so this reproduces fit()'s analyzer exactly.
+        # `_validate_vocabulary()` eagerly populates `vocabulary_` (otherwise it
+        # is set lazily on first transform()), so a from_state() index that is
+        # immediately re-persisted without ever scoring a query still has it.
+        obj.vectorizer = CountVectorizer(vocabulary=meta["vocabulary"], **meta["cv_kwargs"])
+        obj.vectorizer._validate_vocabulary()
+        shape = tuple(meta["Wt_shape"])
+        obj._Wt = sparse.csr_matrix(
+            (arrays["Wt_data"], arrays["Wt_indices"], arrays["Wt_indptr"]), shape=shape
+        )
+        return obj
+
 
 # ----------------------------------------------------------------- lexical adapter
 class LexicalRetrieverAdapter(LexicalRetriever):
@@ -174,6 +221,29 @@ class LexicalRetrieverAdapter(LexicalRetriever):
         old = self._descriptions
         desc = BM25Index(old.k1, old.b, **old.cv_kwargs).fit(all_descriptions)
         return LexicalRetrieverAdapter(self._examples, self._labels, desc, self._k_chunk)
+
+    def to_state(self) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
+        """Split this adapter into npz-able arrays and a JSON-clean meta dict,
+        prefixing each BM25 sub-index's arrays so both pack into one npz file."""
+        ex_arrays, ex_meta = self._examples.to_state()
+        desc_arrays, desc_meta = self._descriptions.to_state()
+        arrays: Dict[str, np.ndarray] = {f"examples_{k}": v for k, v in ex_arrays.items()}
+        arrays.update({f"descriptions_{k}": v for k, v in desc_arrays.items()})
+        arrays["example_labels"] = self._labels
+        meta = {"examples": ex_meta, "descriptions": desc_meta, "k_chunk": self._k_chunk}
+        return arrays, meta
+
+    @classmethod
+    def from_state(
+        cls, arrays: Dict[str, np.ndarray], meta: Dict[str, Any]
+    ) -> "LexicalRetrieverAdapter":
+        ex_arrays = {k[len("examples_") :]: v for k, v in arrays.items() if k.startswith("examples_")}
+        desc_arrays = {
+            k[len("descriptions_") :]: v for k, v in arrays.items() if k.startswith("descriptions_")
+        }
+        ex = BM25Index.from_state(ex_arrays, meta["examples"])
+        desc = BM25Index.from_state(desc_arrays, meta["descriptions"])
+        return cls(ex, arrays["example_labels"], desc, meta["k_chunk"])
 
 
 # ------------------------------------------------------------------- dense adapter

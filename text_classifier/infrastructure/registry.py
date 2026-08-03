@@ -262,7 +262,7 @@ register_calibrator(
     "isotonic",
     CalibratorSpec(
         build=lambda cfg: IsotonicCalibrator(),
-        filename="calibrator.pkl",
+        filename="calibrator.npz",
         load=IsotonicCalibrator.load,
     ),
 )
@@ -271,7 +271,7 @@ register_calibrator(
     "platt",
     CalibratorSpec(
         build=lambda cfg: PlattCalibrator(),
-        filename="calibrator.pkl",
+        filename="calibrator.json",
         load=PlattCalibrator.load,
     ),
 )
@@ -280,7 +280,7 @@ register_calibrator(
     "beta",
     CalibratorSpec(
         build=lambda cfg: BetaCalibrator(),
-        filename="calibrator.pkl",
+        filename="calibrator.json",
         load=BetaCalibrator.load,
     ),
 )
