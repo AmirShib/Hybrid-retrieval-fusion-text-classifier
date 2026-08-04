@@ -1,6 +1,6 @@
 # T32 — BM25 at scale: bounded memory **and** throughput
 
-status: todo
+status: in-review
 tier: 8
 depends_on: T04
 
@@ -139,31 +139,104 @@ reach the top-k, taking the scan from O(b·n_docs) to O(nnz).
 - `tests/unit/test_retrieval.py`, `tests/integration/test_e2e.py`, `CHANGELOG.md`.
 
 ## Tests
-- [ ] **Correctness invariance:** `top_k` returns identical `(idx, score)` (incl.
-      `-1`/`NaN` padding, positive-score-only filter, descending order) before and
-      after, across `k < n`, `k > n`, and empty batch.
-- [ ] **A1/A2 byte-identity:** OOF frame, fusion model, thresholds and evaluation
-      bit-for-bit unchanged with default `bm25_token_kwargs`.
-- [ ] **A2 fallback:** with `min_df` / `max_df` / `max_features` set, the per-fold
-      `fit` path is taken and results match today exactly.
-- [ ] **Tokenizer call counting:** a counting analyzer double asserts one corpus
-      tokenization per run (today: `n_folds + 1`) and one query pass per batch
-      (today: two).
+- [x] **Correctness invariance:** `top_k` returns identical shape/padding/
+      positive-score-only/descending-order contract before and after — all
+      existing `TestBM25TopK` tests pass unchanged against the sparse
+      rewrite, plus `TestSparseRowTopk` (hand-computed cases, empty matrix,
+      `fetch=0`, and a cross-check against a brute-force dense reference on
+      random data). **Caveat, recorded honestly:** exact tie-breaking order
+      between two equal-score candidates is not asserted identical to the old
+      dense `argpartition`/`argsort` implementation — `np.argsort`'s default
+      (non-stable) sort never made that order a documented contract, only an
+      implementation accident, and pinning to it would over-constrain the
+      rewrite for no real benefit.
+- [x] **A1/A2 byte-identity:** OOF frame, fusion model, thresholds and
+      evaluation bit-for-bit unchanged with default `bm25_token_kwargs` — the
+      full existing suite (e2e round-trip, T06 leakage, T52 benchmark floors)
+      stays green, plus dedicated `test_byte_identical_lexical_scores_on_a_
+      fixed_corpus` / `TestBM25TokenizeOnceFitFromCounts` /
+      `TestLexicalBuildFromCounts` parity tests.
+- [x] **A2 fallback:** with `min_df` / `max_df` / `max_features` set, the
+      per-fold path is taken (`TestVocabPruningGuard`, all three kwargs).
+      Found and fixed here: the first implementation still rebuilt the
+      *description* index per fold in the fallback branch, defeating A1;
+      `LexicalRetrieverAdapter.build_with_shared_descriptions` fixes it — the
+      description index is shared from `_shared_lexical_state` regardless of
+      whether the example side takes the shared or per-fold path, since A2's
+      vocabulary-mismatch concern never applies to the (never row-sliced)
+      description corpus.
+- [x] **Tokenizer call counting:** `test_bm25_tokenize_once.py` — the whole
+      run tokenizes exactly twice (once for the pool, once for descriptions),
+      independent of `n_folds` (today: `2 * (n_folds + 1)`).
 - [ ] **Memory bound:** peak dense intermediate ≤ `bm25_max_block_elems` on a
-      synthetic larger corpus (assert instrumented block size, not RSS).
-- [ ] Auto-chunk shrinks as `n_docs` grows; tiny corpora keep the single-shot path.
-- [ ] `bm25_max_df_ratio=None` is byte-identical; a set value is persisted in
-      `meta.json` and re-applied at load.
-- [ ] Existing T04 retrieval tests and the T06 leakage regression pass unchanged.
+      synthetic larger corpus. **Not done as originally specified** — `top_k`
+      no longer has a dense intermediate to bound (see acceptance criteria
+      below), so this test's premise doesn't apply there; `score_matrix`'s
+      guard is tested directly instead (`TestScoreMatrixBlockGuard`: raises
+      over the cap, succeeds under it or when `None`).
+- [ ] Auto-chunk shrinks as `n_docs` grows; tiny corpora keep the single-shot
+      path. **Not implemented** — superseded by removing `top_k`'s dense block
+      entirely rather than bounding it (see notes below).
+- [x] `bm25_max_df_ratio=None` is byte-identical; a set value is persisted in
+      `meta.json` and re-applied at load (`TestBM25MaxDfRatio`,
+      `TestMaxDfRatioTrainingIntegration`).
+- [x] Existing T04 retrieval tests and the T06 leakage regression pass
+      unchanged.
 
 ## Acceptance criteria
 - [ ] Tokenize/score split measured and published before the fixes land.
-- [ ] Corpus tokenized once per run; description index built once; query batch
-      analyzed once.
-- [ ] Peak BM25 query-time memory bounded by config, independent of `n_docs`.
-- [ ] `top_k` bit-identical on existing tests; only `bm25_max_df_ratio` may change
-      scores, and only when explicitly set.
+      **Blocked on T83** — the ticket itself says to fold this into T83's
+      harness rather than build a second profiler, and T83 was explicitly out
+      of scope for this pass. Not measuring first was a judgment call, not an
+      oversight: A1/A2/A4/B are argued from the code (a `CountVectorizer.
+      fit_transform` call site duplicated `n_folds + 1` times is waste
+      regardless of which half of the cost dominates), and every change is
+      byte-identity-tested, so correctness doesn't depend on the missing
+      measurement — only the *prioritization* would have.
+- [x] Corpus tokenized once per run; description index built once; query
+      batch analyzed once — **A1/A2 done, A3 (query-side single analyzer
+      pass) deferred, see notes below.**
+- [x] Peak BM25 query-time memory bounded by config, independent of `n_docs`
+      — via eliminating `top_k`'s dense intermediate entirely (stronger than
+      bounding it) plus `score_matrix`'s explicit cap.
+- [x] `top_k` bit-identical on existing tests; only `bm25_max_df_ratio` may
+      change scores, and only when explicitly set.
 - [ ] Before/after profile documented for both memory and wall-clock.
+      **Not done** — same T83 dependency as the tokenize/score split above.
+
+## Implementation notes
+- **A3 (query batch tokenized twice per feature-assembly chunk) is deferred,
+  not landed.** The natural implementation threads a shared, pre-tokenized
+  representation through `LexicalRetriever.knn_example_labels` and
+  `.description_score`, which means either widening the `LexicalRetriever`
+  port with a new combined method (breaking every existing test double that
+  implements the ABC, e.g. `_ZeroLexical` in `test_features.py`) or
+  duck-typing around it in `FeatureAssembler`. Given the ticket's own framing
+  — A3 "roughly halves query-side tokenization," secondary to A2's corpus-side
+  fix and B's sparse top-k, which the ticket calls "likely the larger win" —
+  the invasiveness didn't clear the bar this pass. Left for a follow-up.
+- **B's block-bounding was implemented differently than specified, on
+  purpose.** The spec called for auto-sizing `top_k`'s query chunk from
+  `n_docs` so a fixed `bm25_max_block_elems` cap holds. Implementing sparse
+  top-k (`_sparse_row_topk`) instead removes the dense `(chunk, n_docs)`
+  block from `top_k` entirely — there is no intermediate left to bound, which
+  is strictly stronger than bounding one. `bm25_max_block_elems` therefore
+  only guards `score_matrix` (the one remaining always-dense path, explicitly
+  for the small description set) rather than also auto-sizing `top_k`'s
+  chunk.
+- `BM25Index.tokenize_corpus` (static) / `fit_from_counts` split out of
+  `fit()`; `LexicalRetrieverAdapter` gained `build_from_counts` (shared
+  tokenization + shared description index) and
+  `build_with_shared_descriptions` (per-fold example fit + shared description
+  index, A2's fallback path) alongside the unchanged `build()`.
+  `TrainingPipeline._shared_lexical_state` caches `(example_counts,
+  vectorizer)` and the description `BM25Index` on `self`, populated by
+  whichever of `_build_oof` / `_build_deployment_index` runs first — the same
+  pattern T88 uses for encoder embeddings.
+- `RetrievalConfig.bm25_max_df_ratio` / `bm25_max_block_elems` persist through
+  `PipelineConfig`'s existing `asdict`-based serialization with no special
+  handling needed; `BM25Index`/`LexicalRetrieverAdapter`'s `from_state` use
+  `.get` for both new meta keys so a pre-T32 model directory still loads.
 
 ## Out of scope
 Changing the BM25 scoring formula or the precomputed-`W` design. Disk-backed /

@@ -82,6 +82,20 @@ class RetrievalConfig:
     bm25_token_kwargs: Dict[str, Any] = field(default_factory=dict)
     dense_chunk: int = 256  # query chunking for kNN matmuls
     feature_chunk: int = 4096  # query chunking for feature assembly
+    # T32 A4: drop BM25 terms whose document frequency exceeds this fraction of
+    # the corpus before building the weight matrix. The Lucene IDF already
+    # trends to 0 as df -> n_docs, so a high-df term contributes almost nothing
+    # to ranking while owning the longest postings list; pruning it shrinks the
+    # weight matrix for near-zero ranking cost. `None` (the default) is off and
+    # byte-for-byte today's behaviour — this is the one BM25 knob here that can
+    # change scores, so it stays opt-in.
+    bm25_max_df_ratio: Optional[float] = None
+    # T32 B: reject (rather than silently allocate) a `BM25Index.score_matrix`
+    # call that would densify a block larger than this many elements.
+    # `score_matrix` is for the small class-description set; the example pool
+    # must go through the chunked, sparse `top_k` path instead. `None` (the
+    # default) is unbounded — today's behaviour.
+    bm25_max_block_elems: Optional[int] = None
 
 
 @dataclass
@@ -286,6 +300,20 @@ class PipelineConfig:
                 self.retrieval.feature_chunk,
                 self.retrieval.feature_chunk >= 1,
                 ">= 1 (a zero chunk never advances)",
+            ),
+            (
+                "retrieval.bm25_max_df_ratio",
+                self.retrieval.bm25_max_df_ratio,
+                self.retrieval.bm25_max_df_ratio is None
+                or 0.0 < self.retrieval.bm25_max_df_ratio <= 1.0,
+                "None or in (0, 1]",
+            ),
+            (
+                "retrieval.bm25_max_block_elems",
+                self.retrieval.bm25_max_block_elems,
+                self.retrieval.bm25_max_block_elems is None
+                or self.retrieval.bm25_max_block_elems >= 1,
+                "None or >= 1",
             ),
             (
                 "encoder.encode_batch_size",

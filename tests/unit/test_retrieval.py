@@ -16,6 +16,8 @@ import numpy as np
 import numpy.testing as npt
 import pytest
 
+from scipy import sparse
+
 from text_classifier.config import RetrievalConfig
 from text_classifier.domain import LabelSpace, ClassDefinition
 from text_classifier.infrastructure.retrieval import (
@@ -23,6 +25,8 @@ from text_classifier.infrastructure.retrieval import (
     DenseRetrieverAdapter,
     LexicalRetrieverAdapter,
     _dense_topk,
+    _sparse_row_topk,
+    bm25_prunes_vocab,
 )
 from tests._doubles import HashingEncoder
 
@@ -624,3 +628,215 @@ def test_dense_topk_chunking_equivalence(dense_env):
     npt.assert_allclose(sim_a, sim_b, atol=1e-5)
     # Indices may differ on ties, but their retrieved similarities match
     # (sorting: same scores if same top-k)
+
+
+# =========================================================================== #
+#  T32 — BM25 at scale: bounded memory and throughput
+# =========================================================================== #
+
+
+class TestSparseRowTopk:
+    """`_sparse_row_topk` is the replacement for BM25 `top_k`'s dense
+    argpartition/argsort — it must never densify, but must still return the
+    same shape, padding, and descending-order contract."""
+
+    def test_basic_topk_matches_hand_computation(self):
+        # row0: cols {0: 3, 2: 1, 3: 5}; row1: cols {1: 2}
+        S = sparse.csr_matrix(
+            ([3.0, 1.0, 5.0, 2.0], ([0, 0, 0, 1], [0, 2, 3, 1])), shape=(2, 4)
+        )
+        idx, score = _sparse_row_topk(S, fetch=2)
+        assert idx.shape == (2, 2) and score.shape == (2, 2)
+        npt.assert_array_equal(idx[0], [3, 0])  # descending: 5 (col3), 3 (col0)
+        npt.assert_allclose(score[0], [5.0, 3.0])
+        assert idx[1, 0] == 1
+        npt.assert_allclose(score[1, 0], 2.0)
+        # row1 has only one nonzero: the second slot is padding.
+        assert idx[1, 1] == -1
+        assert np.isnan(score[1, 1])
+
+    def test_empty_matrix_is_all_padding(self):
+        S = sparse.csr_matrix((3, 5), dtype=np.float32)
+        idx, score = _sparse_row_topk(S, fetch=2)
+        assert np.all(idx == -1)
+        assert np.all(np.isnan(score))
+
+    def test_fetch_zero_returns_empty_width(self):
+        S = sparse.csr_matrix(([1.0], ([0], [0])), shape=(1, 1))
+        idx, score = _sparse_row_topk(S, fetch=0)
+        assert idx.shape == (1, 0) and score.shape == (1, 0)
+
+    def test_row_with_more_nonzeros_than_fetch_keeps_the_largest(self):
+        S = sparse.csr_matrix(([1.0, 5.0, 3.0, 2.0], ([0, 0, 0, 0], [0, 1, 2, 3])), shape=(1, 4))
+        idx, score = _sparse_row_topk(S, fetch=2)
+        npt.assert_array_equal(idx[0], [1, 2])  # cols with values 5, 3
+        npt.assert_allclose(score[0], [5.0, 3.0])
+
+    def test_matches_dense_argpartition_reference(self):
+        """Cross-check against a brute-force dense computation on a random
+        sparse matrix — the property that actually matters (same top-k values,
+        same descending order), not incidental tie-breaking."""
+        rng = np.random.default_rng(0)
+        dense = rng.random((6, 9)).astype(np.float32)
+        dense[dense < 0.5] = 0.0  # make it genuinely sparse
+        S = sparse.csr_matrix(dense)
+        fetch = 3
+        idx, score = _sparse_row_topk(S, fetch)
+        for r in range(dense.shape[0]):
+            expected_vals = np.sort(dense[r][dense[r] > 0])[::-1][:fetch]
+            got_vals = score[r][~np.isnan(score[r])]
+            npt.assert_allclose(np.sort(got_vals)[::-1], expected_vals, atol=1e-6)
+
+
+class TestBM25TokenizeOnceFitFromCounts:
+    """T32 A2: `fit()` == `tokenize_corpus()` + `fit_from_counts()`, and a row
+    slice of the shared counts matrix reproduces fitting a fresh index on just
+    that subset."""
+
+    CORPUS = [
+        "apple apple fruit",
+        "orange fruit",
+        "salmon fish ocean",
+        "trout ocean fish",
+        "eagle falcon sky",
+    ]
+
+    def test_fit_from_counts_matches_fit(self):
+        direct = BM25Index(1.5, 0.75).fit(self.CORPUS)
+        counts, vectorizer = BM25Index.tokenize_corpus(self.CORPUS)
+        via_counts = BM25Index(1.5, 0.75).fit_from_counts(counts, vectorizer)
+
+        queries = ["apple orange", "salmon trout", "unseen gibberish"]
+        npt.assert_allclose(direct.score_matrix(queries), via_counts.score_matrix(queries))
+
+    def test_sliced_counts_matches_fitting_the_subset_directly(self):
+        """The exact operation A2 performs: tokenize the whole corpus once,
+        then slice rows for a fold, versus tokenizing just that fold's texts."""
+        idx = [0, 2, 4]
+        counts, vectorizer = BM25Index.tokenize_corpus(self.CORPUS)
+        sliced = BM25Index(1.5, 0.75).fit_from_counts(counts[idx], vectorizer)
+
+        subset_texts = [self.CORPUS[i] for i in idx]
+        direct = BM25Index(1.5, 0.75).fit(subset_texts)
+
+        queries = ["apple fruit", "salmon eagle"]
+        npt.assert_allclose(sliced.score_matrix(queries), direct.score_matrix(queries), atol=1e-6)
+
+    def test_bm25_prunes_vocab_detects_corpus_pruning_kwargs(self):
+        assert bm25_prunes_vocab({}) is False
+        assert bm25_prunes_vocab({"stop_words": "english"}) is False
+        assert bm25_prunes_vocab({"min_df": 2}) is True
+        assert bm25_prunes_vocab({"max_df": 0.9}) is True
+        assert bm25_prunes_vocab({"max_features": 100}) is True
+
+
+class TestBM25MaxDfRatio:
+    """T32 A4: opt-in, lossy high-df pruning."""
+
+    CORPUS = ["common apple", "common banana", "common cherry", "rare apple"]
+
+    def test_none_is_byte_identical_to_no_pruning(self):
+        a = BM25Index(1.5, 0.75).fit(self.CORPUS)
+        b = BM25Index(1.5, 0.75, max_df_ratio=None).fit(self.CORPUS)
+        npt.assert_array_equal(a.score_matrix(["common"]), b.score_matrix(["common"]))
+
+    def test_pruning_a_high_df_term_zeroes_its_contribution(self):
+        # "common" appears in 3/4 docs (df ratio 0.75); pruning at 0.5 drops it.
+        pruned = BM25Index(1.5, 0.75, max_df_ratio=0.5).fit(self.CORPUS)
+        sm = pruned.score_matrix(["common"])
+        npt.assert_allclose(sm, np.zeros_like(sm), atol=1e-8)
+
+    def test_pruning_shrinks_the_weight_matrix_nnz(self):
+        full = BM25Index(1.5, 0.75).fit(self.CORPUS)
+        pruned = BM25Index(1.5, 0.75, max_df_ratio=0.5).fit(self.CORPUS)
+        assert pruned._Wt.nnz < full._Wt.nnz
+
+    def test_persisted_and_reapplied_at_load(self):
+        idx = BM25Index(1.5, 0.75, max_df_ratio=0.5).fit(self.CORPUS)
+        arrays, meta = idx.to_state()
+        assert meta["max_df_ratio"] == 0.5
+        restored = BM25Index.from_state(arrays, meta)
+        assert restored.max_df_ratio == 0.5
+        npt.assert_array_equal(idx.score_matrix(["common"]), restored.score_matrix(["common"]))
+
+    def test_legacy_state_without_the_key_loads_as_off(self):
+        """A directory saved before T32 has no `max_df_ratio` key in meta."""
+        idx = BM25Index(1.5, 0.75).fit(self.CORPUS)
+        arrays, meta = idx.to_state()
+        del meta["max_df_ratio"]
+        restored = BM25Index.from_state(arrays, meta)
+        assert restored.max_df_ratio is None
+
+
+class TestScoreMatrixBlockGuard:
+    """T32 B: score_matrix must refuse to densify past a configured cap."""
+
+    def test_none_is_unbounded(self):
+        idx = BM25Index(1.5, 0.75).fit(["ab cd", "ef gh"])
+        idx.score_matrix(["ab"], max_block_elems=None)  # must not raise
+
+    def test_under_cap_succeeds(self):
+        idx = BM25Index(1.5, 0.75).fit(["ab cd", "ef gh"])
+        idx.score_matrix(["ab"], max_block_elems=100)  # 1 * 2 = 2 elements
+
+    def test_over_cap_raises(self):
+        idx = BM25Index(1.5, 0.75).fit(["ab cd", "ef gh"])
+        with pytest.raises(ValueError, match="score_matrix"):
+            idx.score_matrix(["ab", "cd", "ef"], max_block_elems=1)  # 3 * 2 = 6 > 1
+
+
+class TestLexicalBuildFromCounts:
+    """T32 A1/A2 at the adapter level: `build_from_counts` (pre-tokenized
+    example corpus + a pre-built description index) matches `build()`."""
+
+    def test_matches_build_byte_for_byte(self, lex_env):
+        adapter, label_space, labels = lex_env
+        texts = [
+            "apple apple fruit",
+            "orange fruit",
+            "salmon fish",
+            "trout ocean fish",
+            "eagle falcon",
+        ]
+        cfg = RetrievalConfig(bm25_token_kwargs={})
+        counts, vectorizer = BM25Index.tokenize_corpus(texts)
+        desc_bm25 = BM25Index(cfg.k1, cfg.b).fit(label_space.descriptions)
+        via_counts = LexicalRetrieverAdapter.build_from_counts(
+            counts, vectorizer, labels, desc_bm25, cfg
+        )
+
+        queries = ["apple orange", "salmon trout", "eagle sky"]
+        npt.assert_array_equal(
+            adapter.description_score(queries), via_counts.description_score(queries)
+        )
+        a_labels, a_scores = adapter.knn_example_labels(queries, k=2)
+        b_labels, b_scores = via_counts.knn_example_labels(queries, k=2)
+        npt.assert_array_equal(a_labels, b_labels)
+        npt.assert_array_equal(a_scores, b_scores)
+
+    def test_sliced_counts_matches_building_the_subset_directly(self, lex_env):
+        _, label_space, _ = lex_env
+        texts = [
+            "apple apple fruit",
+            "orange fruit",
+            "salmon fish",
+            "trout ocean fish",
+            "eagle falcon",
+        ]
+        labels = np.array([0, 0, 1, 1, 2])
+        cfg = RetrievalConfig(bm25_token_kwargs={})
+        idx = np.array([0, 1, 3])
+
+        counts, vectorizer = BM25Index.tokenize_corpus(texts)
+        desc_bm25 = BM25Index(cfg.k1, cfg.b).fit(label_space.descriptions)
+        sliced = LexicalRetrieverAdapter.build_from_counts(
+            counts[idx], vectorizer, labels[idx], desc_bm25, cfg
+        )
+        direct = LexicalRetrieverAdapter.build(
+            [texts[i] for i in idx], labels[idx], label_space, cfg
+        )
+
+        queries = ["apple orange", "trout fish"]
+        npt.assert_allclose(
+            sliced.description_score(queries), direct.description_score(queries), atol=1e-6
+        )

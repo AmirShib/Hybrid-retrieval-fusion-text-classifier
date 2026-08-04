@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, Sequence, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy import sparse
@@ -57,16 +57,113 @@ def _exclude_self(
     return np.concatenate([idx_s, pad_i], axis=1), np.concatenate([score_s, pad_s], axis=1)
 
 
+def bm25_prunes_vocab(cv_kwargs: Dict[str, Any]) -> bool:
+    """Whether ``cv_kwargs`` prunes ``CountVectorizer``'s vocabulary by corpus
+    statistics (``min_df``/``max_df``/``max_features``) — T32 A2's guard.
+
+    Those three prune against whatever corpus they are fit on, so a
+    full-corpus vocabulary and a per-fold vocabulary genuinely differ when any
+    is set; a caller that wants to tokenize once and slice per fold (rather
+    than refitting ``CountVectorizer`` per fold) must fall back to the
+    ordinary per-fold path when this is ``True``."""
+    return any(k in cv_kwargs for k in ("min_df", "max_df", "max_features"))
+
+
+def _sparse_row_topk(S: sparse.csr_matrix, fetch: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Row-wise top-``fetch`` largest entries of a sparse CSR matrix whose
+    explicit nonzeros are all strictly positive (true of a BM25 weight product:
+    every ``idf`` and ``tf`` term is positive), without ever densifying the
+    block (T32 B/overlap-with-A: the ``(chunk, n_docs)`` dense intermediate this
+    replaces is what blows up memory at scale, and it also forced scanning
+    every discarded zero to find the top-k).
+
+    Rows with fewer than ``fetch`` explicit nonzeros are padded with ``-1``
+    index / ``NaN`` score. Vectorized via one lexsort over every explicit
+    nonzero — no per-row Python loop (CLAUDE.md convention)."""
+    n_rows = S.shape[0]
+    out_idx = np.full((n_rows, fetch), -1, dtype=np.int64)
+    out_score = np.full((n_rows, fetch), np.nan, dtype=np.float32)
+    if S.nnz == 0 or fetch == 0:
+        return out_idx, out_score
+
+    indptr = S.indptr
+    counts = np.diff(indptr)
+    row_ids = np.repeat(np.arange(n_rows), counts)
+    cols = S.indices
+    vals = S.data.astype(np.float32)
+
+    # Sort by row ascending (primary), value descending (secondary). lexsort's
+    # primary key is its *last* argument. Because `row_ids` is already
+    # nondecreasing, the sorted output's row-blocks appear in the same
+    # positions (`indptr`) as before the sort — only the order *within* each
+    # block changes — so `rank` below is a plain arithmetic offset, not a
+    # second grouping pass.
+    order = np.lexsort((-vals, row_ids))
+    row_ids_s = row_ids[order]
+    cols_s = cols[order]
+    vals_s = vals[order]
+
+    group_start = np.repeat(indptr[:-1], counts)
+    rank = np.arange(row_ids_s.size) - group_start
+    keep = rank < fetch
+    kr, kc, kv, kk = row_ids_s[keep], cols_s[keep], vals_s[keep], rank[keep]
+    out_idx[kr, kk] = kc
+    out_score[kr, kk] = kv
+
+    # Defensive, not load-bearing today: every explicit nonzero here is a sum
+    # of positive idf*tf terms, so this never actually fires, but it keeps the
+    # positive-scores-only contract explicit rather than assumed.
+    bad = ~(out_score > 0)
+    out_idx = np.where(bad, -1, out_idx)
+    out_score = np.where(bad, np.nan, out_score)
+    return out_idx, out_score
+
+
 # --------------------------------------------------------------------------- BM25
 class BM25Index:
     """Okapi BM25 (Lucene IDF variant) with a precomputed weight matrix."""
 
-    def __init__(self, k1: float = 1.5, b: float = 0.75, **cv_kwargs: Any):
-        self.k1, self.b, self.cv_kwargs = k1, b, cv_kwargs
+    def __init__(
+        self,
+        k1: float = 1.5,
+        b: float = 0.75,
+        max_df_ratio: Optional[float] = None,
+        **cv_kwargs: Any,
+    ):
+        self.k1, self.b, self.max_df_ratio, self.cv_kwargs = k1, b, max_df_ratio, cv_kwargs
+
+    @staticmethod
+    def tokenize_corpus(
+        corpus: Sequence[str], **cv_kwargs: Any
+    ) -> Tuple[sparse.csr_matrix, CountVectorizer]:
+        """Tokenize ``corpus`` into a raw counts matrix + fitted vectorizer
+        (T32 A2), split out of ``fit`` so a caller that needs several
+        ``BM25Index`` instances over slices of the *same* corpus (one per
+        training fold, each with its own fold-local IDF) can tokenize once and
+        reuse the counts/vectorizer via ``fit_from_counts``, instead of paying
+        ``CountVectorizer.fit_transform``'s per-document regex analysis again
+        for every instance."""
+        vectorizer = CountVectorizer(**cv_kwargs)
+        counts = vectorizer.fit_transform(corpus).tocsr().astype(np.float32)
+        return counts, vectorizer
 
     def fit(self, corpus: Sequence[str]) -> "BM25Index":
-        self.vectorizer = CountVectorizer(**self.cv_kwargs)
-        counts = self.vectorizer.fit_transform(corpus).tocsr().astype(np.float32)
+        counts, vectorizer = self.tokenize_corpus(corpus, **self.cv_kwargs)
+        return self.fit_from_counts(counts, vectorizer)
+
+    def fit_from_counts(
+        self, counts: sparse.csr_matrix, vectorizer: CountVectorizer
+    ) -> "BM25Index":
+        """Build the weight matrix from an already-tokenized ``counts`` matrix
+        (rows = documents, columns = ``vectorizer``'s vocabulary). ``fit`` is
+        exactly ``tokenize_corpus`` + this. A caller may pass a *row slice* of
+        a larger corpus's counts (e.g. one training fold's rows): document
+        frequency, length normalization and IDF are recomputed from the slice
+        alone, which is correct — IDF is corpus-global and legitimately differs
+        per fold — while the tokenization work (the counts themselves) is
+        reused verbatim (T32 A2)."""
+        counts = counts.tocsr().astype(np.float32)
+        self.vectorizer = vectorizer
         self.n_docs = counts.shape[0]
 
         df = np.asarray((counts > 0).sum(axis=0)).ravel()
@@ -78,9 +175,15 @@ class BM25Index:
 
         # W[doc, t] = idf_t * tf*(k1+1) / (tf + k1 * len_norm_doc)
         coo = counts.tocoo()
-        tf = coo.data
-        w = self.idf[coo.col] * (tf * (self.k1 + 1.0)) / (tf + self.k1 * len_norm[coo.row])
-        W = sparse.coo_matrix((w.astype(np.float32), (coo.row, coo.col)), shape=counts.shape)
+        tf, row, col = coo.data, coo.row, coo.col
+        if self.max_df_ratio is not None and self.n_docs:
+            # T32 A4 (opt-in, lossy): drop entries whose term exceeds the df
+            # ratio *before* building W, so the matrix actually shrinks rather
+            # than merely carrying more near-zero weights.
+            keep = (df[col] / self.n_docs) <= self.max_df_ratio
+            tf, row, col = tf[keep], row[keep], col[keep]
+        w = self.idf[col] * (tf * (self.k1 + 1.0)) / (tf + self.k1 * len_norm[row])
+        W = sparse.coo_matrix((w.astype(np.float32), (row, col)), shape=counts.shape)
         self._Wt = W.tocsc().T.tocsr()  # (vocab, n_docs)
         return self
 
@@ -89,8 +192,23 @@ class BM25Index:
         q.data[:] = 1.0  # binary incidence: ignore query-term frequency
         return q.astype(np.float32)
 
-    def score_matrix(self, texts: Sequence[str]) -> np.ndarray:
-        """Dense (b, n_docs) score block. Use for small doc sets (descriptions)."""
+    def score_matrix(
+        self, texts: Sequence[str], max_block_elems: Optional[int] = None
+    ) -> np.ndarray:
+        """Dense (b, n_docs) score block. For small doc sets (class
+        descriptions) only — the example pool must go through the chunked,
+        sparse ``top_k`` path instead. When ``max_block_elems`` is set (T32 B),
+        raises rather than silently allocating a block over the configured
+        cap, instead of leaving that guarantee to caller discipline."""
+        b = len(texts)
+        if max_block_elems is not None and b * self.n_docs > max_block_elems:
+            raise ValueError(
+                f"BM25Index.score_matrix would densify a ({b}, {self.n_docs}) block "
+                f"({b * self.n_docs} elements), over the configured cap of "
+                f"{max_block_elems} (RetrievalConfig.bm25_max_block_elems). "
+                "score_matrix is for small document sets (e.g. class descriptions); "
+                "a large example pool must go through the chunked, sparse top_k path."
+            )
         return np.asarray((self._query_incidence(texts) @ self._Wt).todense(), dtype=np.float32)
 
     def top_k(
@@ -101,7 +219,15 @@ class BM25Index:
 
         ``exclude`` (b,), when given, drops one example index per query from that
         query's neighbors (a value < 0 drops nothing) — the leave-one-out
-        self-mask. One extra neighbor is fetched so ``k`` real ones survive."""
+        self-mask. One extra neighbor is fetched so ``k`` real ones survive.
+
+        The per-chunk score block (``Qbin_chunk @ self._Wt``) is kept sparse
+        end to end (T32 B): the product's only explicit nonzeros are candidates
+        that share at least one term with the query, and the top-k is read
+        directly off that sparse structure (``_sparse_row_topk``) rather than
+        densifying to a ``(chunk, n_docs)`` block and discarding everything
+        below the cut — the dense intermediate this used to allocate no longer
+        exists, so there is nothing left to bound with a block-size cap."""
         b = len(texts)
         # Fetch one extra when self-masking so k real neighbours remain after drop.
         width = k + 1 if exclude is not None else k
@@ -111,16 +237,8 @@ class BM25Index:
         if fetch > 0:
             Qbin = self._query_incidence(texts)
             for s in range(0, b, chunk):
-                S = np.asarray((Qbin[s : s + chunk] @ self._Wt).todense(), dtype=np.float32)
-                part = np.argpartition(-S, fetch - 1, axis=1)[:, :fetch]
-                rows = np.arange(part.shape[0])[:, None]
-                part_s = S[rows, part]
-                order = np.argsort(-part_s, axis=1)
-                idx = np.take_along_axis(part, order, axis=1)
-                sc = np.take_along_axis(part_s, order, axis=1)
-                bad = sc <= 0
-                idx = np.where(bad, -1, idx)
-                sc = np.where(bad, np.nan, sc)
+                S = (Qbin[s : s + chunk] @ self._Wt).tocsr()
+                idx, sc = _sparse_row_topk(S, fetch)
                 out_idx[s : s + chunk, :fetch] = idx
                 out_score[s : s + chunk, :fetch] = sc
         if exclude is not None:
@@ -150,6 +268,7 @@ class BM25Index:
             "Wt_shape": list(Wt.shape),
             "k1": self.k1,
             "b": self.b,
+            "max_df_ratio": self.max_df_ratio,
             "n_docs": self.n_docs,
             "cv_kwargs": self.cv_kwargs,
             "vocabulary": {term: int(col) for term, col in self.vectorizer.vocabulary_.items()},
@@ -158,7 +277,10 @@ class BM25Index:
 
     @classmethod
     def from_state(cls, arrays: Dict[str, np.ndarray], meta: Dict[str, Any]) -> "BM25Index":
-        obj = cls(meta["k1"], meta["b"], **meta["cv_kwargs"])
+        # `.get` (rather than `[...]`): a directory saved before T32 has no
+        # `max_df_ratio` key; absence must mean "off", the byte-identical
+        # legacy behaviour, not a KeyError on load.
+        obj = cls(meta["k1"], meta["b"], max_df_ratio=meta.get("max_df_ratio"), **meta["cv_kwargs"])
         obj.n_docs = meta["n_docs"]
         # A fixed vocabulary means CountVectorizer.transform() works without a
         # prior fit() call, so this reproduces fit()'s analyzer exactly.
@@ -182,19 +304,70 @@ class LexicalRetrieverAdapter(LexicalRetriever):
         example_labels: np.ndarray,
         desc_bm25: BM25Index,
         k_chunk: int = 256,
+        max_block_elems: Optional[int] = None,
     ):
         self._examples = example_bm25
         self._labels = example_labels.astype(np.int64)
         self._descriptions = desc_bm25
         self._k_chunk = k_chunk
+        self._max_block_elems = max_block_elems
 
     @classmethod
     def build(
         cls, texts: Sequence[str], labels: np.ndarray, label_space: LabelSpace, cfg: RetrievalConfig
     ) -> "LexicalRetrieverAdapter":
-        ex = BM25Index(cfg.k1, cfg.b, **cfg.bm25_token_kwargs).fit(texts)
-        desc = BM25Index(cfg.k1, cfg.b, **cfg.bm25_token_kwargs).fit(label_space.descriptions)
-        return cls(ex, np.asarray(labels), desc, cfg.dense_chunk)
+        ex = BM25Index(
+            cfg.k1, cfg.b, max_df_ratio=cfg.bm25_max_df_ratio, **cfg.bm25_token_kwargs
+        ).fit(texts)
+        desc = BM25Index(
+            cfg.k1, cfg.b, max_df_ratio=cfg.bm25_max_df_ratio, **cfg.bm25_token_kwargs
+        ).fit(label_space.descriptions)
+        return cls(ex, np.asarray(labels), desc, cfg.dense_chunk, cfg.bm25_max_block_elems)
+
+    @classmethod
+    def build_from_counts(
+        cls,
+        example_counts: sparse.csr_matrix,
+        example_vectorizer: CountVectorizer,
+        labels: np.ndarray,
+        desc_bm25: BM25Index,
+        cfg: RetrievalConfig,
+    ) -> "LexicalRetrieverAdapter":
+        """Build from an already-tokenized example corpus + a pre-built
+        description index (T32 A1/A2). The training pipeline tokenizes the
+        whole example pool and fits the description BM25 once per run, then
+        reuses both here — once per fold, with ``example_counts`` a row slice
+        of the full corpus, and once whole for the deployment index — instead
+        of repeating ``CountVectorizer.fit_transform`` for every one of those
+        calls. ``fit_from_counts`` recomputes document frequency and IDF from
+        whatever rows it is given, so a fold's weights are still fold-local;
+        only the tokenization is shared."""
+        ex = BM25Index(cfg.k1, cfg.b, max_df_ratio=cfg.bm25_max_df_ratio, **cfg.bm25_token_kwargs)
+        ex.fit_from_counts(example_counts, example_vectorizer)
+        return cls(
+            ex, np.asarray(labels), desc_bm25, cfg.dense_chunk, cfg.bm25_max_block_elems
+        )
+
+    @classmethod
+    def build_with_shared_descriptions(
+        cls,
+        texts: Sequence[str],
+        labels: np.ndarray,
+        desc_bm25: BM25Index,
+        cfg: RetrievalConfig,
+    ) -> "LexicalRetrieverAdapter":
+        """Fit a fresh example index (the ordinary per-fold path, e.g. when
+        ``bm25_token_kwargs`` prunes vocabulary by corpus statistics and
+        ``build_from_counts``'s shared tokenization is unsafe — T32 A2's
+        guard), but reuse a pre-built description index (T32 A1) rather than
+        refitting it. A1 and A2 are independent: the description corpus is
+        never row-sliced, so nothing about A2's per-fold-vocabulary concern
+        applies to it — it is always safe to share, even when the example side
+        must fall back to fitting fresh."""
+        ex = BM25Index(
+            cfg.k1, cfg.b, max_df_ratio=cfg.bm25_max_df_ratio, **cfg.bm25_token_kwargs
+        ).fit(texts)
+        return cls(ex, np.asarray(labels), desc_bm25, cfg.dense_chunk, cfg.bm25_max_block_elems)
 
     def knn_example_labels(
         self, query_texts: Sequence[str], k: int, exclude_idx: Any = None
@@ -204,7 +377,7 @@ class LexicalRetrieverAdapter(LexicalRetriever):
         return labels.astype(np.int64), score
 
     def description_score(self, query_texts: Sequence[str]) -> np.ndarray:
-        return self._descriptions.score_matrix(query_texts)
+        return self._descriptions.score_matrix(query_texts, max_block_elems=self._max_block_elems)
 
     def with_added_descriptions(self, all_descriptions: Sequence[str]) -> "LexicalRetrieverAdapter":
         """Return a copy whose description BM25 is refit over ``all_descriptions``
@@ -216,11 +389,15 @@ class LexicalRetrieverAdapter(LexicalRetriever):
         description, not have a row appended — hence the full list. The example
         index and its labels are reused verbatim: a class added this way is
         description-only (no example support), so nothing on the example side
-        changes. The new BM25 keeps the same ``k1``/``b``/tokenizer kwargs as the
-        original, so existing classes score identically."""
+        changes. The new BM25 keeps the same ``k1``/``b``/``max_df_ratio``/tokenizer
+        kwargs as the original, so existing classes score identically."""
         old = self._descriptions
-        desc = BM25Index(old.k1, old.b, **old.cv_kwargs).fit(all_descriptions)
-        return LexicalRetrieverAdapter(self._examples, self._labels, desc, self._k_chunk)
+        desc = BM25Index(old.k1, old.b, max_df_ratio=old.max_df_ratio, **old.cv_kwargs).fit(
+            all_descriptions
+        )
+        return LexicalRetrieverAdapter(
+            self._examples, self._labels, desc, self._k_chunk, self._max_block_elems
+        )
 
     def to_state(self) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
         """Split this adapter into npz-able arrays and a JSON-clean meta dict,
@@ -230,7 +407,12 @@ class LexicalRetrieverAdapter(LexicalRetriever):
         arrays: Dict[str, np.ndarray] = {f"examples_{k}": v for k, v in ex_arrays.items()}
         arrays.update({f"descriptions_{k}": v for k, v in desc_arrays.items()})
         arrays["example_labels"] = self._labels
-        meta = {"examples": ex_meta, "descriptions": desc_meta, "k_chunk": self._k_chunk}
+        meta = {
+            "examples": ex_meta,
+            "descriptions": desc_meta,
+            "k_chunk": self._k_chunk,
+            "max_block_elems": self._max_block_elems,
+        }
         return arrays, meta
 
     @classmethod
@@ -243,7 +425,11 @@ class LexicalRetrieverAdapter(LexicalRetriever):
         }
         ex = BM25Index.from_state(ex_arrays, meta["examples"])
         desc = BM25Index.from_state(desc_arrays, meta["descriptions"])
-        return cls(ex, arrays["example_labels"], desc, meta["k_chunk"])
+        # `.get`: a directory saved before T32 has no `max_block_elems` key;
+        # absence must mean "unbounded", the byte-identical legacy behaviour.
+        return cls(
+            ex, arrays["example_labels"], desc, meta["k_chunk"], meta.get("max_block_elems")
+        )
 
 
 # ------------------------------------------------------------------- dense adapter

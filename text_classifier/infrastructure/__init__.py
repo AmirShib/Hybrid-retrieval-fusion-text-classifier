@@ -38,6 +38,7 @@ from .retrieval import (
     DenseRetrieverAdapter,
     DenseState,
     LexicalRetrieverAdapter,
+    bm25_prunes_vocab,
 )
 
 __all__ = [
@@ -50,6 +51,7 @@ __all__ = [
     "DenseRetrieverAdapter",
     "DenseState",
     "LexicalRetrieverAdapter",
+    "bm25_prunes_vocab",
     "XGBoostFusionModel",
     "LightGBMFusionModel",
     "XGBRankerFusionModel",

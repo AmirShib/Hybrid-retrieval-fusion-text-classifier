@@ -99,7 +99,7 @@ signal once T34 phase 2 lands.
 |-----|------|------------------------------------------------------------------------------|--------|
 | T30 | 3    | Vectorize `InferencePipeline.predict` (drop the `.iterrows()` loop)            | done |
 | T31 | 3    | Optional FAISS/ANN backend behind the `DenseRetriever` port (needs T23)        | todo |
-| T32 | ~~3~~ 8 | BM25 memory profile for large corpora — **re-scoped to memory + throughput, moved to Tier 8** | todo |
+| T32 | ~~3~~ 8 | BM25 memory profile for large corpora — **re-scoped to memory + throughput, moved to Tier 8** | in-review |
 | T33 | 3    | Optional cross-encoder reranker as 6th retrieval signal (needs T03, optional)  | todo |
 | T34 | 3    | Pluggable retrieval signals + retrievers behind the registry (needs T23, T03)  | todo |
 | T35 | 3    | Language-neutral BM25 defaults (drop hidden English stopwords)                | done |
@@ -219,7 +219,7 @@ Decisions taken 2026-08-04, recorded in the tickets:
 | ID  | Title                                                                       | Status | Depends on              |
 |-----|-----------------------------------------------------------------------------|--------|-------------------------|
 | T88 | Encode the corpus once, not once per fold (~5x less encoder work)            | done   | —                       |
-| T32 | BM25 at scale: bounded memory + throughput (re-scoped from Tier 3)           | todo   | T04                     |
+| T32 | BM25 at scale: bounded memory + throughput (re-scoped from Tier 3)           | in-review | T04                  |
 | T87 | Feature dependency graph + demand-driven computation                         | done   | T70                     |
 | T83 | Device execution profile + device policy (measure-first gate; run after T88) | todo   | T88                     |
 | T84 | Array-backend seam: `ArrayOps` port, `auto` selection, CPU byte-identical    | todo   | T83 (thresholds)        |

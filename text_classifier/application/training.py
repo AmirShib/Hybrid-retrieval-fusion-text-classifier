@@ -23,6 +23,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+from scipy import sparse
+from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.model_selection import StratifiedKFold
 
 from ..config import CalibrationConfig, PipelineConfig
@@ -41,9 +43,11 @@ from ..domain import (
 )
 from ..infrastructure import (
     ArtifactRepository,
+    BM25Index,
     DenseRetrieverAdapter,
     DeployedArtifacts,
     LexicalRetrieverAdapter,
+    bm25_prunes_vocab,
     build_calibrator,
     build_encoder,
     build_feature_providers,
@@ -116,6 +120,15 @@ class TrainingPipeline:
         # whole) — instead of each paying its own `encode_documents` pass.
         self._shared_pool_emb: Optional[np.ndarray] = None
         self._shared_desc_emb: Optional[np.ndarray] = None
+        # T32 A1/A2: the example-corpus BM25 tokenization + the description
+        # BM25 index, built once per `run()` call and reused by `_build_oof`
+        # (sliced per fold) and `_build_deployment_index` (used whole) — BM25
+        # tokenization is unconditional (independent of the encoder), so this
+        # cache always attempts to populate, guarded only by
+        # `bm25_prunes_vocab`.
+        self._shared_example_counts: Optional[sparse.csr_matrix] = None
+        self._shared_example_vectorizer: Optional[CountVectorizer] = None
+        self._shared_desc_bm25: Optional[BM25Index] = None
 
     def _use_per_fold_encoder(self) -> bool:
         """Refit the encoder per fold when explicitly requested, or whenever the
@@ -150,6 +163,36 @@ class TrainingPipeline:
             self._shared_desc_emb = encoder.encode_documents(label_space.descriptions)
         assert self._shared_desc_emb is not None
         return self._shared_pool_emb, self._shared_desc_emb
+
+    def _shared_lexical_state(
+        self, texts: List[str], label_space: LabelSpace
+    ) -> Tuple[Optional[Tuple[sparse.csr_matrix, CountVectorizer]], BM25Index]:
+        """The example-corpus BM25 tokenization + description BM25 index,
+        built once per ``run()`` call and cached on ``self`` (T32 A1/A2).
+
+        Returns ``(example_state, desc_bm25)``. ``desc_bm25`` is always cached
+        and reused verbatim — ``label_space.descriptions`` does not vary by
+        fold, and ``BM25Index`` is immutable after ``fit``, so this is a
+        straight reuse with no caveats (A1). ``example_state`` is ``None`` when
+        ``bm25_token_kwargs`` prunes vocabulary by corpus statistics
+        (``min_df``/``max_df``/``max_features``, checked via
+        ``bm25_prunes_vocab``) — full-corpus and per-fold vocabularies
+        genuinely differ then, so callers fall back to
+        ``LexicalRetrieverAdapter.build``, the ordinary per-fold path, exactly
+        as before this ticket (A2's guard)."""
+        cfg = self.cfg.retrieval
+        if self._shared_desc_bm25 is None:
+            self._shared_desc_bm25 = BM25Index(
+                cfg.k1, cfg.b, max_df_ratio=cfg.bm25_max_df_ratio, **cfg.bm25_token_kwargs
+            ).fit(label_space.descriptions)
+            if not bm25_prunes_vocab(cfg.bm25_token_kwargs):
+                counts, vectorizer = BM25Index.tokenize_corpus(texts, **cfg.bm25_token_kwargs)
+                self._shared_example_counts = counts
+                self._shared_example_vectorizer = vectorizer
+        example_state = None
+        if self._shared_example_counts is not None:
+            example_state = (self._shared_example_counts, self._shared_example_vectorizer)
+        return example_state, self._shared_desc_bm25
 
     # ---------------------------------------------------------------- public API
     def run(
@@ -441,6 +484,11 @@ class TrainingPipeline:
             shared_emb, shared_desc_emb = self._shared_document_embeddings(
                 texts, label_space, shared
             )
+        # T32 A1/A2: BM25 tokenization is unconditional (it doesn't depend on
+        # the encoder), so this cache always attempts to populate — tokenize
+        # the whole example corpus + build the description index once here,
+        # cached on `self` and reused by `_build_deployment_index` below.
+        example_state, desc_bm25 = self._shared_lexical_state(texts, label_space)
         skf = StratifiedKFold(
             self.cfg.training.n_folds, shuffle=True, random_state=self.cfg.training.random_state
         )
@@ -457,9 +505,19 @@ class TrainingPipeline:
                 dense = DenseRetrieverAdapter.build(
                     enc, tr_texts, y[tr], label_space, self.cfg.retrieval
                 )
-            lexical = LexicalRetrieverAdapter.build(
-                tr_texts, y[tr], label_space, self.cfg.retrieval
-            )
+            if example_state is not None:
+                counts, vectorizer = example_state
+                lexical = LexicalRetrieverAdapter.build_from_counts(
+                    counts[tr], vectorizer, y[tr], desc_bm25, self.cfg.retrieval
+                )
+            else:
+                # A2's guard fell back (vocab-pruning kwargs) — the example
+                # side must refit per fold, but the description index (A1) is
+                # still shared: it is never row-sliced, so nothing about A2's
+                # concern applies to it.
+                lexical = LexicalRetrieverAdapter.build_with_shared_descriptions(
+                    tr_texts, y[tr], desc_bm25, self.cfg.retrieval
+                )
             # Providers are fit on this fold's training rows only (leakage-free).
             providers = self._fit_providers(tr, texts, y, label_space)
             # T87: request only the columns the fusion model will actually be
@@ -725,7 +783,19 @@ class TrainingPipeline:
             dense = DenseRetrieverAdapter.build_from_embeddings(
                 emb, y, desc_emb, label_space, self.cfg.retrieval
             )
-        lexical = LexicalRetrieverAdapter.build(texts, y, label_space, self.cfg.retrieval)
+        # T32 A1/A2: reuse the corpus tokenization + description index
+        # `_build_oof` already built (or build them now, on the n_folds=1 path
+        # where this runs first) instead of a second tokenize pass.
+        example_state, desc_bm25 = self._shared_lexical_state(texts, label_space)
+        if example_state is not None:
+            counts, vectorizer = example_state
+            lexical = LexicalRetrieverAdapter.build_from_counts(
+                counts, vectorizer, y, desc_bm25, self.cfg.retrieval
+            )
+        else:
+            lexical = LexicalRetrieverAdapter.build_with_shared_descriptions(
+                texts, y, desc_bm25, self.cfg.retrieval
+            )
         # Custom feature providers fit on *all* training rows — the version
         # that ships in the model and scores external val/test sets. The composed
         # schema (core + provider columns) is what the fusion/eval steps select by.

@@ -9,6 +9,34 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 ## [Unreleased]
 
 ### Added
+- **BM25 at scale: bounded memory and throughput (T32)** — four independent
+  fixes to the lexical retrieval path:
+  - **Tokenize/build once per training run, not once per fold.** The example
+    corpus is tokenized once (`BM25Index.tokenize_corpus` + `fit_from_counts`,
+    row-sliced per fold — IDF/length-norm are legitimately fold-local, only
+    the tokenization is shared) and the class-description BM25 index is built
+    once and reused verbatim (it is never row-sliced, so nothing about the
+    per-fold concern applies to it). `bm25_token_kwargs` that prune vocabulary
+    by corpus statistics (`min_df`/`max_df`/`max_features`) fall back to the
+    ordinary per-fold path automatically — full-corpus and per-fold
+    vocabularies genuinely differ then.
+  - **`top_k` never densifies.** The `(chunk, n_docs)` dense block used to be
+    materialized and then argpartitioned; the sparse `Qbin @ Wt` product's
+    positive-only explicit nonzeros now go straight through a vectorized
+    sparse row-top-k (one lexsort, no per-row Python loop, no memory blow-up
+    at scale).
+  - **`RetrievalConfig.bm25_max_df_ratio`** (opt-in, `None` by default):
+    drops terms above a document-frequency ratio before building the weight
+    matrix, shrinking it for near-zero ranking cost — the one knob here that
+    can change scores, so it is opt-in and persisted in `meta.json`.
+  - **`RetrievalConfig.bm25_max_block_elems`** (opt-in, `None` by default):
+    `BM25Index.score_matrix` (the small class-description path; the example
+    pool must go through `top_k`) now raises rather than silently allocating
+    a block over the configured cap.
+  Byte-identical on the default config (empty `bm25_token_kwargs`,
+  `bm25_max_df_ratio=None`, `bm25_max_block_elems=None`); legacy model
+  directories load unchanged via `.get`-based defaults on the new persisted
+  fields.
 - **Encode the corpus once, not once per fold (T88)** — on the shared-encoder
   training path, `_build_oof` now encodes the full example pool and every
   class description once per run and slices per fold
