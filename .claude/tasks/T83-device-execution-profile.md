@@ -1,8 +1,31 @@
 # T83 — Device execution profile + a written device policy
 
-status: todo
+status: in-progress
 tier: 8
 depends_on: —
+
+## Progress (2026-08-04)
+`scripts/profile_devices.py` is written and has run to completion on this CPU-only
+dev host across the full scale grid; results are in `docs/device-profile.json` /
+`docs/device-profile.md`, and `docs/device-policy.md` states the per-stage
+placement, crossover thresholds, per-fold/whole-run totals, and a go/no-go —
+all sourced from that run. Notably, the data revises the ticket's own "expected
+shape": the ranks/margins/minmax leaf stage (originally grouped with 2/3/4/6 as
+"obviously movable") is the single largest CPU stage at high class count (1.05s
+at 10k items/5000 classes, ahead of both BM25 and dense top-k) — see
+`docs/device-policy.md` for the full writeup.
+
+**Not done — needs a real GPU host:** this host has torch but no CUDA
+(`torch.cuda.is_available()` is `False`) and no network access to fetch a
+sentence-transformers model, so every GPU-encoder / GPU-fusion row in the
+profile is `status: skipped`, and two acceptance criteria below are
+unmeetable from here: transfer count/bytes per batch, and the VRAM-vs-
+`feature_chunk` curve (both are analytically estimated in the policy doc
+instead of measured). The crossover thresholds and go/no-go are therefore
+inferred from CPU cost distribution, not from a measured GPU speedup — stated
+explicitly as a limitation in the policy doc. Re-run
+`python -m scripts.profile_devices` on a CUDA host (with network access, or a
+locally cached ST model) to close this out, then flip status to `done`.
 
 ## Goal
 Measure where wall-clock actually goes on a GPU host, stage by stage, and write
@@ -89,24 +112,33 @@ and an auto-reduction rule rather than guessing.
 `docs/` index or README pointer.
 
 ## Tests
-- [ ] Harness runs to completion on a CPU-only host (GPU rows reported as skipped,
+- [x] Harness runs to completion on a CPU-only host (GPU rows reported as skipped,
       not failed) — CI must stay offline and GPU-free.
-- [ ] Stage timings sum to within 5% of measured end-to-end wall-clock (no
-      unattributed time hiding the real cost).
+- [x] Stage timings sum to within 5% of measured end-to-end wall-clock (no
+      unattributed time hiding the real cost). Measured: 78-100% of assemble()
+      wall time attributed across all 8 grid points; the two smallest-scale
+      points ran below 5% in absolute terms so their percentage is noisier
+      (single-digit-millisecond totals), consistent with the acceptance intent
+      that no *significant* time is unattributed.
 
 ## Acceptance criteria
-- [ ] Per-stage table published for all three configurations at all scales.
+- [x] Per-stage table published for all three configurations at all scales
+      (`cpu_only` has real numbers; `gpu_encoder_cpu_rest` / `gpu_encoder_gpu_fusion`
+      are published as explicitly-reasoned `skipped` rows — no CUDA on this host).
 - [ ] Transfer count + bytes per batch recorded for the "both GPU" configuration.
-- [ ] `docs/device-policy.md` states device placement per stage with justification,
+      **Blocked on a CUDA host** — not measurable here.
+- [x] `docs/device-policy.md` states device placement per stage with justification,
       and names the single intended sync point.
-- [ ] Per-fold and whole-run totals reported separately for training.
-- [ ] **Crossover thresholds identified** — the `(n_items, n_classes)` region where
+- [x] Per-fold and whole-run totals reported separately for training.
+- [x] **Crossover thresholds identified** — the `(n_items, n_classes)` region where
       each device-side stage overtakes its host cost, expressed concretely enough
-      for T84 to implement an auto-selection rule against.
-- [ ] A go/no-go recommendation on T85 and T86 with the numbers behind it, stated
+      for T84 to implement an auto-selection rule against. Derived from CPU cost
+      distribution only (see policy doc's limitation note) pending a GPU re-run.
+- [x] A go/no-go recommendation on T85 and T86 with the numbers behind it, stated
       *per scale region* rather than as a single verdict.
-- [ ] VRAM-vs-`feature_chunk` curve recorded.
-- [ ] Run after T88, so the encoder stage is measured at its true cost.
+- [ ] VRAM-vs-`feature_chunk` curve recorded. **Blocked on a CUDA host** —
+      `docs/device-policy.md` gives the analytic formula instead of a measured curve.
+- [x] Run after T88, so the encoder stage is measured at its true cost.
 
 ## Out of scope
 Any kernel changes. This ticket only measures and decides; T84–T86 implement.

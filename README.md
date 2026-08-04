@@ -557,6 +557,11 @@ loops:
   `Q_binary @ W.T`.
 * kNN and feature assembly are query-chunked to bound peak memory.
 
+**Execution model / GPU-CPU device placement.** `docs/device-policy.md` records
+where wall-clock actually goes, stage by stage, across a synthetic scale grid
+(`scripts/profile_devices.py`), and states which stages should run on which
+device and why — the measure-first gate before any kernel moves to a GPU.
+
 **Project layout** (domain-driven / hexagonal):
 
 ```
