@@ -99,7 +99,7 @@ signal once T34 phase 2 lands.
 |-----|------|------------------------------------------------------------------------------|--------|
 | T30 | 3    | Vectorize `InferencePipeline.predict` (drop the `.iterrows()` loop)            | done |
 | T31 | 3    | Optional FAISS/ANN backend behind the `DenseRetriever` port (needs T23)        | todo |
-| T32 | 3    | BM25 memory profile for large corpora; chunk/sparsify as needed               | todo |
+| T32 | ~~3~~ 8 | BM25 memory profile for large corpora — **re-scoped to memory + throughput, moved to Tier 8** | todo |
 | T33 | 3    | Optional cross-encoder reranker as 6th retrieval signal (needs T03, optional)  | todo |
 | T34 | 3    | Pluggable retrieval signals + retrievers behind the registry (needs T23, T03)  | todo |
 | T35 | 3    | Language-neutral BM25 defaults (drop hidden English stopwords)                | done |
@@ -182,6 +182,15 @@ addressable units. **Land the decoupling (T87) before the backend swap (T85/T86)
 reference to validate against; if the GPU track stalls, the decoupling still
 shipped.
 
+**T32 moved here and was re-scoped** (2026-08-04, was Tier 3 "memory profile").
+BM25 is the one stage the device policy keeps permanently on the host, so its cost
+is a hard floor on what T85/T86 can deliver: once the dense side is on the GPU,
+BM25 is what a batch waits for. Its throughput half also mirrors T88 — the
+description index is rebuilt identically every fold, the corpus is re-tokenized
+every fold, and each query batch is analyzed twice (once per BM25 index). Plus the
+sparse product is densified only to have its zeros discarded. None of that needs a
+device change.
+
 **T88 goes first regardless.** Found while scoping T83: on the shared-encoder
 path (the default) the example pool is re-encoded *every fold* and the class
 descriptions with it, so a `n_folds=5` run performs ~`5n + 6C` document encodes
@@ -210,6 +219,7 @@ Decisions taken 2026-08-04, recorded in the tickets:
 | ID  | Title                                                                       | Status | Depends on              |
 |-----|-----------------------------------------------------------------------------|--------|-------------------------|
 | T88 | Encode the corpus once, not once per fold (~5x less encoder work)            | todo   | —                       |
+| T32 | BM25 at scale: bounded memory + throughput (re-scoped from Tier 3)           | todo   | T04                     |
 | T87 | Feature dependency graph + demand-driven computation                         | todo   | T70                     |
 | T83 | Device execution profile + device policy (measure-first gate; run after T88) | todo   | T88                     |
 | T84 | Array-backend seam: `ArrayOps` port, `auto` selection, CPU byte-identical    | todo   | T83 (thresholds)        |
