@@ -110,6 +110,12 @@ class TrainingPipeline:
         self._feature_names: List[str] = fusion_feature_names(
             drop=self.cfg.fusion.drop_features
         )
+        # T88: the shared-encoder document embeddings (full example pool + every
+        # class description), encoded once per `run()` call and reused by both
+        # `_build_oof` (sliced per fold) and `_build_deployment_index` (used
+        # whole) — instead of each paying its own `encode_documents` pass.
+        self._shared_pool_emb: Optional[np.ndarray] = None
+        self._shared_desc_emb: Optional[np.ndarray] = None
 
     def _use_per_fold_encoder(self) -> bool:
         """Refit the encoder per fold when explicitly requested, or whenever the
@@ -124,6 +130,26 @@ class TrainingPipeline:
         if self._shared_override is not None:
             return self._shared_override
         return build_encoder(self.cfg.encoder)
+
+    def _shared_document_embeddings(
+        self, texts: List[str], label_space: LabelSpace, encoder: TextEncoder
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """The full example-pool and class-description embeddings for the
+        shared-encoder path, encoded once and cached on ``self`` for the
+        lifetime of one ``run()`` call (T88).
+
+        Only valid when the encoder is frozen and shared across folds — callers
+        must guard on ``not self._use_per_fold_encoder()`` themselves, exactly as
+        ``_load_shared_encoder`` requires. ``_build_oof`` populates the cache
+        first (when ``n_folds != 1``) and slices per fold;
+        ``_build_deployment_index`` then reuses it whole instead of re-encoding
+        every distinct text a second time. On the ``n_folds == 1`` path
+        ``_build_deployment_index`` runs first and populates it instead."""
+        if self._shared_pool_emb is None:
+            self._shared_pool_emb = encoder.encode_documents(texts)
+            self._shared_desc_emb = encoder.encode_documents(label_space.descriptions)
+        assert self._shared_desc_emb is not None
+        return self._shared_pool_emb, self._shared_desc_emb
 
     # ---------------------------------------------------------------- public API
     def run(
@@ -399,8 +425,22 @@ class TrainingPipeline:
     def _build_oof(self, texts: List[str], y: np.ndarray, label_space: LabelSpace) -> pd.DataFrame:
         assert self.assembler is not None  # set in run() before this is called
         shared = None
+        shared_emb: Optional[np.ndarray] = None
+        shared_desc_emb: Optional[np.ndarray] = None
         if not self._use_per_fold_encoder():
             shared = self._load_shared_encoder()
+            # T88: a frozen shared encoder's `encode_documents` is a pure
+            # function of the text, so encode the whole pool + every class
+            # description once (cached on `self`, shared with
+            # `_build_deployment_index`) and slice per fold here, instead of
+            # paying the encode again per fold (~5x the encoder work at
+            # n_folds=5). The per-fold and corpus-dependent (e.g. TF-IDF) paths
+            # are untouched — they stay inside `_encoder_for_split`/
+            # `DenseRetrieverAdapter.build` below, guarded by the same
+            # `_use_per_fold_encoder()` predicate.
+            shared_emb, shared_desc_emb = self._shared_document_embeddings(
+                texts, label_space, shared
+            )
         skf = StratifiedKFold(
             self.cfg.training.n_folds, shuffle=True, random_state=self.cfg.training.random_state
         )
@@ -408,9 +448,15 @@ class TrainingPipeline:
         for fold, (tr, va) in enumerate(skf.split(texts, y)):
             enc = self._encoder_for_split(tr, texts, y, label_space, shared)
             tr_texts = [texts[i] for i in tr]
-            dense = DenseRetrieverAdapter.build(
-                enc, tr_texts, y[tr], label_space, self.cfg.retrieval
-            )
+            if shared_emb is not None:
+                assert shared_desc_emb is not None
+                dense = DenseRetrieverAdapter.build_from_embeddings(
+                    shared_emb[tr], y[tr], shared_desc_emb, label_space, self.cfg.retrieval
+                )
+            else:
+                dense = DenseRetrieverAdapter.build(
+                    enc, tr_texts, y[tr], label_space, self.cfg.retrieval
+                )
             lexical = LexicalRetrieverAdapter.build(
                 tr_texts, y[tr], label_space, self.cfg.retrieval
             )
@@ -669,9 +715,16 @@ class TrainingPipeline:
                 LabeledItem(texts[i], label_space.key_at(int(y[i]))) for i in range(len(texts))
             ]
             encoder = fit_encoder(self.cfg.encoder, items, label_space)
+            dense = DenseRetrieverAdapter.build(encoder, texts, y, label_space, self.cfg.retrieval)
         else:
             encoder = self._load_shared_encoder()
-        dense = DenseRetrieverAdapter.build(encoder, texts, y, label_space, self.cfg.retrieval)
+            # T88: reuse the whole-pool embeddings `_build_oof` already computed
+            # (or compute them now, on the n_folds=1 path where this runs first)
+            # instead of a second `encode_documents` pass over every text.
+            emb, desc_emb = self._shared_document_embeddings(texts, label_space, encoder)
+            dense = DenseRetrieverAdapter.build_from_embeddings(
+                emb, y, desc_emb, label_space, self.cfg.retrieval
+            )
         lexical = LexicalRetrieverAdapter.build(texts, y, label_space, self.cfg.retrieval)
         # Custom feature providers fit on *all* training rows — the version
         # that ships in the model and scores external val/test sets. The composed

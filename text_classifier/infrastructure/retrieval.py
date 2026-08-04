@@ -328,9 +328,31 @@ class DenseRetrieverAdapter(DenseRetriever):
         # document prompt so query embeddings land in the matching space.
         emb = encoder.encode_documents(texts)
         labels = np.asarray(labels)
-        proto, freq = _prototypes_and_freq(emb, labels, label_space.size)
         desc = encoder.encode_documents(label_space.descriptions)
-        return cls(DenseState(emb, labels.astype(np.int64), proto, desc, freq), cfg.dense_chunk)
+        return cls.build_from_embeddings(emb, labels, desc, label_space, cfg)
+
+    @classmethod
+    def build_from_embeddings(
+        cls,
+        example_emb: np.ndarray,
+        labels: np.ndarray,
+        description_emb: np.ndarray,
+        label_space: LabelSpace,
+        cfg: RetrievalConfig,
+    ) -> "DenseRetrieverAdapter":
+        """Build from already-encoded document embeddings (T88): the encode step
+        is a pure function of the text for a frozen shared encoder, so a caller
+        that has already encoded the full pool/description set once (e.g. the
+        training pipeline's per-fold loop) can slice and hand in embeddings
+        instead of paying `encode_documents` again per fold. ``build`` still
+        encodes internally and delegates here, so every existing caller and test
+        double is untouched."""
+        labels = np.asarray(labels)
+        proto, freq = _prototypes_and_freq(example_emb, labels, label_space.size)
+        return cls(
+            DenseState(example_emb, labels.astype(np.int64), proto, description_emb, freq),
+            cfg.dense_chunk,
+        )
 
     @property
     def state(self) -> DenseState:

@@ -9,6 +9,21 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 ## [Unreleased]
 
 ### Added
+- **Encode the corpus once, not once per fold (T88)** — on the shared-encoder
+  training path, `_build_oof` now encodes the full example pool and every
+  class description once per run and slices per fold
+  (`DenseRetrieverAdapter.build_from_embeddings`), instead of paying
+  `encode_documents` again for every fold; `_build_deployment_index` reuses
+  the same cached embeddings rather than encoding a second time. At
+  `n_folds=5` this cuts document-encode work from `5n + 6C` to `n + C` —
+  roughly a 5x reduction on the dominant cost of a sentence-transformer
+  training run, and it compounds directly with `n_folds`. `build()` still
+  encodes internally and delegates to the new classmethod, so every existing
+  caller is unaffected. The per-fold-encoder path (`use_per_fold_encoder`) and
+  corpus-dependent encoders (e.g. TF-IDF, which must refit per fold to stay
+  leakage-free) are untouched — the cache only engages for a frozen, shared
+  encoder. No feature value changes: the OOF frame, fusion model, thresholds
+  and evaluation are unaffected on a fixed corpus.
 - **Feature dependency graph + demand-driven computation (T87)** — the
   assembler now computes only the columns a caller actually requests
   (`FeatureAssembler.assemble(..., requested=...)`), resolved through a

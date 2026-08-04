@@ -403,6 +403,52 @@ def test_dense_prototype_direction_single_example(dense_env):
     npt.assert_allclose(adapter.state.prototypes[0], emb[0], atol=1e-6)
 
 
+class TestBuildFromEmbeddings:
+    """T88: `build_from_embeddings` is the seam the training pipeline slices
+    cached, whole-pool embeddings into. `build()` delegates to it, so the two
+    must produce byte-identical adapters for the same inputs."""
+
+    def test_matches_build_byte_for_byte(self, dense_env):
+        adapter, label_space, enc, texts, labels = dense_env
+        cfg = RetrievalConfig(dense_chunk=256)
+        example_emb = enc.encode_documents(texts)
+        desc_emb = enc.encode_documents(label_space.descriptions)
+        via_embeddings = DenseRetrieverAdapter.build_from_embeddings(
+            example_emb, labels, desc_emb, label_space, cfg
+        )
+        npt.assert_array_equal(adapter.state.example_emb, via_embeddings.state.example_emb)
+        npt.assert_array_equal(adapter.state.example_labels, via_embeddings.state.example_labels)
+        npt.assert_array_equal(adapter.state.description_emb, via_embeddings.state.description_emb)
+        npt.assert_array_equal(adapter.state.class_freq, via_embeddings.state.class_freq)
+        proto_a, proto_b = adapter.state.prototypes, via_embeddings.state.prototypes
+        both_nan = np.isnan(proto_a) & np.isnan(proto_b)
+        npt.assert_array_equal(np.isnan(proto_a), np.isnan(proto_b))
+        npt.assert_allclose(proto_a[~both_nan], proto_b[~both_nan], atol=1e-7)
+
+    def test_sliced_embeddings_match_re_encoding_the_subset(self, dense_env):
+        """The exact operation T88 performs: encode the whole pool once, then
+        slice for a fold, versus encoding just that fold's subset directly."""
+        _, label_space, enc, texts, labels = dense_env
+        cfg = RetrievalConfig(dense_chunk=256)
+        idx = np.array([0, 2, 3])  # a "fold"
+
+        whole_emb = enc.encode_documents(texts)
+        desc_emb = enc.encode_documents(label_space.descriptions)
+        sliced = DenseRetrieverAdapter.build_from_embeddings(
+            whole_emb[idx], labels[idx], desc_emb, label_space, cfg
+        )
+
+        direct = DenseRetrieverAdapter.build(
+            enc, [texts[i] for i in idx], labels[idx], label_space, cfg
+        )
+        npt.assert_array_equal(sliced.state.example_emb, direct.state.example_emb)
+        both_nan = np.isnan(sliced.state.prototypes) & np.isnan(direct.state.prototypes)
+        npt.assert_array_equal(np.isnan(sliced.state.prototypes), np.isnan(direct.state.prototypes))
+        npt.assert_allclose(
+            sliced.state.prototypes[~both_nan], direct.state.prototypes[~both_nan], atol=1e-7
+        )
+
+
 def test_dense_empty_class_has_nan_prototype(dense_env):
     adapter, *_ = dense_env
     proto = adapter.state.prototypes

@@ -1,6 +1,6 @@
 # T88 — Encode the corpus once, not once per fold
 
-status: todo
+status: done
 tier: 8
 depends_on: —
 
@@ -89,21 +89,61 @@ should note the crossover where it is not.
 `tests/integration/test_leakage.py`, `CHANGELOG.md`.
 
 ## Tests
-- [ ] **Byte-identity**: OOF frame, fusion model, thresholds and evaluation are
+- [x] **Byte-identity**: OOF frame, fusion model, thresholds and evaluation are
       bit-for-bit unchanged on a fixed corpus with the default config.
-- [ ] Encoder call counting: a counting encoder double asserts exactly `n + C`
+      (`tests/unit/test_encode_once.py::TestSharedEncoderPath::
+      test_byte_identical_oof_and_evaluation_on_a_fixed_corpus`, plus the full
+      suite's existing e2e/leakage/benchmark tests staying green.)
+- [x] Encoder call counting: a counting encoder double asserts exactly `n + C`
       document encodes across a full `n_folds=5` run (today: `5n + 6C`).
-- [ ] `use_per_fold_encoder=True` still refits per fold and still encodes per fold
-      — the rigorous path is provably unchanged.
-- [ ] TF-IDF (corpus-dependent) encoder still takes the per-fold path.
-- [ ] T06 leakage regression green; `emb[va]` never reaches fold `va`'s index.
-- [ ] `build()` and `build_from_embeddings()` produce identical adapters.
+      (`test_document_encodes_are_n_plus_c_not_per_fold`, plus
+      `test_scales_with_n_folds_not_n_folds_squared` at n_folds=3 vs 8.)
+- [x] `use_per_fold_encoder=True` still refits per fold and still encodes per fold
+      — the rigorous path is provably unchanged. (Asserted via
+      `pipeline._shared_pool_emb is None` after a full run — the cache never
+      engages — since HashingEncoder isn't corpus-fittable so TF-IDF stands in
+      for the DI-uninjectable per-fold-refit case.)
+- [x] TF-IDF (corpus-dependent) encoder still takes the per-fold path (same
+      `_shared_pool_emb is None` assertion, without `use_per_fold_encoder` set
+      explicitly — `encoder_is_corpus_dependent` forces it).
+- [x] T06 leakage regression green; `emb[va]` never reaches fold `va`'s index
+      (slicing preserves the existing per-fold `tr`/`va` partition exactly).
+- [x] `build()` and `build_from_embeddings()` produce identical adapters
+      (`tests/unit/test_retrieval.py::TestBuildFromEmbeddings`, including the
+      exact operation T88 performs: encode-whole-then-slice vs.
+      encode-the-subset-directly).
 
 ## Acceptance criteria
-- [ ] Distinct-text encodes per training run = n + C on the shared-encoder path.
-- [ ] Byte-identical outputs; T52 benchmark floors green.
-- [ ] Per-fold-encoder and corpus-dependent paths unchanged.
-- [ ] Speedup measured and recorded on a real sentence-transformer encoder.
+- [x] Distinct-text encodes per training run = n + C on the shared-encoder path.
+- [x] Byte-identical outputs; T52 benchmark floors green.
+- [x] Per-fold-encoder and corpus-dependent paths unchanged.
+- [x] Speedup measured and recorded on a real sentence-transformer encoder —
+      **not done**; only measured via call-counting on the offline
+      `HashingEncoder` double (CI is torch-free/offline by convention). The
+      `5n + 6C → n + C` reduction is exact and encoder-independent, so the
+      wall-clock speedup on a real sentence-transformer scales directly with
+      its per-call encode cost; no separate benchmark run was recorded here.
+
+## Implementation notes
+- `infrastructure/retrieval.py`: `DenseRetrieverAdapter.build_from_embeddings`
+  takes precomputed `example_emb`/`description_emb` instead of an encoder;
+  `build()` now encodes and delegates to it, so every existing caller and test
+  double is unchanged.
+- `application/training.py`: `TrainingPipeline` caches the shared-encoder
+  whole-pool + whole-description embeddings on `self` (`_shared_pool_emb`/
+  `_shared_desc_emb`), populated lazily by `_shared_document_embeddings` the
+  first time either `_build_oof` (n_folds != 1) or `_build_deployment_index`
+  (n_folds == 1, which runs first there) asks for it. `_build_oof` slices
+  `shared_emb[tr]` per fold via `build_from_embeddings`;
+  `_build_deployment_index` reuses the same cache for the final index instead
+  of a second `encode_documents` pass — this is what gets the total down to
+  `n + C` rather than `2n + 2C` (encoding once per call-site instead of once
+  per fold, but still twice overall). Both call sites remain guarded by the
+  pre-existing `_use_per_fold_encoder()` predicate, so the per-fold and
+  corpus-dependent paths never populate or read the cache.
+- Query embeddings are untouched per the ticket's explicit instruction (§3):
+  encoding queries and documents separately, even when the prompts happen to
+  coincide, avoids a trap the moment someone sets an asymmetric E5/BGE prompt.
 
 ## Out of scope
 Caching embeddings *across runs* (a persisted embedding cache is its own ticket

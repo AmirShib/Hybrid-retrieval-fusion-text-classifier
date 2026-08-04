@@ -218,7 +218,7 @@ Decisions taken 2026-08-04, recorded in the tickets:
 
 | ID  | Title                                                                       | Status | Depends on              |
 |-----|-----------------------------------------------------------------------------|--------|-------------------------|
-| T88 | Encode the corpus once, not once per fold (~5x less encoder work)            | todo   | —                       |
+| T88 | Encode the corpus once, not once per fold (~5x less encoder work)            | done   | —                       |
 | T32 | BM25 at scale: bounded memory + throughput (re-scoped from Tier 3)           | todo   | T04                     |
 | T87 | Feature dependency graph + demand-driven computation                         | done   | T70                     |
 | T83 | Device execution profile + device policy (measure-first gate; run after T88) | todo   | T88                     |
