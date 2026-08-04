@@ -4,6 +4,25 @@ status: todo
 tier: 3
 depends_on: T23, T03
 
+## Re-prioritized 2026-08-04 (Tier 8)
+Both phases are now on the critical path and the two halves have **different**
+consumers, so they should be scheduled separately:
+
+- **Phase 1 (retriever registry) is a prerequisite for T85** and should be done
+  first — it is small, already fully specified below, and without it a
+  device-resident dense retriever is a fork of `DenseRetrieverAdapter` rather
+  than a `dense_kind="torch"` plug-in.
+- **Phase 2 (signal providers) is the signal-level answer to feature
+  decoupling.** T87 makes *column*-level pruning demand-driven, but a whole
+  expensive signal (a cross-encoder, an external scoring service) can only be
+  skipped by not enabling it — and skipping one changes the candidate set, so it
+  must stay an explicit config decision. Phase 2 therefore depends on T87's
+  dependency graph: a signal provider is a node in it, and `candidate_features`
+  is what marks a node as unprunable.
+
+Sequencing note added to the existing one below: land T87 before phase 2, so
+providers plug into a graph that already exists rather than one invented twice.
+
 ## Goal
 Open the closed heart of the system: make retrieval *signals* pluggable — a user
 adds a sixth signal (domain lexicon, char-ngram BM25, metadata prior, in-house
