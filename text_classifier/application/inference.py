@@ -112,6 +112,7 @@ class InferencePipeline:
             query_labels=None,
             chunk=a.config.retrieval.feature_chunk,
             providers=self._providers,
+            requested=self._feature_names,
         )
 
         # Every item defaults to abstaining; this also covers items whose features
@@ -169,6 +170,7 @@ class InferencePipeline:
             query_labels=None,
             chunk=a.config.retrieval.feature_chunk,
             providers=self._providers,
+            requested=self._feature_names,
         )
         results: List[List[Tuple[str, float]]] = [[] for _ in texts]
         if not len(feats):
@@ -223,6 +225,7 @@ class InferencePipeline:
             query_labels=None,
             chunk=a.config.retrieval.feature_chunk,
             providers=self._providers,
+            requested=self._assembled_names,
         )
         if not len(feats):
             return pd.DataFrame(columns=columns)
@@ -287,6 +290,7 @@ class InferencePipeline:
             query_labels=None,
             chunk=a.config.retrieval.feature_chunk,
             providers=self._providers,
+            requested=self._assembled_names,
         )
         if not len(feats):
             empty = {
@@ -352,6 +356,7 @@ class InferencePipeline:
             query_labels=None,
             chunk=a.config.retrieval.feature_chunk,
             providers=self._providers,
+            requested=self._assembled_names,
         )
         neighbors = self._neighbor_evidence(texts, q_emb, keys, n_neighbors)
 

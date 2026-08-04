@@ -1,6 +1,6 @@
 # T87 — Feature dependency graph + demand-driven computation
 
-status: todo
+status: done
 tier: 8
 depends_on: T70
 
@@ -108,25 +108,54 @@ rather than a silent train/infer disagreement.
 `tests/unit/test_signal_report.py`.
 
 ## Tests
-- [ ] **Pruning parity (fuzzed)**: for randomized requested subsets, every column
+- [x] **Pruning parity (fuzzed)**: for randomized requested subsets, every column
       in the subset matches its full-schema value exactly. The core safety net.
-- [ ] Candidate mask identical under every pruning subset (bit-for-bit).
-- [ ] A provider with all columns dropped has `compute` **never called** (assert
+      (`tests/unit/test_feature_pruning.py::TestPruningParity`, 12 seeds x random
+      subsets + a dedicated shared-computation case.)
+- [x] Candidate mask identical under every pruning subset (bit-for-bit).
+- [x] A provider with all columns dropped has `compute` **never called** (assert
       via a spy provider, not by timing).
-- [ ] Requesting the full schema is byte-identical to today's output.
-- [ ] `signal_report` on a pruned frame names the skipped signals instead of raising.
-- [ ] Every name in `FEATURE_NAMES` has a `FEATURE_DEPS` entry, and every node
+- [x] Requesting the full schema is byte-identical to today's output.
+- [x] `signal_report` on a pruned frame names the skipped signals instead of raising.
+- [x] Every name in `FEATURE_NAMES` has a `FEATURE_DEPS` entry, and every node
       referenced is produced by something (a schema-completeness test, so a new
       feature cannot be added without declaring its inputs).
-- [ ] T06 leakage regression + T52 floors green.
+- [x] T06 leakage regression + T52 floors green.
 
 ## Acceptance criteria
-- [ ] `drop_features` measurably reduces assembly work — recorded on a fixed corpus.
-- [ ] Dropping every column of a provider skips it entirely.
-- [ ] Adding a feature requires touching `FEATURE_NAMES`, `FEATURE_DEPS` and
+- [x] `drop_features` measurably reduces assembly work — recorded on a fixed corpus
+      (`TestPruningReducesWork`: call-count assertions on `_row_rank`/`_row_margin`/
+      `_row_minmax`, not wall-clock timing).
+- [x] Dropping every column of a provider skips it entirely.
+- [x] Adding a feature requires touching `FEATURE_NAMES`, `FEATURE_DEPS` and
       `features.py` — enforced by the completeness test, not by convention.
-- [ ] Empty `drop_features` (the default) is byte-for-byte unchanged.
-- [ ] `CHANGELOG.md` records the diagnostic-narrowing behaviour change.
+- [x] Empty `drop_features` (the default) is byte-for-byte unchanged.
+- [x] `CHANGELOG.md` records the diagnostic-narrowing behaviour change.
+
+## Implementation notes
+- `domain/services.py`: `FEATURE_DEPS` (column/intermediate → inputs) and
+  `feature_closure(requested)` (transitive closure, always including
+  `candidates` and its 5 signal-node deps — the "never pruned" rule).
+- `application/features.py`: `FeatureAssembler.assemble`/`_assemble_chunk` take
+  `requested: Optional[Sequence[str]] = None` (`None` = everything, the exact
+  pre-T87 path). `_row_rank`/`_row_margin`/`_row_minmax`/the `n_signal_agreement`
+  python loop are called only when a dependent column is wanted; the final
+  frame includes only columns present in `data`, i.e. requested ones. A margin
+  call serves both `margin_*` and its paired `q_gap_*` (shared computation) but
+  each is only added to the output if individually requested.
+  `_provider_columns` skips `compute()` when none of a provider's declared
+  names intersect the demand set.
+- Callers: `predict`/`predict_topk` (inference) and OOF/LOO/external
+  featurization (training) request `fusion_feature_names(...)`;
+  `explain`/`explain_records`/`importance_report` request
+  `composed_feature_names(...)` (via `self._assembled_names`) in their own
+  separate assembly pass. Training's per-fold OOF loop computes the requested
+  list fresh each fold from that fold's own provider instances (not
+  `self._feature_names`, which is only correct after the deployment index step
+  runs) — same fold-invariant name list either way, since provider names are
+  stable pre/post fit.
+- `signal_report` gained a `skipped_signals` key (signals whose `top1` column
+  is absent); the model-card renderer surfaces it as a bullet when non-empty.
 
 ## Out of scope
 Signal-level opt-out (T34 phase 2). Generalizing this into whole-pipeline DAG

@@ -8,7 +8,7 @@ indexing. Queries are processed in chunks to bound peak memory.
 
 from __future__ import annotations
 
-from typing import Any, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Optional, Sequence, Set, Tuple, Union
 
 import warnings
 
@@ -24,11 +24,30 @@ from ..domain import (
     LabelSpace,
     LexicalRetriever,
     composed_feature_names,
+    feature_closure,
 )
 
 # Re-exported for callers that reach for it via the assembly module; the
 # canonical definition lives in the domain schema (``domain/services.py``).
 __all__ = ["FeatureAssembler", "composed_feature_names"]
+
+
+def _effective_names(
+    providers: Sequence[FeatureProvider], requested: Optional[Sequence[str]]
+) -> list:
+    """The columns this call will actually produce: the full composed schema
+    when ``requested`` is ``None`` (every existing caller, byte-for-byte
+    unchanged), else the composed schema narrowed to ``feature_closure(requested)``
+    plus any provider whose own names overlap ``requested``."""
+    names = composed_feature_names(providers)
+    if requested is None:
+        return names
+    needed = feature_closure(requested)
+    req = set(requested)
+    provider_names = {n for p in providers for n in p.names()}
+    core_needed = {n for n in FEATURE_NAMES if n in needed}
+    kept_providers = {n for n in provider_names if n in req}
+    return [n for n in names if n in core_needed or n in kept_providers]
 
 
 def _scatter_knn(labels: np.ndarray, scores: np.ndarray, n_classes: int):
@@ -169,6 +188,7 @@ class FeatureAssembler:
         chunk: int = 4096,
         providers: Sequence[FeatureProvider] = (),
         self_ids: Optional[np.ndarray] = None,
+        requested: Optional[Sequence[str]] = None,
     ) -> pd.DataFrame:
         """Assemble the (item, candidate) feature table.
 
@@ -181,7 +201,16 @@ class FeatureAssembler:
         of each query when the queries *are* the pool being retrieved against: the
         dense/BM25 kNN drop that self-neighbor and the dense prototype leaves the
         query's own vector out of its own class. ``None`` (the default) is ordinary
-        featurization — every existing caller — and is byte-for-byte unchanged."""
+        featurization — every existing caller — and is byte-for-byte unchanged.
+
+        ``requested`` (T87) is the caller's demand: the column names it actually
+        needs (typically ``fusion_feature_names(...)`` to fit/score the model, or
+        ``composed_feature_names(...)`` for a diagnostic that reads core columns
+        by name). ``None`` (the default) means "everything" and reproduces the
+        original, unconditional-computation behaviour exactly. A non-``None``
+        request only *narrows* what appears in the output — the candidate mask
+        itself is never pruned (every signal that feeds it still runs), and every
+        surviving column's value is identical to the unpruned computation."""
         frames = []
         ids = np.asarray(query_ids)
         sids = None if self_ids is None else np.asarray(self_ids)
@@ -198,18 +227,38 @@ class FeatureAssembler:
                     None if query_labels is None else np.asarray(query_labels)[sl],
                     providers,
                     None if sids is None else sids[sl],
+                    requested,
                 )
             )
         if frames:
             return pd.concat(frames, ignore_index=True)
-        return pd.DataFrame(columns=composed_feature_names(providers))
+        return pd.DataFrame(columns=_effective_names(providers, requested))
 
     def _assemble_chunk(
-        self, texts, q_emb, dense, lexical, k, ids, labels, providers=(), self_ids=None
+        self,
+        texts,
+        q_emb,
+        dense,
+        lexical,
+        k,
+        ids,
+        labels,
+        providers=(),
+        self_ids=None,
+        requested: Optional[Sequence[str]] = None,
     ) -> pd.DataFrame:
         C = self._space.size
         n = self._policy.top_n_per_signal
         class_freq = dense.class_freq
+
+        # T87: which columns this call actually needs. `None` means "everything"
+        # (every pre-T87 caller) and is deliberately not narrowed to a concrete
+        # set — `_want` below then always answers True, reproducing the original
+        # unconditional computation exactly, including its exact column order.
+        needed: Optional[Set[str]] = None if requested is None else feature_closure(requested)
+
+        def _want(name: str) -> bool:
+            return needed is None or name in needed
 
         # ---- signals as (b, C) matrices ----
         # In leave-one-out mode (self_ids given) each query is itself in the pool,
@@ -242,7 +291,7 @@ class FeatureAssembler:
         )
         rows, cols = np.nonzero(mask)
         if rows.size == 0:
-            empty_cols = composed_feature_names(providers) + (
+            empty_cols = _effective_names(providers, requested) + (
                 ["is_true"] if labels is not None else []
             )
             return pd.DataFrame(columns=empty_cols)
@@ -258,75 +307,142 @@ class FeatureAssembler:
             abs_top_bm25 = np.nanmax(np.where(np.isnan(bn_sco), -np.inf, bn_sco), axis=1)
         abs_top_bm25 = np.where(np.isfinite(abs_top_bm25), abs_top_bm25, 0.0)
 
-        argstack = np.stack([a_desc, a_proto, a_bdesc, a_dknn, a_bknn], axis=1)
-        n_agree = np.fromiter(
-            (5 - len({v for v in r if v >= 0}) for r in argstack),
-            dtype=np.float64,
-            count=argstack.shape[0],
-        )
+        # ---- ranks / norms / margins over candidate sets (T87: leaf columns,
+        # each a full (b, C) sort or top-2 partition — skip the ones nobody
+        # asked for). A margin call also produces the paired q_gap_* column, so
+        # it runs when *either* is wanted and each column is only added to
+        # ``data`` below if it was individually requested. ----
+        want_rank_d_desc = _want("rank_d_desc")
+        want_rank_b_desc = _want("rank_b_desc")
+        want_rank_d_knn = _want("rank_d_knn")
+        want_rank_b_knn = _want("rank_b_knn")
+        want_norm_d_desc = _want("norm_d_desc")
+        want_norm_b_desc = _want("norm_b_desc")
+        want_agreement = _want("n_signal_agreement")
+        want_margin_d_desc = _want("margin_d_desc") or _want("q_gap_d_desc")
+        want_margin_d_proto = _want("margin_d_proto")
+        want_margin_d_knn = _want("margin_d_knn") or _want("q_gap_d_knn")
+        want_margin_b_desc = _want("margin_b_desc") or _want("q_gap_b_desc")
+        want_margin_b_knn = _want("margin_b_knn")
 
-        # ---- ranks / norms over candidate sets ----
-        rk_dd = _row_rank(desc_d, mask)
-        rk_bd = _row_rank(bdesc, mask)
-        rk_dk = _row_rank(d_sum, mask)
-        rk_bk = _row_rank(b_sum, mask)
-        nm_dd = _row_minmax(desc_d, mask)
-        nm_bd = _row_minmax(bdesc, mask)
+        rk_dd = _row_rank(desc_d, mask) if want_rank_d_desc else None
+        rk_bd = _row_rank(bdesc, mask) if want_rank_b_desc else None
+        rk_dk = _row_rank(d_sum, mask) if want_rank_d_knn else None
+        rk_bk = _row_rank(b_sum, mask) if want_rank_b_knn else None
+        nm_dd = _row_minmax(desc_d, mask) if want_norm_d_desc else None
+        nm_bd = _row_minmax(bdesc, mask) if want_norm_b_desc else None
 
-        # ---- competition: margin to the best rival + the query's top1-top2 gap ----
-        mg_dd, gap_dd = _row_margin(desc_d, mask)
-        mg_dp, _ = _row_margin(proto, mask)
-        mg_dk, gap_dk = _row_margin(d_sum, mask)
-        mg_bd, gap_bd = _row_margin(bdesc, mask)
-        mg_bk, _ = _row_margin(b_sum, mask)
+        mg_dd, gap_dd = _row_margin(desc_d, mask) if want_margin_d_desc else (None, None)
+        mg_dp = _row_margin(proto, mask)[0] if want_margin_d_proto else None
+        mg_dk, gap_dk = _row_margin(d_sum, mask) if want_margin_d_knn else (None, None)
+        mg_bd, gap_bd = _row_margin(bdesc, mask) if want_margin_b_desc else (None, None)
+        mg_bk = _row_margin(b_sum, mask)[0] if want_margin_b_knn else None
+
+        if want_agreement:
+            argstack = np.stack([a_desc, a_proto, a_bdesc, a_dknn, a_bknn], axis=1)
+            n_agree = np.fromiter(
+                (5 - len({v for v in r if v >= 0}) for r in argstack),
+                dtype=np.float64,
+                count=argstack.shape[0],
+            )
+        else:
+            n_agree = None
 
         # ---- gather one value per (row, col) ----
         def g(M):  # gather helper
             return M[rows, cols]
 
-        data = {
-            "d_desc_sim": g(desc_d),
-            "d_proto_sim": g(proto),
-            "d_knn_sum": g(d_sum),
-            "d_knn_max": g(d_max),
-            "d_knn_count": g(d_cnt),
-            "b_desc_sim": g(bdesc),
-            "b_knn_sum": g(b_sum),
-            "b_knn_max": g(b_max),
-            "b_knn_count": g(b_cnt),
-            "desc_proto_gap": g(desc_d) - g(proto),
-            "class_log_freq": np.log1p(class_freq[cols].astype(np.float64)),
-            "abs_top_dense_sim": abs_top_dense[rows],
-            "abs_top_bm25": abs_top_bm25[rows],
-            "is_d_desc_top1": (cols == a_desc[rows]).astype(np.float64),
-            "is_d_proto_top1": ((cols == a_proto[rows]) & (a_proto[rows] >= 0)).astype(np.float64),
-            "is_b_desc_top1": ((cols == a_bdesc[rows]) & (a_bdesc[rows] >= 0)).astype(np.float64),
-            "is_d_knn_top1": (cols == a_dknn[rows]).astype(np.float64),
-            "is_b_knn_top1": ((cols == a_bknn[rows]) & (a_bknn[rows] >= 0)).astype(np.float64),
-            "b_desc_missing": np.isnan(g(bdesc)).astype(np.float64),
-            "b_knn_missing": np.isnan(g(b_sum)).astype(np.float64),
-            "d_knn_missing": np.isnan(g(d_sum)).astype(np.float64),
-            "rank_d_desc": g(rk_dd),
-            "rank_b_desc": g(rk_bd),
-            "rank_d_knn": g(rk_dk),
-            "rank_b_knn": g(rk_bk),
-            "norm_d_desc": g(nm_dd),
-            "norm_b_desc": g(nm_bd),
-            "n_signal_agreement": n_agree[rows],
-            "margin_d_desc": g(mg_dd),
-            "margin_d_proto": g(mg_dp),
-            "margin_d_knn": g(mg_dk),
-            "margin_b_desc": g(mg_bd),
-            "margin_b_knn": g(mg_bk),
-            "q_gap_d_desc": gap_dd[rows],
-            "q_gap_d_knn": gap_dk[rows],
-            "q_gap_b_desc": gap_bd[rows],
-        }
-        df = pd.DataFrame({col: np.asarray(data[col], dtype=np.float32) for col in FEATURE_NAMES})
+        data: Dict[str, np.ndarray] = {}
+        if _want("d_desc_sim"):
+            data["d_desc_sim"] = g(desc_d)
+        if _want("d_proto_sim"):
+            data["d_proto_sim"] = g(proto)
+        if _want("d_knn_sum"):
+            data["d_knn_sum"] = g(d_sum)
+        if _want("d_knn_max"):
+            data["d_knn_max"] = g(d_max)
+        if _want("d_knn_count"):
+            data["d_knn_count"] = g(d_cnt)
+        if _want("b_desc_sim"):
+            data["b_desc_sim"] = g(bdesc)
+        if _want("b_knn_sum"):
+            data["b_knn_sum"] = g(b_sum)
+        if _want("b_knn_max"):
+            data["b_knn_max"] = g(b_max)
+        if _want("b_knn_count"):
+            data["b_knn_count"] = g(b_cnt)
+        if _want("desc_proto_gap"):
+            data["desc_proto_gap"] = g(desc_d) - g(proto)
+        if _want("class_log_freq"):
+            data["class_log_freq"] = np.log1p(class_freq[cols].astype(np.float64))
+        if _want("abs_top_dense_sim"):
+            data["abs_top_dense_sim"] = abs_top_dense[rows]
+        if _want("abs_top_bm25"):
+            data["abs_top_bm25"] = abs_top_bm25[rows]
+        if _want("is_d_desc_top1"):
+            data["is_d_desc_top1"] = (cols == a_desc[rows]).astype(np.float64)
+        if _want("is_d_proto_top1"):
+            data["is_d_proto_top1"] = ((cols == a_proto[rows]) & (a_proto[rows] >= 0)).astype(
+                np.float64
+            )
+        if _want("is_b_desc_top1"):
+            data["is_b_desc_top1"] = ((cols == a_bdesc[rows]) & (a_bdesc[rows] >= 0)).astype(
+                np.float64
+            )
+        if _want("is_d_knn_top1"):
+            data["is_d_knn_top1"] = (cols == a_dknn[rows]).astype(np.float64)
+        if _want("is_b_knn_top1"):
+            data["is_b_knn_top1"] = ((cols == a_bknn[rows]) & (a_bknn[rows] >= 0)).astype(
+                np.float64
+            )
+        if _want("b_desc_missing"):
+            data["b_desc_missing"] = np.isnan(g(bdesc)).astype(np.float64)
+        if _want("b_knn_missing"):
+            data["b_knn_missing"] = np.isnan(g(b_sum)).astype(np.float64)
+        if _want("d_knn_missing"):
+            data["d_knn_missing"] = np.isnan(g(d_sum)).astype(np.float64)
+        if rk_dd is not None and _want("rank_d_desc"):
+            data["rank_d_desc"] = g(rk_dd)
+        if rk_bd is not None and _want("rank_b_desc"):
+            data["rank_b_desc"] = g(rk_bd)
+        if rk_dk is not None and _want("rank_d_knn"):
+            data["rank_d_knn"] = g(rk_dk)
+        if rk_bk is not None and _want("rank_b_knn"):
+            data["rank_b_knn"] = g(rk_bk)
+        if nm_dd is not None and _want("norm_d_desc"):
+            data["norm_d_desc"] = g(nm_dd)
+        if nm_bd is not None and _want("norm_b_desc"):
+            data["norm_b_desc"] = g(nm_bd)
+        if n_agree is not None:
+            data["n_signal_agreement"] = n_agree[rows]
+        if mg_dd is not None and _want("margin_d_desc"):
+            data["margin_d_desc"] = g(mg_dd)
+        if mg_dp is not None:
+            data["margin_d_proto"] = g(mg_dp)
+        if mg_dk is not None and _want("margin_d_knn"):
+            data["margin_d_knn"] = g(mg_dk)
+        if mg_bd is not None and _want("margin_b_desc"):
+            data["margin_b_desc"] = g(mg_bd)
+        if mg_bk is not None:
+            data["margin_b_knn"] = g(mg_bk)
+        if gap_dd is not None and _want("q_gap_d_desc"):
+            data["q_gap_d_desc"] = gap_dd[rows]
+        if gap_dk is not None and _want("q_gap_d_knn"):
+            data["q_gap_d_knn"] = gap_dk[rows]
+        if gap_bd is not None and _want("q_gap_b_desc"):
+            data["q_gap_b_desc"] = gap_bd[rows]
+
+        core_cols = [c for c in FEATURE_NAMES if c in data]
+        df = pd.DataFrame({col: np.asarray(data[col], dtype=np.float32) for col in core_cols})
         # Custom providers append their columns after the core ~28. Each
         # gathers over the same (rows, cols) grid; a provider that "did not fire"
-        # for a candidate emits NaN, which XGBoost consumes as missing.
-        for col, values in self._provider_columns(providers, texts, q_emb, rows, cols).items():
+        # for a candidate emits NaN, which XGBoost consumes as missing. A
+        # provider whose columns are all pruned by ``needed`` is not called at
+        # all (T87) — the whole point for a provider that calls out to an
+        # external service or a reranker.
+        for col, values in self._provider_columns(
+            providers, texts, q_emb, rows, cols, needed
+        ).items():
             df[col] = values
         df["item_id"] = ids[rows]
         df["candidate"] = cols.astype(np.int64)
@@ -334,10 +450,16 @@ class FeatureAssembler:
             df["is_true"] = (cols == labels[rows]).astype(np.int64)
         return df
 
-    def _provider_columns(self, providers, texts, q_emb, rows, cols) -> dict:
+    def _provider_columns(self, providers, texts, q_emb, rows, cols, needed=None) -> dict:
         """Run each provider over the candidate grid and collect its columns as
         float32 arrays, validating the contract (declared names, one value per
-        candidate row). Returns an insertion-ordered ``{name: (n_candidates,)}``."""
+        candidate row). Returns an insertion-ordered ``{name: (n_candidates,)}``.
+
+        ``needed`` is the T87 demand set (``None`` = everything, the pre-T87
+        behaviour): a provider whose declared ``names()`` share nothing with it
+        has ``compute`` skipped entirely — the demand-driven half of the
+        provider contract, so a provider that calls an external service pays
+        nothing when every one of its columns is dropped."""
         if not providers:
             return {}
         ctx = FeatureContext(
@@ -351,6 +473,8 @@ class FeatureAssembler:
         out: dict = {}
         for provider in providers:
             declared = provider.names()
+            if needed is not None and not any(name in needed for name in declared):
+                continue
             produced = provider.compute(ctx)
             missing = [nm for nm in declared if nm not in produced]
             if missing:
@@ -359,6 +483,8 @@ class FeatureAssembler:
                     f"that {type(provider).__name__}.names() declares"
                 )
             for name in declared:
+                if needed is not None and name not in needed:
+                    continue
                 arr = np.asarray(produced[name])
                 if arr.shape != (n,):
                     raise ValueError(

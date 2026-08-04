@@ -18,6 +18,7 @@ from .ports import (
 )
 from .services import (
     ENCODER_SELECTION_METRICS,
+    FEATURE_DEPS,
     FEATURE_NAMES,
     AbstentionPolicy,
     CandidatePolicy,
@@ -25,6 +26,7 @@ from .services import (
     ThresholdTuner,
     composed_feature_names,
     encoder_retrieval_metrics,
+    feature_closure,
     fusion_feature_names,
 )
 
@@ -42,8 +44,10 @@ __all__ = [
     "FeatureProvider",
     "FeatureContext",
     "FEATURE_NAMES",
+    "FEATURE_DEPS",
     "composed_feature_names",
     "fusion_feature_names",
+    "feature_closure",
     "CandidatePolicy",
     "AbstentionPolicy",
     "ThresholdTuner",

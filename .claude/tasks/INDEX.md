@@ -157,7 +157,7 @@ existing one. T70 is the high-value capability; T71 is a design spike gated on i
 
 | ID  | Title                                                                          | Status | Depends on   |
 |-----|--------------------------------------------------------------------------------|--------|--------------|
-| T70 | Pluggable custom features into the fusion layer (train + inference parity)     | in-review | T23, T03  |
+| T70 | Pluggable custom features into the fusion layer (train + inference parity)     | done | T23, T03  |
 | T71 | Design spike: DAG-based pipeline orchestration with declared dependencies       | todo   | T70          |
 | T72 | Pluggable input/output formats (Parquet/JSONL/SQL/cloud) behind a `RecordSource`/`RecordSink` port | todo | T23 |
 | T73 | Richer labeled-evaluation analytics (confusion, aggregate scores, abstention quality, bootstrap CIs) | todo | T61 |
@@ -220,7 +220,7 @@ Decisions taken 2026-08-04, recorded in the tickets:
 |-----|-----------------------------------------------------------------------------|--------|-------------------------|
 | T88 | Encode the corpus once, not once per fold (~5x less encoder work)            | todo   | —                       |
 | T32 | BM25 at scale: bounded memory + throughput (re-scoped from Tier 3)           | todo   | T04                     |
-| T87 | Feature dependency graph + demand-driven computation                         | todo   | T70                     |
+| T87 | Feature dependency graph + demand-driven computation                         | done   | T70                     |
 | T83 | Device execution profile + device policy (measure-first gate; run after T88) | todo   | T88                     |
 | T84 | Array-backend seam: `ArrayOps` port, `auto` selection, CPU byte-identical    | todo   | T83 (thresholds)        |
 | T85 | Device-resident dense retrieval + encoder handoff (no D2H mid-pipeline)      | todo   | T63, T34-p1, T83, T84, T88 |

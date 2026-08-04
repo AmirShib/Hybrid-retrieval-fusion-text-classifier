@@ -416,6 +416,12 @@ class TrainingPipeline:
             )
             # Providers are fit on this fold's training rows only (leakage-free).
             providers = self._fit_providers(tr, texts, y, label_space)
+            # T87: request only the columns the fusion model will actually be
+            # fitted on. This is the accepted diagnostic-narrowing trade —
+            # `signal_report(oof)` downstream only sees what survives here — and
+            # is fold-invariant (same drop list, provider names are stable
+            # before/after fit), so every fold's frame carries the same columns.
+            requested = fusion_feature_names(providers, self.cfg.fusion.drop_features)
 
             va_texts = [texts[i] for i in va]
             q_emb = enc.encode_queries(va_texts)
@@ -429,6 +435,7 @@ class TrainingPipeline:
                 query_labels=y[va],
                 chunk=self.cfg.retrieval.feature_chunk,
                 providers=providers,
+                requested=requested,
             )
             feats["fold"] = fold
             frames.append(feats)
@@ -474,6 +481,7 @@ class TrainingPipeline:
             chunk=self.cfg.retrieval.feature_chunk,
             providers=self._providers,
             self_ids=self_ids,
+            requested=self._feature_names,
         )
         feats["fold"] = 0
         recall = float(feats.groupby("item_id")["is_true"].max().mean()) if len(feats) else 0.0
@@ -525,6 +533,7 @@ class TrainingPipeline:
             # that ship in the model — so external items are scored under the
             # production condition, exactly like the dense/lexical indices here.
             providers=self._providers,
+            requested=self._feature_names,
         )
         return feats, y
 

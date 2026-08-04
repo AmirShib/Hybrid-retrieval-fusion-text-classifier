@@ -81,13 +81,37 @@ class TestDropFeaturesPersistence:
         assert len(preds) == 5
 
     def test_assembler_still_produces_every_column(self, tmp_path, task):
-        """Dropping narrows the *model*, not the frame: explain/signal_report and
-        the masking ablation all read core columns by name."""
+        """Dropping narrows the *model*, not what a fresh diagnostic pass can
+        assemble: explain always requests the full composed schema, in its own
+        assembly call, regardless of what the model was trained on (T87)."""
         _, items = task
         out = _train(tmp_path, task, DROPPED)
         frame = InferencePipeline.from_directory(out).explain([it.text for it in items[:3]])
         for name in DROPPED:
             assert name in frame.columns, f"{name} vanished from the assembled frame"
+
+    def test_training_diagnostics_narrow_with_the_dropped_schema(self, tmp_path, task):
+        """T87, the accepted trade: dropping every column of a signal means
+        training's out-of-fold frame never assembles that signal's columns, so
+        the persisted signal_report names it as skipped rather than reporting
+        stale/zeroed numbers for it."""
+        import json
+
+        drop_bm25_knn = [
+            "b_knn_sum",
+            "b_knn_max",
+            "b_knn_count",
+            "is_b_knn_top1",
+            "b_knn_missing",
+            "rank_b_knn",
+            "margin_b_knn",
+        ]
+        out = _train(tmp_path, task, drop_bm25_knn, name="narrowed")
+        with open(os.path.join(out, "evaluation.json")) as fh:
+            evaluation = json.load(fh)
+        sig = evaluation["signal_report"]
+        assert sig["skipped_signals"] == ["bm25_knn"]
+        assert "bm25_knn" not in {e["signal"] for e in sig["per_signal"]}
 
 
 class TestDropFeaturesBehaviour:

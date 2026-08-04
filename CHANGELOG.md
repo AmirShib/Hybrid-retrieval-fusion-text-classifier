@@ -9,6 +9,31 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 ## [Unreleased]
 
 ### Added
+- **Feature dependency graph + demand-driven computation (T87)** — the
+  assembler now computes only the columns a caller actually requests
+  (`FeatureAssembler.assemble(..., requested=...)`), resolved through a
+  declared dependency graph (`domain.FEATURE_DEPS` / `feature_closure`)
+  instead of unconditionally building the full ~36-column schema every call.
+  Training and scoring (`predict`, `predict_topk`, fit) request
+  `fusion_feature_names(...)` — the model's own columns; `explain`,
+  `explain_records`, `signal_report` and the ablation report request
+  `composed_feature_names(...)` — everything, because they read core columns
+  by name. The candidate mask is never pruned (every signal that feeds it
+  still runs on every call); what's skipped is downstream leaf work nothing
+  reads — the `rank_*`/`margin_*`/`norm_*`/`n_signal_agreement` sorts and
+  partitions, and, sharpest of all, a custom `FeatureProvider`'s `compute()`
+  when every one of its declared columns is dropped (previously it ran
+  unconditionally, the exact cost `drop_features` claimed to avoid for a
+  provider calling an external service or a reranker). **Behaviour change,
+  accepted:** a model trained with `FusionConfig.drop_features` now gets a
+  correspondingly narrower `signal_report` on its training out-of-fold data
+  (it names the skipped signals rather than reporting on columns that were
+  never assembled); diagnostics computed fresh at inference time
+  (`explain`/`explain_records`/`importance_report`) are unaffected, since they
+  always request the full schema. Pruning is value-preserving by construction
+  and fuzz-tested: for any requested subset, every surviving column's value is
+  identical to the unpruned computation. Empty `drop_features` (the default)
+  is byte-for-byte unchanged.
 - **Retrain-based feature ablation (T82)** — `FusionConfig.drop_features` (plus
   `--drop-features` on the train CLI) withholds named columns from the fusion
   model, and `text-classifier-retrain-ablate` trains each arm plus a paired

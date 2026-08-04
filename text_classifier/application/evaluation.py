@@ -389,6 +389,12 @@ def render_model_card(manifest: Dict[str, Any], evaluation: Dict[str, Any]) -> s
                 "(1 = every firing signal agrees, up to 5 = all disagree)",
                 f"- **Full-consensus rate:** {pct(ag.get('consensus_rate'))}",
             ]
+        skipped = sig.get("skipped_signals") or []
+        if skipped:
+            lines.append(
+                f"- **Skipped (columns not assembled, e.g. `drop_features`):** "
+                f"{', '.join(skipped)}"
+            )
     lines += [
         "",
         "See `evaluation.json` for the per-class breakdown, reliability table, "

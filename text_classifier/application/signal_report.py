@@ -42,7 +42,13 @@ SIGNALS: Dict[str, Dict[str, str]] = {
 
 
 def _empty_report() -> Dict[str, Any]:
-    return {"n_items": 0, "n_candidate_rows": 0, "per_signal": [], "agreement": {}}
+    return {
+        "n_items": 0,
+        "n_candidate_rows": 0,
+        "per_signal": [],
+        "agreement": {},
+        "skipped_signals": [],
+    }
 
 
 def signal_report(features: pd.DataFrame) -> Dict[str, Any]:
@@ -68,6 +74,10 @@ def signal_report(features: pd.DataFrame) -> Dict[str, Any]:
     - ``agreement`` — ``mean_distinct_top_classes`` (1 = every firing signal points
       at the same class, up to 5 = all disagree) and ``consensus_rate`` (fraction of
       items where the firing signals unanimously agree).
+    - ``skipped_signals`` — signals whose columns are absent from ``features``
+      (T87: a model trained with ``drop_features`` narrows the assembled frame,
+      so its out-of-fold diagnostics narrow with it) — named rather than
+      silently missing from ``per_signal``, or KeyError-ing.
 
     Empty input yields the zero-filled structure rather than raising.
     """
@@ -83,9 +93,11 @@ def signal_report(features: pd.DataFrame) -> Dict[str, Any]:
     is_true = features["is_true"].to_numpy().astype(bool)
 
     per_signal: List[Dict[str, Any]] = []
+    skipped: List[str] = []
     for name, cols in SIGNALS.items():
         flag_col = cols["top1"]
         if flag_col not in features.columns:
+            skipped.append(name)
             continue
         # Exactly one candidate per item carries the flag — the signal's own top
         # pick — and none when the signal did not fire for that item.
@@ -120,4 +132,5 @@ def signal_report(features: pd.DataFrame) -> Dict[str, Any]:
         "n_candidate_rows": int(len(features)),
         "per_signal": per_signal,
         "agreement": agreement,
+        "skipped_signals": skipped,
     }

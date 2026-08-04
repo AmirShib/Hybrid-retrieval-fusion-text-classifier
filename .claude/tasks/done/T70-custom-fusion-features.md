@@ -1,6 +1,6 @@
 # T70 — Pluggable custom features into the fusion layer (train + inference parity)
 
-status: in-review
+status: done
 tier: 7
 depends_on: T23, T03
 
@@ -63,11 +63,11 @@ gets written to `meta.json` and re-read at load.
   (train→save→load→infer with a custom provider, identical column order), leakage (T06).
 
 ## Acceptance criteria
-- [ ] Zero providers configured → schema + outputs byte-for-byte identical to today.
-- [ ] A custom provider's columns reach the fusion model at train AND inference, in the
+- [x] Zero providers configured → schema + outputs byte-for-byte identical to today.
+- [x] A custom provider's columns reach the fusion model at train AND inference, in the
       identical order, sourced from `meta.json`.
-- [ ] Provider artifacts are portable to an air-gapped host.
-- [ ] NaN-as-missing and out-of-fold rules hold for provider features (tested).
+- [x] Provider artifacts are portable to an air-gapped host.
+- [x] NaN-as-missing and out-of-fold rules hold for provider features (tested).
 
 ## Out of scope
 A library of built-in extra providers (this ticket is the seam + one sample). Feature

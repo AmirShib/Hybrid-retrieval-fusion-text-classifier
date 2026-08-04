@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 import numpy as np
 
@@ -82,6 +82,93 @@ FEATURE_NAMES: List[str] = [
 ]
 
 
+# What each core column (or intermediate) is built from (T87). Intermediates are
+# the five signal matrices plus ``candidates`` (the top-n union mask, computed
+# from all five and therefore an unconditional dependency of the whole frame —
+# see ``FeatureAssembler``'s "candidates is never pruned" rule). A column with an
+# empty tuple is itself a terminal producer, not something built from something
+# else. ``FEATURE_NAMES`` stays the source of truth for *order*; this is the
+# source of truth for what triggers what. A schema-completeness test asserts
+# every ``FEATURE_NAMES`` entry has a key here and every referenced node is
+# itself a key (possibly with an empty tuple) — so a new feature cannot be added
+# without declaring its inputs.
+FEATURE_DEPS: Dict[str, Tuple[str, ...]] = {
+    # ---- intermediates -----------------------------------------------------
+    "dense.desc": (),
+    "dense.proto": (),
+    "dense.knn": (),
+    "bm25.desc": (),
+    "bm25.knn": (),
+    "candidates": ("dense.desc", "dense.proto", "bm25.desc", "dense.knn", "bm25.knn"),
+    # ---- core columns -------------------------------------------------------
+    "d_desc_sim": ("dense.desc",),
+    "d_proto_sim": ("dense.proto",),
+    "d_knn_sum": ("dense.knn",),
+    "d_knn_max": ("dense.knn",),
+    "d_knn_count": ("dense.knn",),
+    "b_desc_sim": ("bm25.desc",),
+    "b_knn_sum": ("bm25.knn",),
+    "b_knn_max": ("bm25.knn",),
+    "b_knn_count": ("bm25.knn",),
+    "desc_proto_gap": ("dense.desc", "dense.proto"),
+    "class_log_freq": ("candidates",),
+    "abs_top_dense_sim": ("dense.knn",),
+    "abs_top_bm25": ("bm25.knn",),
+    "is_d_desc_top1": ("dense.desc", "candidates"),
+    "is_d_proto_top1": ("dense.proto", "candidates"),
+    "is_b_desc_top1": ("bm25.desc", "candidates"),
+    "is_d_knn_top1": ("dense.knn", "candidates"),
+    "is_b_knn_top1": ("bm25.knn", "candidates"),
+    "b_desc_missing": ("bm25.desc", "candidates"),
+    "b_knn_missing": ("bm25.knn", "candidates"),
+    "d_knn_missing": ("dense.knn", "candidates"),
+    "rank_d_desc": ("dense.desc", "candidates"),
+    "rank_b_desc": ("bm25.desc", "candidates"),
+    "rank_d_knn": ("dense.knn", "candidates"),
+    "rank_b_knn": ("bm25.knn", "candidates"),
+    "norm_d_desc": ("dense.desc", "candidates"),
+    "norm_b_desc": ("bm25.desc", "candidates"),
+    "n_signal_agreement": (
+        "dense.desc",
+        "dense.proto",
+        "bm25.desc",
+        "dense.knn",
+        "bm25.knn",
+        "candidates",
+    ),
+    "margin_d_desc": ("dense.desc", "candidates"),
+    "margin_d_proto": ("dense.proto", "candidates"),
+    "margin_d_knn": ("dense.knn", "candidates"),
+    "margin_b_desc": ("bm25.desc", "candidates"),
+    "margin_b_knn": ("bm25.knn", "candidates"),
+    "q_gap_d_desc": ("dense.desc", "candidates"),
+    "q_gap_d_knn": ("dense.knn", "candidates"),
+    "q_gap_b_desc": ("bm25.desc", "candidates"),
+}
+
+
+def feature_closure(requested: Iterable[str]) -> Set[str]:
+    """The transitive closure of ``requested`` over ``FEATURE_DEPS``, plus the
+    unconditional ``candidates`` dependency (and everything it pulls in).
+
+    The result mixes column names and intermediate node names — callers that
+    gate a column's computation just test membership (``"rank_d_desc" in
+    needed``); callers that gate a whole signal matrix test the node
+    (``"dense.desc" in needed``). ``FeatureProvider`` columns are not core
+    features and never appear here — a provider is gated by whether any of its
+    own declared names is in ``requested``, checked directly by the caller.
+    """
+    needed: Set[str] = set()
+    stack: List[str] = list(requested) + ["candidates"]
+    while stack:
+        node = stack.pop()
+        if node in needed:
+            continue
+        needed.add(node)
+        stack.extend(FEATURE_DEPS.get(node, ()))
+    return needed
+
+
 def composed_feature_names(providers: Sequence["FeatureProvider"] = ()) -> List[str]:
     """The effective, ordered feature schema: the core ~36 columns (``FEATURE_NAMES``)
     followed by each provider's ``names()``, in provider order.
@@ -113,12 +200,17 @@ def fusion_feature_names(
     """The columns the *fusion model* is trained and scored on: the composed
     schema (``composed_feature_names``) minus ``drop``, order otherwise preserved.
 
-    This is deliberately a different question from ``composed_feature_names``.
-    The assembler always produces the full schema — ``signal_report``, ``explain``
-    and the ablation report all read core columns by name, and a dropped column
-    that vanished from the frame would break them. ``drop`` narrows only what
-    reaches the model, which is what makes a *retrain-based* ablation possible:
-    train without a column, and compare against a model trained with it.
+    This is deliberately a different question from ``composed_feature_names``:
+    the *schema* (this function, and ``composed_feature_names``) is unaffected
+    by ``drop`` — the assembler is always capable of producing the full column
+    list. What a given assembly call actually computes is a separate,
+    per-call decision (``FeatureAssembler.assemble``'s ``requested`` parameter,
+    see ``feature_closure`` / T87): training and scoring request exactly this
+    narrowed list, while ``explain``/``signal_report``/the ablation report
+    request the full ``composed_feature_names`` in their own pass, because they
+    read core columns by name. ``drop`` is what makes a *retrain-based*
+    ablation possible: train without a column, and compare against a model
+    trained with it.
 
     ``drop`` is persisted (via ``FusionConfig.drop_features`` inside ``meta.json``)
     and re-applied at load, so inference reconstructs the identical column list
