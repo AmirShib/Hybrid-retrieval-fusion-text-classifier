@@ -45,6 +45,12 @@ lightgbm = ["lightgbm"]
 # (the pipeline default). Pulls in torch. Core installs stay torch-free and can
 # still train/infer with --encoder-kind tfidf or --encoder-kind hashing (T63).
 sentence-transformers = ["sentence-transformers>=2.2"]
+# The device-resident array backend (array_backend="torch", dense_kind="torch") —
+# T85. torch only: the GPU build itself is chosen by which torch wheel you install
+# (see https://pytorch.org for the CUDA-matched index URL), which a version
+# specifier cannot express. Nothing in core imports torch, and a model trained
+# with this extra still loads and scores on a host without it.
+gpu = ["torch>=1.13"]
 
 [project.urls]
 Repository = "https://github.com/amirshib/hybrid-retrieval-fusion-text-classifier"

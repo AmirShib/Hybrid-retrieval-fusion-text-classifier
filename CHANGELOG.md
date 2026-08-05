@@ -9,6 +9,43 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 ## [Unreleased]
 
 ### Added
+- **Device-resident dense retrieval + encoder handoff (T85)** — when the
+  encoder runs on a GPU, the embeddings now stay there. A torch `ArrayOps`
+  backend (`array_backend="torch"`, behind the new `gpu` extra) runs every
+  dense-side kernel on the device, and a torch dense retriever
+  (`retrieval.dense_kind="torch"`, registered through T34 phase 1's registry —
+  no pipeline edits) keeps `example_emb`/`prototypes`/`description_emb`
+  resident: uploaded once per run, sliced per fold, reused for every query
+  batch. `SentenceTransformerEncoder` hands its tensors straight to retrieval
+  (`convert_to_tensor`) instead of forcing numpy. Per query chunk that leaves
+  exactly one host→device crossing — the BM25 block, which T83's policy keeps
+  permanently host-side — and two device→host crossings, both at the fusion
+  handoff; the three `to_host` calls `_scatter_knn` used to make per signal per
+  chunk are gone, and a regression test asserts the counts. `array_backend`
+  stays `"auto"` by default and still resolves to numpy unless torch is
+  installed, a device is visible, and the run clears T83's crossover.
+  - **Persistence and portability are untouched.** `to_state` lowers every
+    array to numpy, so `dense.npz` from a GPU run is byte-comparable with a CPU
+    run's and a GPU-trained model loads and scores on an air-gapped, torch-free
+    host (the backend downgrades to numpy with a warning; the model dir never
+    dictates execution).
+  - **Determinism is qualified, not repealed.** The numpy backend is unchanged
+    bit for bit and remains the reference, the CI baseline and the golden
+    fixtures. A device backend agrees within float tolerance: float32 reduction
+    order differs, so continuous columns move in the last ulps and a near-tie
+    can flip `rank_*`/`is_*_top1` and with it the candidate set. Same host +
+    same device + same seed stays reproducible; `evaluation.json`'s manifest
+    now records an `execution` block (backend, device, dense kind) so a metric
+    can be traced to the arithmetic that produced it. See
+    `docs/device-policy.md`.
+  - **Chunking survives VRAM pressure.** An out-of-memory failure halves
+    `retrieval.feature_chunk` and retries (logging each reduction) instead of
+    killing a run mid-flight.
+  - Also in this ticket, as a consequence of routing every kernel through the
+    port: `n_signal_agreement` lost its per-row Python `set` loop for a
+    vectorized sort/count, `_dense_topk`'s argpartition/gather/argsort trio
+    collapsed into one `ArrayOps.topk`, and the feature frame is materialized
+    from one stacked block instead of one `np.asarray` per column.
 - **Torch-optional install via extras (T63)** — `sentence-transformers` (and the
   torch it pulls in) moves out of core `dependencies` into an opt-in
   `sentence-transformers` extra: `pip install text-classifier[sentence-transformers]`.

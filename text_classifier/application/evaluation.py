@@ -288,6 +288,7 @@ def build_manifest(
     config: Any,
     n_evaluated: Optional[int] = None,
     splits: Optional[Dict[str, Any]] = None,
+    execution: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """A provenance record: package version, timestamp, data shape, and config.
 
@@ -299,6 +300,14 @@ def build_manifest(
     its size). It answers "what was this model calibrated and evaluated on?"
     from the model directory alone, e.g. ``{"val": "external:n=1234", "test":
     "internal-fold"}``.
+
+    ``execution`` records the *arithmetic* that produced the metrics: which
+    array backend ran the kernels and on what device (T85). Cross-device runs
+    are not bit-identical — float32 reduction order differs, and a near-tie can
+    move an ordinal feature — so a metric that cannot be traced back to the
+    backend it was measured under is not reproducible in principle. It is
+    resolved at run time, not read from ``config`` (where ``array_backend`` may
+    just say ``"auto"``).
     """
     manifest = {
         "package_version": __version__,
@@ -310,6 +319,8 @@ def build_manifest(
     }
     if splits is not None:
         manifest["splits"] = splits
+    if execution is not None:
+        manifest["execution"] = execution
     return manifest
 
 

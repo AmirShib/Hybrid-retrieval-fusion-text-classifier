@@ -198,6 +198,13 @@ for `n + C` distinct texts. It is the largest training-throughput item in the
 repo, needs no device work and no port, and until it lands any profile will
 measure the encoder at 5x its necessary cost and blame the wrong stage.
 
+**T85 landed 2026-08-05** (in-review). The device-resident path exists and is
+selected by config alone; the numpy default is byte-identical. One acceptance
+criterion stays open: the GPU speedup is unmeasured — this host has no CUDA
+device, the same limitation T83 recorded — so `docs/device-policy.md` carries
+CPU-vs-CPU numbers through the new seam and names what the GPU re-run still
+owes. T86 (which needs T85) is unblocked.
+
 Decisions taken 2026-08-04, recorded in the tickets:
 - **Tolerance-based parity, not bit-identity.** CPU stays the reference and the
   CI/benchmark baseline; GPU is an accelerator. Cross-device runs are not
@@ -223,7 +230,7 @@ Decisions taken 2026-08-04, recorded in the tickets:
 | T87 | Feature dependency graph + demand-driven computation                         | done   | T70                     |
 | T83 | Device execution profile + device policy (measure-first gate; run after T88) | in-progress | T88                |
 | T84 | Array-backend seam: `ArrayOps` port, `auto` selection, CPU byte-identical    | in-review | T83 (thresholds)        |
-| T85 | Device-resident dense retrieval + encoder handoff (no D2H mid-pipeline)      | todo   | T63, T34-p1, T83, T84, T88 |
+| T85 | Device-resident dense retrieval + encoder handoff (no D2H mid-pipeline)      | in-review (landed 2026-08-05; GPU measurement still owed) | T63, T34-p1, T83, T84, T88 |
 | T86 | Zero-copy feature matrix into fusion; drop pandas from the hot path          | todo   | T84, T85                |
 
 **Cross-tier effects when these land:** T63 is promoted from Tier 6 to a hard

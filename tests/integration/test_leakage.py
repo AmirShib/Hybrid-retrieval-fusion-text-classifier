@@ -63,10 +63,14 @@ def _fast_cfg(n_folds: int = 3) -> PipelineConfig:
     return cfg
 
 
-def _run_oof(items, label_space, enc, n_folds=3):
+def _run_oof(items, label_space, enc, n_folds=3, ops=None):
     cfg = _fast_cfg(n_folds=n_folds)
     pipeline = TrainingPipeline(cfg, shared_encoder=enc)
-    pipeline.assembler = FeatureAssembler(label_space, CandidatePolicy(cfg.candidate_top_n))
+    if ops is not None:  # T85: the same OOF loop on another array backend
+        pipeline._ops = ops
+    pipeline.assembler = FeatureAssembler(
+        label_space, CandidatePolicy(cfg.candidate_top_n), ops
+    )
     texts = [it.text for it in items]
     y = np.array(label_space.encode_labels([it.label for it in items]), dtype=np.int64)
     return pipeline._build_oof(texts, y, label_space), len(items)
@@ -152,12 +156,12 @@ class TestCanary:
         ]
         return LabelSpace(defs), items
 
-    def _build_feats(self, label_space, items, enc, include_self: bool):
+    def _build_feats(self, label_space, items, enc, include_self: bool, ops=None):
         """Return assembled features; include_self=True is the leaky variant."""
         cfg = _fast_cfg()
         texts = [it.text for it in items]
         y = np.array(label_space.encode_labels([it.label for it in items]), dtype=np.int64)
-        assembler = FeatureAssembler(label_space, CandidatePolicy(cfg.candidate_top_n))
+        assembler = FeatureAssembler(label_space, CandidatePolicy(cfg.candidate_top_n), ops)
         all_idx = np.arange(len(items))
         import pandas as pd
 
@@ -165,7 +169,9 @@ class TestCanary:
         for i in all_idx:
             tr = all_idx if include_self else all_idx[all_idx != i]
             tr_texts = [texts[j] for j in tr]
-            dense = DenseRetrieverAdapter.build(enc, tr_texts, y[tr], label_space, cfg.retrieval)
+            dense = DenseRetrieverAdapter.build(
+                enc, tr_texts, y[tr], label_space, cfg.retrieval, ops
+            )
             lexical = LexicalRetrieverAdapter.build(tr_texts, y[tr], label_space, cfg.retrieval)
             q_emb = enc.encode([texts[i]])
             feats = assembler.assemble(
@@ -335,3 +341,52 @@ class TestRoleSeparation:
         assert train_ids & cal_ids == set()
         assert train_ids & test_ids == set()
         assert cal_ids & test_ids == set()
+
+
+# ---------------------------------------------------------------------------
+# T85 — the leakage rule holds on every array backend
+# ---------------------------------------------------------------------------
+
+
+class TestLeakageOnTheTorchBackend:
+    """The scientific claim must not be a property of the numpy backend.
+
+    T85 moved the whole dense side — prototypes, kNN, the leave-one-out
+    prototype — onto an ``ArrayOps`` seam a device backend also implements. The
+    self-exclusion logic lives in that shared code, so it either holds for both
+    or is broken for both; this runs the two canaries that would catch it
+    against the torch backend as well. Skipped without torch, which is the
+    supported torch-free install, not a gap."""
+
+    @pytest.fixture
+    def ops(self):
+        pytest.importorskip("torch", reason="the torch array backend needs the 'gpu' extra")
+        from text_classifier.infrastructure.array_ops import TorchArrayOps
+
+        return TorchArrayOps("cpu")
+
+    def test_folds_stay_disjoint_and_complete(self, ops):
+        enc = HashingEncoder(dim=64)
+        label_space, items = make_synthetic(n_classes=10, per_class=12, seed=42)
+        oof, n_items = _run_oof(items, label_space, enc, n_folds=3, ops=ops)
+        by_fold = {f: set(g["item_id"].unique()) for f, g in oof.groupby("fold")}
+        folds = list(by_fold)
+        for i in range(len(folds)):
+            for j in range(i + 1, len(folds)):
+                assert by_fold[folds[i]] & by_fold[folds[j]] == set()
+        assert set(oof["item_id"].unique()) == set(range(n_items))
+
+    def test_singleton_canary_still_fires(self, ops):
+        """The same prototype canary as the numpy path: out-of-fold, an item's
+        own class has no examples left, so its prototype must be NaN; the leaky
+        variant must reach ≈1.0. If the device path ever let an item see itself,
+        the first assertion breaks."""
+        canary = TestCanary()
+        enc = HashingEncoder(dim=64)
+        label_space, items = canary._singleton_dataset()
+
+        oof = canary._build_feats(label_space, items, enc, include_self=False, ops=ops)
+        leaky = canary._build_feats(label_space, items, enc, include_self=True, ops=ops)
+
+        assert oof[oof["is_true"] == 1]["d_proto_sim"].isna().all()
+        assert (leaky[leaky["is_true"] == 1]["d_proto_sim"] > 0.9).all()

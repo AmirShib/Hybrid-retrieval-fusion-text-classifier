@@ -26,7 +26,11 @@ from .array_ops import NumpyArrayOps
 
 
 def _exclude_self(
-    idx: np.ndarray, score: np.ndarray, exclude: np.ndarray, k: int
+    idx: np.ndarray,
+    score: np.ndarray,
+    exclude: np.ndarray,
+    k: int,
+    ops: Optional[ArrayOps] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Drop the per-row self-match from best-first neighbor lists and return
     exactly ``(b, k)``.
@@ -38,24 +42,35 @@ def _exclude_self(
     are kept best-first, everything else is nulled to ``(-1, NaN)``, and the
     result is padded/trimmed to width ``k``. This is the leave-one-out self-mask:
     fetch one extra neighbor upstream (``k + 1``) so ``k`` real ones always remain.
+
+    Runs entirely on ``ops``' backend (T85): the dense caller's ``idx``/``score``
+    are device-resident, so a numpy implementation here would drag them back to
+    the host mid-chunk. The lexical caller's are host arrays and stay that way
+    under the numpy backend.
     """
+    ops = ops or NumpyArrayOps()
     b, m = idx.shape
-    exclude = np.asarray(exclude)
-    self_hit = (idx == exclude[:, None]) & (exclude[:, None] >= 0)
+    idx = ops.asarray(idx)
+    score = ops.asarray(score)
+    exclude = ops.asarray(exclude)[:, None]
+    self_hit = (idx == exclude) & (exclude >= 0)
     valid = (idx >= 0) & ~self_hit
     # Stable sort by ~valid: kept neighbours (valid) stay first in their existing
     # best-first order; self-matches and padding sink to the end.
-    order = np.argsort(~valid, axis=1, kind="stable")
-    idx_s = np.take_along_axis(idx, order, axis=1)
-    score_s = np.take_along_axis(score, order, axis=1)
-    valid_s = np.take_along_axis(valid, order, axis=1)
-    idx_s = np.where(valid_s, idx_s, -1)
-    score_s = np.where(valid_s, score_s, np.nan)
+    order = ops.argsort(~valid, axis=1, stable=True)
+    idx_s = ops.take_along_axis(idx, order, axis=1)
+    score_s = ops.take_along_axis(score, order, axis=1)
+    valid_s = ops.take_along_axis(valid, order, axis=1)
+    idx_s = ops.where(valid_s, idx_s, -1)
+    score_s = ops.where(valid_s, score_s, np.nan)
     if m >= k:
         return idx_s[:, :k], score_s[:, :k]
-    pad_i = np.full((b, k - m), -1, dtype=idx_s.dtype)
-    pad_s = np.full((b, k - m), np.nan, dtype=score_s.dtype)
-    return np.concatenate([idx_s, pad_i], axis=1), np.concatenate([score_s, pad_s], axis=1)
+    pad_i = ops.full((b, k - m), -1, dtype=np.int64)
+    pad_s = ops.full((b, k - m), np.nan, dtype=np.float32)
+    return (
+        ops.concatenate([idx_s, pad_i], axis=1),
+        ops.concatenate([score_s, pad_s], axis=1),
+    )
 
 
 def bm25_prunes_vocab(cv_kwargs: Dict[str, Any]) -> bool:
@@ -435,7 +450,12 @@ class LexicalRetrieverAdapter(LexicalRetriever):
 
 # ------------------------------------------------------------------- dense adapter
 def _dense_topk(
-    Q: np.ndarray, X: np.ndarray, k: int, chunk: int = 256, ops: Optional[ArrayOps] = None
+    Q: np.ndarray,
+    X: np.ndarray,
+    k: int,
+    chunk: int = 256,
+    ops: Optional[ArrayOps] = None,
+    xt: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Top-k nearest examples by dot product, always shaped ``(n_queries, k)``.
 
@@ -443,23 +463,40 @@ def _dense_topk(
     (``k > n_examples``): the first ``min(k, n)`` columns hold real neighbours in
     descending-similarity order and the remainder are ``-1`` / ``NaN`` padding,
     mirroring ``BM25Index.top_k``. An empty query batch returns ``(0, k)`` arrays.
+
+    The argpartition + gather + argsort trio this used to spell out is one
+    ``ArrayOps.topk`` call (T85) -- which is what the port method exists for,
+    and what lets a device backend use its own fused top-k instead of
+    reproducing numpy's two-step selection. The numpy backend's ``topk`` *is*
+    that same two-step selection, so results are unchanged bit for bit.
+
+    ``xt`` is the pre-transposed corpus (``ArrayOps.transpose`` materializes a
+    copy, so the caller hoists it out of the per-chunk path and holds it for
+    the retriever's lifetime); when omitted it is computed here.
     """
     ops = ops or NumpyArrayOps()
     n = X.shape[0]
+    b = Q.shape[0]
     k_eff = min(k, n)
-    out_idx = np.full((Q.shape[0], k), -1, dtype=np.int64)
-    out_sim = np.full((Q.shape[0], k), np.nan, dtype=np.float32)
-    if Q.shape[0] == 0 or k_eff == 0:
-        return out_idx, out_sim
-    Xt = np.ascontiguousarray(X.T)
-    for s in range(0, Q.shape[0], chunk):
+    if b == 0 or k_eff == 0:
+        return (
+            ops.full((b, k), -1, dtype=np.int64),
+            ops.full((b, k), np.nan, dtype=np.float32),
+        )
+    Xt = ops.transpose(X) if xt is None else xt
+    idx_parts, sim_parts = [], []
+    for s in range(0, b, chunk):
         sims = ops.matmul(Q[s : s + chunk], Xt)
-        part = ops.argpartition(sims, -k_eff, axis=1)[:, -k_eff:]
-        rows = np.arange(part.shape[0])[:, None]
-        part_sims = ops.gather(sims, rows, part)
-        order = ops.argsort(-part_sims, axis=1)
-        out_idx[s : s + chunk, :k_eff] = np.take_along_axis(part, order, axis=1)
-        out_sim[s : s + chunk, :k_eff] = np.take_along_axis(part_sims, order, axis=1)
+        vals, idx = ops.topk(sims, k_eff, axis=1)
+        idx_parts.append(idx)
+        sim_parts.append(vals)
+    out_idx = ops.astype(ops.concatenate(idx_parts, axis=0), np.int64)
+    out_sim = ops.astype(ops.concatenate(sim_parts, axis=0), np.float32)
+    if k_eff < k:  # pad to the requested width, mirroring BM25Index.top_k
+        out_idx = ops.concatenate([out_idx, ops.full((b, k - k_eff), -1, dtype=np.int64)], axis=1)
+        out_sim = ops.concatenate(
+            [out_sim, ops.full((b, k - k_eff), np.nan, dtype=np.float32)], axis=1
+        )
     return out_idx, out_sim
 
 
@@ -481,7 +518,13 @@ def _prototypes_and_freq(
     contract), so results are numerically equal to the loop version to
     float32 precision, not bit-for-bit identical -- IEEE754 addition is not
     associative, and the loop's ``.mean(axis=0)`` sums each group in a
-    different order (numpy's pairwise summation) than a flat scatter does."""
+    different order (numpy's pairwise summation) than a flat scatter does.
+
+    Runs on ``ops``' backend end to end (T85) — it is a per-fold cost and one
+    of the stages T83 measured as growing with class count (0.36s at C=5000),
+    so it stays where the embeddings live. Only ``class_freq`` is host-side:
+    it is a bincount over labels the caller already holds on the host, and it
+    is persisted as-is."""
     ops = ops or NumpyArrayOps()
     dim = emb.shape[1]
     labels = np.asarray(labels)
@@ -491,23 +534,31 @@ def _prototypes_and_freq(
     )
     rows = np.repeat(labels, dim)
     cols = np.tile(np.arange(dim), n)
-    values = np.asarray(emb, dtype=np.float64).ravel()
-    class_sum = ops.to_host(
-        ops.scatter_add(ops.zeros((n_classes, dim), dtype=np.float64), rows, cols, values)
-    )
-    counts = freq.astype(np.float64)[:, None]
+    values = ops.reshape(ops.astype(emb, np.float64), -1)
+    class_sum = ops.scatter_add(ops.zeros((n_classes, dim), dtype=np.float64), rows, cols, values)
+    counts = ops.astype(ops.asarray(freq), np.float64)[:, None]
     with np.errstate(invalid="ignore", divide="ignore"):
         mean = class_sum / counts
-    norm = np.linalg.norm(mean, axis=1)
-    has_proto = (freq > 0) & (norm > 0)
-    safe_norm = np.where(norm > 0, norm, 1.0)
-    proto = np.where(has_proto[:, None], (mean / safe_norm[:, None]).astype(np.float32), np.nan)
-    return proto.astype(np.float32), freq
+    norm = ops.sqrt(ops.sum(mean * mean, axis=1))
+    has_proto = ops.asarray((freq > 0)) & (norm > 0)
+    safe_norm = ops.where(norm > 0, norm, 1.0)
+    proto = ops.where(
+        has_proto[:, None], ops.astype(mean / safe_norm[:, None], np.float32), np.nan
+    )
+    return ops.astype(proto, np.float32), freq
 
 
 @dataclass
 class DenseState:
-    """Serializable numeric state of the dense retriever."""
+    """Numeric state of the dense retriever, in the *backend's* array type.
+
+    Under the default numpy backend these are plain ``np.ndarray``s, exactly as
+    before T85. Under a device backend they are device arrays, uploaded once
+    when the retriever is built and resident for every query batch and every
+    fold thereafter — the whole point of the ticket. Persistence is unaffected:
+    ``DenseRetrieverAdapter.to_state`` lowers every array back to numpy on the
+    way out, so a model directory is npz + json regardless of where it was
+    trained (see the portability invariant in CLAUDE.md)."""
 
     example_emb: np.ndarray
     example_labels: np.ndarray
@@ -517,10 +568,41 @@ class DenseState:
 
 
 class DenseRetrieverAdapter(DenseRetriever):
+    """Exact (brute-force) dense retrieval over the example pool + class set.
+
+    Registered under both ``dense_kind="exact"`` (host arrays, the default) and
+    ``dense_kind="torch"`` (device-resident, T85). The two differ only in the
+    ``ArrayOps`` they are handed: there is one implementation of the arithmetic,
+    not two, so the backends cannot silently drift apart."""
+
     def __init__(self, state: DenseState, chunk: int = 256, array_ops: Optional[ArrayOps] = None):
-        self._s = state
-        self._chunk = chunk
         self._ops = array_ops or NumpyArrayOps()
+        self._s = self._adopt(state)
+        self._chunk = chunk
+        # Hoisted out of the per-chunk path: `ArrayOps.transpose` materializes a
+        # contiguous copy (the kNN matmul's right operand, where layout picks the
+        # kernel), so it is paid once per retriever rather than once per query
+        # chunk -- which on a device is also one upload instead of many.
+        self._example_emb_t = self._ops.transpose(self._s.example_emb)
+        # Host copies of the two small integer arrays. They are indexed by host
+        # code (persistence, the leave-one-out counts) often enough that keeping
+        # a numpy view costs a few kilobytes and saves a device round trip.
+        self._labels_host = self._ops.to_host(self._s.example_labels)
+        self._class_freq_host = self._ops.to_host(self._s.class_freq)
+
+    def _adopt(self, state: DenseState) -> DenseState:
+        """Upload the state's arrays into this retriever's backend, once.
+
+        A no-op under the numpy backend (and for arrays already resident), so
+        the default path allocates nothing new."""
+        ops = self._ops
+        return DenseState(
+            ops.asarray(state.example_emb),
+            ops.asarray(state.example_labels, np.int64),
+            ops.asarray(state.prototypes),
+            ops.asarray(state.description_emb),
+            ops.asarray(state.class_freq, np.int64),
+        )
 
     @classmethod
     def build(
@@ -571,22 +653,51 @@ class DenseRetrieverAdapter(DenseRetriever):
         return self._s
 
     @property
+    def array_ops(self) -> ArrayOps:
+        return self._ops
+
+    def with_array_ops(self, array_ops: ArrayOps) -> "DenseRetrieverAdapter":
+        """Return this index on another array backend (T85).
+
+        The upload path for a model directory: what is loaded from ``dense.npz``
+        is numpy, and this is what makes it device-resident once, at load, for
+        every subsequent query batch. Values are carried over unchanged — only
+        where they live changes."""
+        if array_ops.name == self._ops.name:
+            return self
+        return DenseRetrieverAdapter(
+            DenseState(**self.to_state()), self._chunk, array_ops
+        )
+
+    @property
     def class_freq(self) -> np.ndarray:
+        """Per-class example counts, in the backend's array type — the feature
+        assembler gathers it per candidate (``class_log_freq``), so on a device
+        backend it must be device-resident. ``class_freq_host`` is the numpy
+        view for host-side callers (tests, diagnostics)."""
         return self._s.class_freq
+
+    @property
+    def class_freq_host(self) -> np.ndarray:
+        return self._class_freq_host
 
     def to_state(self) -> Dict[str, np.ndarray]:
         """Split this adapter into npz-able arrays (T34 phase 1: symmetric with
         ``LexicalRetrieverAdapter.to_state``, so a registered dense-retriever
         spec's save/load can be generic). Keys/layout match ``dense.npz`` as
         written by ``persistence.py`` before this method existed, byte-for-byte —
-        existing model dirs load unchanged."""
+        existing model dirs load unchanged.
+
+        Every array is lowered to the host here (T85): persistence is numpy,
+        always. A model trained with the torch backend on a GPU saves the same
+        npz as a CPU-trained one and loads on an air-gapped, torch-free host."""
         s = self._s
         return {
-            "example_emb": s.example_emb,
-            "example_labels": s.example_labels,
-            "prototypes": s.prototypes,
-            "description_emb": s.description_emb,
-            "class_freq": s.class_freq,
+            "example_emb": self._ops.to_host(s.example_emb),
+            "example_labels": self._ops.to_host(s.example_labels),
+            "prototypes": self._ops.to_host(s.prototypes),
+            "description_emb": self._ops.to_host(s.description_emb),
+            "class_freq": self._ops.to_host(s.class_freq),
         }
 
     @classmethod
@@ -611,18 +722,31 @@ class DenseRetrieverAdapter(DenseRetriever):
     def knn_example_labels(
         self, query_emb: np.ndarray, k: int, exclude_idx: Any = None
     ) -> Tuple[np.ndarray, np.ndarray]:
+        ops = self._ops
         # Fetch one extra when self-masking so k real neighbours survive the drop.
         fetch = k + 1 if exclude_idx is not None else k
-        idx, sim = _dense_topk(query_emb, self._s.example_emb, fetch, self._chunk, self._ops)
+        idx, sim = _dense_topk(
+            ops.asarray(query_emb),
+            self._s.example_emb,
+            fetch,
+            self._chunk,
+            ops,
+            xt=self._example_emb_t,
+        )
         if exclude_idx is not None:
-            idx, sim = _exclude_self(idx, sim, exclude_idx, k)
+            idx, sim = _exclude_self(idx, sim, exclude_idx, k, ops)
         # idx == -1 marks padding (k > n_examples); keep it as -1 rather than
-        # letting np indexing wrap around to a real label.
-        labels = np.where(idx >= 0, self._s.example_labels[np.clip(idx, 0, None)], -1)
-        return labels.astype(np.int64), sim
+        # letting indexing wrap around to a real label.
+        safe = ops.where(idx >= 0, idx, 0)
+        labels = ops.where(idx >= 0, ops.take(self._s.example_labels, safe), -1)
+        return ops.astype(labels, np.int64), sim
 
     def prototype_similarity(self, query_emb: np.ndarray) -> np.ndarray:
-        return self._ops.matmul(query_emb, self._s.prototypes.T)
+        # `.T` (a view on both backends), deliberately not `ArrayOps.transpose`
+        # (which materializes a contiguous copy): the operand layout here is
+        # what the pre-T85 numpy path used, and layout decides the matmul's
+        # reduction order down to the last ulp. Same in `description_similarity`.
+        return self._ops.matmul(self._ops.asarray(query_emb), self._s.prototypes.T)
 
     def loo_prototype_similarity(self, query_emb: np.ndarray, self_idx: np.ndarray) -> np.ndarray:
         """Prototype similarity with each query's own example left out of its own
@@ -636,40 +760,41 @@ class DenseRetrieverAdapter(DenseRetriever):
         which XGBoost reads as "did not retrieve" — the same as an absent class.
         Every other column, and every out-of-pool query, keeps the ordinary value.
         """
+        ops = self._ops
         base = self.prototype_similarity(query_emb)
         self_idx = np.asarray(self_idx)
+        # Host-side: `self_idx` is the caller's leave-one-out index array and the
+        # class counts are a bincount over labels the retriever already keeps on
+        # the host. Only the embedding arithmetic below runs on the backend.
         rows = np.nonzero(self_idx >= 0)[0]
         if rows.size == 0:
             return base
-        E = self._s.example_emb.astype(np.float64)
-        y = self._s.example_labels
+        E = ops.astype(self._s.example_emb, np.float64)
+        y = self._labels_host
         C = base.shape[1]
         dim = E.shape[1]
         n = y.shape[0]
         scatter_rows = np.repeat(y, dim)
         scatter_cols = np.tile(np.arange(dim), n)
-        class_sum = self._ops.to_host(
-            self._ops.scatter_add(
-                self._ops.zeros((C, dim), dtype=np.float64), scatter_rows, scatter_cols, E.ravel()
-            )
+        class_sum = ops.scatter_add(
+            ops.zeros((C, dim), dtype=np.float64), scatter_rows, scatter_cols, ops.reshape(E, -1)
         )
         class_cnt = np.bincount(y, minlength=C).astype(np.float64)
 
         s = self_idx[rows]
         c = y[s]  # own class of each in-pool query
-        loo_vec = class_sum[c] - E[s]  # class sum with the query's own vector removed
+        # class sum with the query's own vector removed
+        loo_vec = ops.take(class_sum, c) - ops.take(E, s)
         loo_cnt = class_cnt[c] - 1.0
-        norm = np.linalg.norm(loo_vec, axis=1)
-        q = np.asarray(query_emb, dtype=np.float64)[rows]
+        norm = ops.sqrt(ops.sum(loo_vec * loo_vec, axis=1))
+        q = ops.take(ops.astype(ops.asarray(query_emb), np.float64), rows)
         with np.errstate(invalid="ignore", divide="ignore"):
-            sim = np.einsum("md,md->m", q, loo_vec) / norm
-        sim = np.where((loo_cnt > 0) & (norm > 0), sim, np.nan)
-        out = base.copy()
-        out[rows, c] = sim.astype(out.dtype)
-        return out
+            sim = ops.sum(q * loo_vec, axis=1) / norm
+        sim = ops.where(ops.asarray(loo_cnt > 0) & (norm > 0), sim, np.nan)
+        return ops.scatter_set(base, rows, c, ops.astype(sim, base.dtype))
 
     def description_similarity(self, query_emb: np.ndarray) -> np.ndarray:
-        return self._ops.matmul(query_emb, self._s.description_emb.T)
+        return self._ops.matmul(self._ops.asarray(query_emb), self._s.description_emb.T)
 
     def with_added_classes(
         self, encoder: TextEncoder, new_descriptions: Sequence[str]
@@ -687,7 +812,8 @@ class DenseRetrieverAdapter(DenseRetriever):
         s = self._s
         if not new_descriptions:
             return DenseRetrieverAdapter(s, self._chunk, self._ops)
-        new_desc = np.asarray(encoder.encode_documents(new_descriptions), dtype=np.float32)
+        ops = self._ops
+        new_desc = ops.astype(ops.asarray(encoder.encode_documents(new_descriptions)), np.float32)
         dim = s.description_emb.shape[1]
         if new_desc.shape[1] != dim:
             raise ValueError(
@@ -695,11 +821,11 @@ class DenseRetrieverAdapter(DenseRetriever):
                 f"dense index is {dim}-dim; the same encoder must be used to extend it"
             )
         m = len(new_descriptions)
-        prototypes = np.concatenate(
-            [s.prototypes, np.full((m, dim), np.nan, dtype=np.float32)], axis=0
+        prototypes = ops.concatenate(
+            [s.prototypes, ops.full((m, dim), np.nan, dtype=np.float32)], axis=0
         )
-        class_freq = np.concatenate([s.class_freq, np.zeros(m, dtype=s.class_freq.dtype)])
-        description_emb = np.concatenate([s.description_emb, new_desc], axis=0)
+        class_freq = ops.concatenate([s.class_freq, ops.zeros(m, dtype=np.int64)])
+        description_emb = ops.concatenate([s.description_emb, new_desc], axis=0)
         extended = DenseState(
             s.example_emb, s.example_labels, prototypes, description_emb, class_freq
         )
@@ -715,11 +841,19 @@ class DenseRetrieverAdapter(DenseRetriever):
         row not named in ``edits`` is untouched."""
         if not edits:
             return DenseRetrieverAdapter(self._s, self._chunk, self._ops)
+        ops = self._ops
         s = self._s
-        idxs = list(edits.keys())
-        new_rows = np.asarray(encoder.encode_documents([edits[i] for i in idxs]), dtype=np.float32)
-        description_emb = s.description_emb.copy()
-        description_emb[idxs] = new_rows
+        idxs = np.asarray(list(edits.keys()), dtype=np.int64)
+        new_rows = ops.astype(
+            ops.asarray(encoder.encode_documents([edits[int(i)] for i in idxs])), np.float32
+        )
+        dim = s.description_emb.shape[1]
+        description_emb = ops.scatter_set(
+            s.description_emb,
+            ops.repeat(ops.asarray(idxs), dim),
+            ops.tile(ops.arange(dim), len(idxs)),
+            ops.reshape(new_rows, -1),
+        )
         updated = DenseState(
             s.example_emb, s.example_labels, s.prototypes, description_emb, s.class_freq
         )
@@ -744,14 +878,17 @@ class DenseRetrieverAdapter(DenseRetriever):
         identical to a from-scratch build over the same merged corpus.
         Description embeddings are untouched; see ``with_added_classes``/
         ``with_updated_descriptions`` for those."""
+        ops = self._ops
         s = self._s
         new_texts = list(new_texts)
         if new_texts:
-            new_emb = np.asarray(encoder.encode_documents(new_texts), dtype=np.float32)
+            new_emb = ops.astype(ops.asarray(encoder.encode_documents(new_texts)), np.float32)
         else:
-            new_emb = np.zeros((0, s.example_emb.shape[1]), dtype=s.example_emb.dtype)
-        merged_emb = np.concatenate([s.example_emb, new_emb], axis=0)
-        merged_labels = np.concatenate([s.example_labels, np.asarray(new_labels, dtype=np.int64)])
-        proto, freq = _prototypes_and_freq(merged_emb, merged_labels, n_classes, self._ops)
+            new_emb = ops.zeros((0, s.example_emb.shape[1]), dtype=np.float32)
+        merged_emb = ops.concatenate([s.example_emb, new_emb], axis=0)
+        merged_labels = np.concatenate(
+            [self._labels_host, np.asarray(new_labels, dtype=np.int64)]
+        )
+        proto, freq = _prototypes_and_freq(merged_emb, merged_labels, n_classes, ops)
         updated = DenseState(merged_emb, merged_labels, proto, s.description_emb, freq)
         return DenseRetrieverAdapter(updated, self._chunk, self._ops)

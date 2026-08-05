@@ -70,6 +70,14 @@ from .signal_report import signal_report
 
 log = logging.getLogger(__name__)
 
+# Dense-retriever kinds backed by `DenseRetrieverAdapter`, and therefore able to
+# take the T88 shortcut below (`build_from_embeddings`: encode the pool once per
+# run, slice it per fold) instead of re-encoding inside a generic registry
+# build. "exact" and "torch" are the same adapter differing only in their
+# ArrayOps backend (T85), so both qualify; a third-party kind does not, and
+# falls back to the plain per-fold build (an accepted T34 phase-1 tradeoff).
+_BUILTIN_DENSE_KINDS = ("exact", "torch")
+
 
 def fit_calibration_and_abstention(
     ca: pd.DataFrame,
@@ -155,8 +163,15 @@ class TrainingPipeline:
 
     def _load_shared_encoder(self) -> TextEncoder:
         if self._shared_override is not None:
-            return self._shared_override
-        return build_encoder(self.cfg.encoder)
+            return self._with_backend(self._shared_override)
+        return self._with_backend(build_encoder(self.cfg.encoder))
+
+    def _with_backend(self, encoder: TextEncoder) -> TextEncoder:
+        """Hand ``encoder`` this run's array backend (T85), so a device backend
+        gets embeddings produced *on* the device instead of copied off it. A
+        no-op for the numpy backend and for every host-side encoder."""
+        encoder.set_array_ops(self._ops)
+        return encoder
 
     def _shared_document_embeddings(
         self, texts: List[str], label_space: LabelSpace, encoder: TextEncoder
@@ -173,8 +188,16 @@ class TrainingPipeline:
         every distinct text a second time. On the ``n_folds == 1`` path
         ``_build_deployment_index`` runs first and populates it instead."""
         if self._shared_pool_emb is None:
-            self._shared_pool_emb = encoder.encode_documents(texts)
-            self._shared_desc_emb = encoder.encode_documents(label_space.descriptions)
+            # T85: adopted into the run's backend here, once. On a device
+            # backend that makes this the single upload of the example pool for
+            # the whole run -- each fold then *slices* the resident matrix
+            # (`ArrayOps.take`) rather than uploading its own copy. With a
+            # device-resident encoder there is no upload at all: the embeddings
+            # were computed there.
+            self._shared_pool_emb = self._ops.asarray(encoder.encode_documents(texts))
+            self._shared_desc_emb = self._ops.asarray(
+                encoder.encode_documents(label_space.descriptions)
+            )
         assert self._shared_desc_emb is not None
         return self._shared_pool_emb, self._shared_desc_emb
 
@@ -258,6 +281,7 @@ class TrainingPipeline:
             n_items=len(items),
             n_classes=label_space.size,
             k_neighbors=self.cfg.retrieval.k_neighbors,
+            dense_kind=self.cfg.retrieval.dense_kind,
         )
         self._ops = build_array_ops(backend)
         self.assembler = FeatureAssembler(
@@ -307,6 +331,7 @@ class TrainingPipeline:
             abstention,
             feature_providers=self._providers,
             signal_providers=self._signal_providers,
+            array_ops=self._ops,
         )
         if output_dir:
             repo = ArtifactRepository()
@@ -328,10 +353,26 @@ class TrainingPipeline:
                 config=self.cfg,
                 n_evaluated=report.n_items,
                 splits=self._split_provenance(val_items, test_items),
+                execution=self._execution_provenance(),
             )
             write_evaluation_artifacts(output_dir, evaluation, manifest)
             log.info("saved trained pipeline + evaluation to %s", output_dir)
         return artifacts, report
+
+    def _execution_provenance(self) -> dict:
+        """Which arithmetic produced this run's metrics (T85): the resolved
+        array backend and, for a device backend, the device it ran on.
+
+        ``config.array_backend`` may only say ``"auto"``, and cross-device runs
+        are not bit-identical, so a metric that cannot be traced to the backend
+        it was measured under is not reproducible in principle. This is the
+        trace."""
+        device = getattr(self._ops, "device", None)
+        return {
+            "array_backend": self._ops.name,
+            "device": None if device is None else str(device),
+            "dense_kind": self.cfg.retrieval.dense_kind,
+        }
 
     @staticmethod
     def _split_provenance(
@@ -477,7 +518,7 @@ class TrainingPipeline:
             assert shared is not None
             return shared
         fold_items = [LabeledItem(texts[i], label_space.key_at(int(y[i]))) for i in items_idx]
-        return fit_encoder(self.cfg.encoder, fold_items, label_space)
+        return self._with_backend(fit_encoder(self.cfg.encoder, fold_items, label_space))
 
     def _fit_providers(self, items_idx: np.ndarray, texts, y, label_space) -> List[FeatureProvider]:
         """Build and fit the custom feature providers on the rows in
@@ -507,7 +548,7 @@ class TrainingPipeline:
         # `build_dense_retriever`/`build_lexical_retriever` call and loses the
         # cross-fold sharing (an accepted phase-1 tradeoff, not a TODO — a backend
         # that wants it back must earn it with its own per-fold-reuse hook).
-        use_shared_dense = self.cfg.retrieval.dense_kind == "exact"
+        use_shared_dense = self.cfg.retrieval.dense_kind in _BUILTIN_DENSE_KINDS
         use_shared_lexical = self.cfg.retrieval.lexical_kind == "bm25"
         if not self._use_per_fold_encoder():
             shared = self._load_shared_encoder()
@@ -542,7 +583,15 @@ class TrainingPipeline:
             if shared_emb is not None:
                 assert shared_desc_emb is not None
                 dense = DenseRetrieverAdapter.build_from_embeddings(
-                    shared_emb[tr], y[tr], shared_desc_emb, label_space, self.cfg.retrieval, self._ops
+                    # `ops.take`, not `shared_emb[tr]`: on a device backend the
+                    # pool is resident, so a fold slices it in place instead of
+                    # round-tripping through the host (T85).
+                    self._ops.take(shared_emb, tr),
+                    y[tr],
+                    shared_desc_emb,
+                    label_space,
+                    self.cfg.retrieval,
+                    self._ops,
                 )
             else:
                 dense = build_dense_retriever(
@@ -828,13 +877,13 @@ class TrainingPipeline:
         # optimizations are built-in-adapter-specific, so a non-default
         # dense_kind/lexical_kind goes through the plain registry build instead
         # (losing the sharing, an accepted phase-1 tradeoff).
-        use_shared_dense = self.cfg.retrieval.dense_kind == "exact"
+        use_shared_dense = self.cfg.retrieval.dense_kind in _BUILTIN_DENSE_KINDS
         use_shared_lexical = self.cfg.retrieval.lexical_kind == "bm25"
         if self._use_per_fold_encoder():
             items = [
                 LabeledItem(texts[i], label_space.key_at(int(y[i]))) for i in range(len(texts))
             ]
-            encoder = fit_encoder(self.cfg.encoder, items, label_space)
+            encoder = self._with_backend(fit_encoder(self.cfg.encoder, items, label_space))
             dense = build_dense_retriever(
                 self.cfg.retrieval, encoder, texts, y, label_space, self._ops
             )

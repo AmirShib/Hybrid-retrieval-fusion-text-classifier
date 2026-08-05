@@ -18,20 +18,35 @@ from .models import LabeledItem, LabelSpace
 
 class ArrayOps(ABC):
     """Narrow array-backend seam (T84) for the numeric kernels in feature
-    assembly and dense retrieval. A numpy backend is the only one registered
-    today; a torch backend (T85) implements the same surface so those kernels
-    run device-resident without a second, drifting implementation.
+    assembly and dense retrieval. The numpy backend is the default; the torch
+    backend (T85) implements the same surface so those kernels run
+    device-resident without a second, drifting implementation.
 
     Deliberately narrow: only the primitives the existing kernels actually
-    call, not an array-API reimplementation. ``to_host`` is the *only*
-    sanctioned exit to a plain ``numpy.ndarray`` — every other method may
-    return a backend-native array — so every transfer off-device is one
-    greppable call."""
+    call, not an array-API reimplementation. It grew in T85 from T84's 18
+    methods to the set below — every addition is a call the kernels were
+    already making *around* the port (``np.take_along_axis``,
+    ``np.concatenate``, ``np.argmax``, an indexed assignment...), which the
+    numpy backend could tolerate only because its arrays were the host arrays.
+    Reaching around the port now means silently forcing a device round trip,
+    so those calls had to come through it.
+
+    ``to_host`` is the *only* sanctioned exit to a plain ``numpy.ndarray`` —
+    every other method may return a backend-native array — so every transfer
+    off-device is one greppable call. ``asarray`` is the matching entry: on a
+    device backend it is the host->device upload, and it is a no-op for an
+    array that is already resident.
+
+    Dtypes are named with numpy dtypes on both backends (``np.float64``,
+    ``np.int64``, ``bool``); a device backend maps them onto its own."""
 
     name: str  # "numpy" | "torch"
 
     @abstractmethod
-    def asarray(self, x: Any, dtype: Optional[Any] = None) -> Any: ...
+    def asarray(self, x: Any, dtype: Optional[Any] = None) -> Any:
+        """Adopt ``x`` into this backend (the host->device upload for a device
+        backend). Must be a no-op for an array this backend already owns, so a
+        kernel can call it defensively without paying for a transfer."""
 
     @abstractmethod
     def to_host(self, x: Any) -> np.ndarray:
@@ -67,16 +82,83 @@ class ArrayOps(ABC):
         """Top-``k`` values and indices along ``axis``, best-first."""
 
     @abstractmethod
-    def argsort(self, x: Any, axis: int = -1) -> Any: ...
+    def argsort(self, x: Any, axis: int = -1, stable: bool = False) -> Any:
+        """Ascending argsort. ``stable=True`` must preserve the relative order
+        of equal keys (``_exclude_self`` depends on it to keep neighbours
+        best-first while sinking self-matches and padding)."""
 
     @abstractmethod
-    def argpartition(self, x: Any, k: int, axis: int = -1) -> Any: ...
+    def argmax(self, x: Any, axis: int = -1) -> Any:
+        """Index of the maximum along ``axis``; ties resolve to the first."""
+
+    @abstractmethod
+    def argpartition(self, x: Any, k: int, axis: int = -1) -> Any:
+        """A permutation of indices along ``axis`` whose ``k``-th entry is in
+        its sorted position, with everything before it no greater and
+        everything after no smaller — numpy's contract. A full argsort is a
+        valid implementation (it satisfies the partition property), which is
+        what a backend without a partition primitive should return."""
 
     @abstractmethod
     def nanmin(self, x: Any, axis: Optional[int] = None) -> Any: ...
 
     @abstractmethod
     def nanmax(self, x: Any, axis: Optional[int] = None) -> Any: ...
+
+    @abstractmethod
+    def sum(self, x: Any, axis: Optional[int] = None) -> Any: ...
+
+    @abstractmethod
+    def sqrt(self, x: Any) -> Any: ...
+
+    @abstractmethod
+    def arange(self, n: int) -> Any:
+        """``0..n-1`` as int64."""
+
+    @abstractmethod
+    def astype(self, x: Any, dtype: Any) -> Any: ...
+
+    @abstractmethod
+    def reshape(self, x: Any, shape: Any) -> Any: ...
+
+    @abstractmethod
+    def transpose(self, x: Any) -> Any:
+        """Transpose of a 2-D array, *materialized contiguously* rather than
+        returned as a view. The dense kNN's right operand goes through this,
+        and an operand's memory layout decides which BLAS/device kernel path
+        runs — and therefore the reduction order, and therefore the last ulp of
+        every similarity. Callers hoist it out of their loops accordingly."""
+
+    @abstractmethod
+    def concatenate(self, arrays: Sequence[Any], axis: int = 0) -> Any: ...
+
+    @abstractmethod
+    def stack(self, arrays: Sequence[Any], axis: int = 0) -> Any: ...
+
+    @abstractmethod
+    def repeat(self, x: Any, n: int) -> Any:
+        """Each element of 1-D ``x`` repeated ``n`` times, in place
+        (``np.repeat``: ``[a, b] -> [a, a, b, b]`` for ``n == 2``)."""
+
+    @abstractmethod
+    def tile(self, x: Any, n: int) -> Any:
+        """1-D ``x`` concatenated with itself ``n`` times (``np.tile``:
+        ``[a, b] -> [a, b, a, b]`` for ``n == 2``)."""
+
+    @abstractmethod
+    def take(self, x: Any, idx: Any) -> Any:
+        """``x[idx]`` along the first axis; ``idx`` is an index array."""
+
+    @abstractmethod
+    def take_along_axis(self, x: Any, idx: Any, axis: int) -> Any:
+        """``np.take_along_axis`` — ``idx`` has ``x``'s rank and selects along
+        ``axis``."""
+
+    @abstractmethod
+    def nonzero(self, mask: Any) -> Tuple[Any, Any]:
+        """``(rows, cols)`` of a 2-D boolean mask's True cells, in row-major
+        order (numpy's ``np.nonzero`` ordering — the candidate grid's row order
+        is part of the output contract)."""
 
     @abstractmethod
     def scatter_add(self, target: Any, rows: Any, cols: Any, values: Any) -> Any:
@@ -91,16 +173,47 @@ class ArrayOps(ABC):
         for every ``i``. Same shape contract as ``scatter_add``."""
 
     @abstractmethod
+    def scatter_set(self, target: Any, rows: Any, cols: Any, values: Any) -> Any:
+        """``target[rows[i], cols[i]] = values[i]`` for every ``i`` — plain
+        assignment, no reduction. Same shape contract as ``scatter_add``;
+        duplicate ``(row, col)`` pairs are the caller's problem (none of the
+        kernels produce them)."""
+
+    @abstractmethod
     def gather(self, M: Any, rows: Any, cols: Any) -> Any:
         """``(n,)``: ``M[rows[i], cols[i]]`` for every ``i``."""
 
+    def free_memory(self) -> None:
+        """Release whatever the backend is caching, after an out-of-memory
+        failure and before the caller retries at a smaller chunk. Default
+        no-op: the host allocator needs no help."""
+        return None
+
 
 class TextEncoder(ABC):
-    """Maps text to L2-normalized embeddings (so dot product == cosine)."""
+    """Maps text to L2-normalized embeddings (so dot product == cosine).
+
+    L2-normalization is the load-bearing half of that invariant and is not
+    configurable. The *container* is not: an encoder returns embeddings in
+    whatever array type the configured ``ArrayOps`` backend uses (T85), which
+    is numpy under the default backend and a device array under a device
+    backend — so a GPU encoder's output can go straight into dense retrieval
+    without a round trip through the host. Host-side encoders (TF-IDF,
+    hashing) always return numpy; the backend adopts their output."""
 
     @abstractmethod
     def encode(self, texts: Sequence[str]) -> np.ndarray:  # (n, d) float32
         ...
+
+    def set_array_ops(self, ops: "ArrayOps") -> None:
+        """Tell this encoder which array backend the run uses, so it can emit
+        embeddings in that backend's array type.
+
+        Default no-op — a host-side encoder has nothing to switch, and the
+        backend adopts its numpy output at the boundary. Mirrors
+        ``FusionModel.set_device``: an execution detail the pipeline pushes
+        down, never something the encoder discovers for itself."""
+        return None
 
     def encode_queries(self, texts: Sequence[str]) -> np.ndarray:  # (n, d) float32
         """Encode texts in the *query* role (the items being classified).

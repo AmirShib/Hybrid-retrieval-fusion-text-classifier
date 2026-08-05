@@ -8,6 +8,7 @@ indexing. Queries are processed in chunks to bound peak memory.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, Optional, Sequence, Set, Tuple, Union
 
 import warnings
@@ -46,6 +47,21 @@ from ..infrastructure.signals import (
 # without `infrastructure` importing `application`.
 __all__ = ["FeatureAssembler", "composed_feature_names"]
 
+logger = logging.getLogger(__name__)
+
+
+def _is_out_of_memory(exc: BaseException) -> bool:
+    """Whether ``exc`` is an out-of-memory failure, on either backend.
+
+    Deliberately duck-typed: numpy raises ``MemoryError``, torch raises
+    ``torch.OutOfMemoryError`` — which is a ``RuntimeError`` in current
+    versions and has moved around between them — so this matches on what the
+    exception *says* rather than importing torch to name its class (which the
+    numpy path must never do)."""
+    if isinstance(exc, MemoryError):
+        return True
+    return "out of memory" in str(exc).lower() or type(exc).__name__ == "OutOfMemoryError"
+
 
 def _effective_names(
     providers: Sequence[FeatureProvider],
@@ -71,27 +87,39 @@ def _topn_mask(
     M: np.ndarray, n: int, positive_only: bool = False, ops: Optional[ArrayOps] = None
 ) -> np.ndarray:
     """Boolean (b, C) mask of each row's top-n columns. NaN ranks last; -inf
-    selections (all-missing) are dropped. Ties may admit slightly more than n."""
+    selections (all-missing) are dropped. Ties may admit slightly more than n.
+
+    The cut is read off ``ArrayOps.topk`` rather than ``np.partition``: the
+    n-th largest value in a row is the last of that row's top-n, which is the
+    same element ``np.partition(..., C - n)[:, C - n]`` selects — same
+    threshold, same mask, one port call instead of a raw numpy one."""
     ops = ops or NumpyArrayOps()
     b, C = M.shape
     n = min(n, C)
-    Mf = ops.where(ops.isnan(M), -np.inf, M.astype(np.float64))
+    Mf = ops.where(ops.isnan(M), -np.inf, ops.astype(M, np.float64))
     if positive_only:
         Mf = ops.where(Mf > 0, Mf, -np.inf)
-    kth = np.partition(Mf, C - n, axis=1)[:, C - n][:, None]
+    kth = ops.topk(Mf, n, axis=1)[0][:, n - 1][:, None]
     return (Mf >= kth) & ops.isfinite(Mf)
 
 
 def _row_rank(M: np.ndarray, cand_mask: np.ndarray, ops: Optional[ArrayOps] = None) -> np.ndarray:
     """Dense descending rank (1 = best) within each row's candidate set."""
     ops = ops or NumpyArrayOps()
+    b, C = M.shape
     Mf = ops.where(cand_mask, M, np.nan)
     Mf = ops.where(ops.isnan(Mf), -np.inf, Mf)
     order = ops.argsort(-Mf, axis=1)
-    ranks = np.empty(M.shape, dtype=np.float64)
-    rows = np.arange(M.shape[0])[:, None]
-    ranks[rows, order] = np.arange(1, M.shape[1] + 1)[None, :]
-    return ranks
+    # `ranks[rows, order] = 1..C` as a scatter: the indexed assignment it
+    # replaces cannot cross the port (it mutates a host array in place), and
+    # this is the same permutation write.
+    rows = ops.repeat(ops.arange(b), C)
+    return ops.scatter_set(
+        ops.zeros((b, C), dtype=np.float64),
+        rows,
+        ops.reshape(order, -1),
+        ops.astype(ops.tile(ops.arange(C) + 1, b), np.float64),
+    )
 
 
 def _row_minmax(M: np.ndarray, cand_mask: np.ndarray, ops: Optional[ArrayOps] = None) -> np.ndarray:
@@ -139,20 +167,19 @@ def _row_margin(
     if C == 1:
         # A single class: it is its own row's leader and has no competitor ever.
         top1 = Mc[:, 0]
-        top2 = np.full(b, -np.inf)
+        top2 = ops.full((b,), -np.inf, dtype=np.float64)
         best_other = top2[:, None]
     else:
         # Top-2 by partition (O(C)) rather than a full sort — only the two best
         # values in each row matter here.
         part = ops.argpartition(-Mc, 1, axis=1)[:, :2]
-        rows = np.arange(b)[:, None]
-        vals = Mc[rows, part]
+        vals = ops.take_along_axis(Mc, part, axis=1)
         swap = vals[:, 0] < vals[:, 1]
         leader = ops.where(swap, part[:, 1], part[:, 0])
         top1 = ops.where(swap, vals[:, 1], vals[:, 0])
         top2 = ops.where(swap, vals[:, 0], vals[:, 1])
         # The leader competes against #2; everyone else competes against #1.
-        is_leader = np.arange(C)[None, :] == leader[:, None]
+        is_leader = ops.arange(C)[None, :] == leader[:, None]
         best_other = ops.where(is_leader, top2[:, None], top1[:, None])
 
     with np.errstate(invalid="ignore"):  # -inf - -inf on all-missing rows -> NaN
@@ -221,23 +248,48 @@ class FeatureAssembler:
         frames = []
         ids = np.asarray(query_ids)
         sids = None if self_ids is None else np.asarray(self_ids)
-        for s in range(0, len(query_texts), chunk):
+        n_queries = len(query_texts)
+        s = 0
+        while s < n_queries:
             sl = slice(s, s + chunk)
-            frames.append(
-                self._assemble_chunk(
-                    list(query_texts[sl]),
-                    query_emb[sl],
-                    dense,
-                    lexical,
-                    k_neighbors,
-                    ids[sl],
-                    None if query_labels is None else np.asarray(query_labels)[sl],
-                    providers,
-                    None if sids is None else sids[sl],
-                    requested,
-                    signal_providers,
+            try:
+                frames.append(
+                    self._assemble_chunk(
+                        list(query_texts[sl]),
+                        query_emb[sl],
+                        dense,
+                        lexical,
+                        k_neighbors,
+                        ids[sl],
+                        None if query_labels is None else np.asarray(query_labels)[sl],
+                        providers,
+                        None if sids is None else sids[sl],
+                        requested,
+                        signal_providers,
+                    )
                 )
-            )
+            except (MemoryError, RuntimeError) as exc:
+                # T85: peak memory per chunk is ~`n_live_matrices * chunk * C * 4`
+                # bytes (docs/device-policy.md), and the right `chunk` therefore
+                # depends on the class count and the device's VRAM -- neither of
+                # which the configured default knows. Halve and retry rather than
+                # dying on a run that is minutes in; the reduction sticks for the
+                # remaining chunks, since the next one would fail the same way.
+                if not _is_out_of_memory(exc) or chunk <= 1:
+                    raise
+                self._ops.free_memory()
+                chunk = max(1, chunk // 2)
+                logger.warning(
+                    "out of memory assembling a %d-query chunk over %d classes; "
+                    "retrying at feature_chunk=%d (set retrieval.feature_chunk to "
+                    "pin it): %s",
+                    sl.stop - sl.start,
+                    self._space.size,
+                    chunk,
+                    exc,
+                )
+                continue
+            s += chunk
         if frames:
             return pd.concat(frames, ignore_index=True)
         return pd.DataFrame(
@@ -260,7 +312,11 @@ class FeatureAssembler:
     ) -> pd.DataFrame:
         C = self._space.size
         n = self._policy.top_n_per_signal
-        class_freq = dense.class_freq
+        class_freq = self._ops.asarray(dense.class_freq)
+        # Adopt the query block into the backend once, here. A device-resident
+        # encoder (T85) hands over tensors and this is a no-op; a host encoder's
+        # numpy block is uploaded once per chunk rather than per kernel.
+        q_emb = self._ops.asarray(q_emb)
 
         # T87: which columns this call actually needs. `None` means "everything"
         # (every pre-T87 caller) and is deliberately not narrowed to a concrete
@@ -301,11 +357,11 @@ class FeatureAssembler:
                     candidate_values.append((sm.value, sm.topn_positive_only))
 
         # ---- candidate set = union of each declared candidate matrix's top-n ----
-        mask = np.zeros((len(texts), C), dtype=bool)
+        mask = self._ops.zeros((len(texts), C), dtype=bool)
         for value, positive_only in candidate_values:
-            mask |= _topn_mask(value, n, positive_only=positive_only, ops=self._ops)
-        rows, cols = np.nonzero(mask)
-        if rows.size == 0:
+            mask = mask | _topn_mask(value, n, positive_only=positive_only, ops=self._ops)
+        rows, cols = self._ops.nonzero(mask)
+        if rows.shape[0] == 0:
             empty_cols = _effective_names(providers, requested, signal_providers) + (
                 ["is_true"] if labels is not None else []
             )
@@ -329,7 +385,7 @@ class FeatureAssembler:
                 data[raw_col] = g(M)
             missing_col = sm.columns.get("missing") if "missing" in sm.derive else None
             if missing_col is not None and _want(missing_col):
-                data[missing_col] = np.isnan(g(M)).astype(np.float64)
+                data[missing_col] = self._ops.astype(self._ops.isnan(g(M)), np.float64)
             rank_col = sm.columns.get("rank") if "rank" in sm.derive else None
             if rank_col is not None and _want(rank_col):
                 data[rank_col] = g(_row_rank(M, mask, self._ops))
@@ -344,19 +400,19 @@ class FeatureAssembler:
                 if want_margin:
                     data[margin_col] = g(mg)
                 if want_gap:
-                    data[sm.gap_column] = gap[rows]
+                    data[sm.gap_column] = self._ops.take(gap, rows)
             if sm.top1_column is not None and _want(sm.top1_column):
-                idx = sm.top1_idx
-                hit = cols == idx[rows]
+                top1 = self._ops.take(sm.top1_idx, rows)
+                hit = cols == top1
                 if sm.top1_check_valid:
-                    hit = hit & (idx[rows] >= 0)
-                data[sm.top1_column] = hit.astype(np.float64)
+                    hit = hit & (top1 >= 0)
+                data[sm.top1_column] = self._ops.astype(hit, np.float64)
             for name, M2 in sm.extra_columns.items():
                 if _want(name):
                     data[name] = g(M2)
             for name, arr in sm.extra_scalars.items():
                 if _want(name):
-                    data[name] = arr[rows]
+                    data[name] = self._ops.take(arr, rows)
 
         # ---- cross-signal features: owned by the assembler, not by any one
         # signal provider (T34 phase 2 explicitly scopes agreement/gap
@@ -368,18 +424,15 @@ class FeatureAssembler:
             if dd is not None and dp is not None:
                 data["desc_proto_gap"] = g(dd.value) - g(dp.value)
         if _want("class_log_freq"):
-            data["class_log_freq"] = self._ops.log1p(class_freq[cols].astype(np.float64))
+            data["class_log_freq"] = self._ops.log1p(
+                self._ops.astype(self._ops.take(class_freq, cols), np.float64)
+            )
         if _want("n_signal_agreement"):
             agreement_nodes = ("dense.desc", "dense.proto", "bm25.desc", "dense.knn", "bm25.knn")
             idxs = [sig_matrices[node].top1_idx for node in agreement_nodes if node in sig_matrices]
             if len(idxs) == len(agreement_nodes):
-                argstack = np.stack(idxs, axis=1)
-                n_agree = np.fromiter(
-                    (len(agreement_nodes) - len({v for v in r if v >= 0}) for r in argstack),
-                    dtype=np.float64,
-                    count=argstack.shape[0],
-                )
-                data["n_signal_agreement"] = n_agree[rows]
+                n_agree = self._n_signal_agreement(idxs)
+                data["n_signal_agreement"] = self._ops.take(n_agree, rows)
 
         # Any signal provider beyond the two built-ins ("dense"/"lexical") may
         # contribute columns outside FEATURE_NAMES; append them in provider
@@ -395,22 +448,60 @@ class FeatureAssembler:
             if name in data
         ]
         core_cols = [c for c in FEATURE_NAMES if c in data] + extra_signal_cols
-        df = pd.DataFrame({col: np.asarray(data[col], dtype=np.float32) for col in core_cols})
+        # ---- the fusion handoff: the chunk's one crossing back to the host ----
+        # Everything above ran on the backend. Two `to_host` calls materialize
+        # the result — the feature block as a single (n_candidates, n_cols)
+        # matrix, and the candidate grid — rather than one call per column,
+        # which on a device would be one transfer per column per chunk. That is
+        # also the shape T86 needs to hand straight to the fusion model.
+        grid = self._ops.to_host(self._ops.stack([rows, cols], axis=0))
+        rows_h, cols_h = grid[0], grid[1]
+        if core_cols:
+            block = self._ops.to_host(
+                self._ops.stack([self._ops.astype(data[col], np.float64) for col in core_cols], axis=1)
+            ).astype(np.float32, copy=False)
+            df = pd.DataFrame({col: block[:, i] for i, col in enumerate(core_cols)})
+        else:
+            df = pd.DataFrame(index=pd.RangeIndex(rows_h.shape[0]))
         # Custom providers append their columns after the core ~28. Each
         # gathers over the same (rows, cols) grid; a provider that "did not fire"
         # for a candidate emits NaN, which XGBoost consumes as missing. A
         # provider whose columns are all pruned by ``needed`` is not called at
         # all (T87) — the whole point for a provider that calls out to an
-        # external service or a reranker.
+        # external service or a reranker. `FeatureContext` is a host contract
+        # (plain numpy, per its docstring), so a configured provider costs one
+        # extra lift of the query embeddings; with none configured — the
+        # default — nothing is lifted.
         for col, values in self._provider_columns(
-            providers, texts, q_emb, rows, cols, needed
+            providers, texts, q_emb, rows_h, cols_h, needed
         ).items():
             df[col] = values
-        df["item_id"] = ids[rows]
-        df["candidate"] = cols.astype(np.int64)
+        df["item_id"] = ids[rows_h]
+        df["candidate"] = cols_h.astype(np.int64)
         if labels is not None:
-            df["is_true"] = (cols == labels[rows]).astype(np.int64)
+            df["is_true"] = (cols_h == labels[rows_h]).astype(np.int64)
         return df
+
+    def _n_signal_agreement(self, top1_idxs) -> np.ndarray:
+        """Per query: ``n_signals - (distinct classes the signals picked)``.
+
+        5 when every signal agrees on one class, 0 when all five disagree; a
+        signal with no valid pick (``-1``) contributes no class, so it can only
+        raise agreement, never lower it.
+
+        Replaces a per-row Python ``set`` comprehension — a per-row loop on the
+        hot path (against the CLAUDE.md convention) that also forced the top1
+        arrays back to the host on every chunk. Sorting each row puts the
+        ``-1``s first and groups equal picks, so "distinct valid picks" is the
+        count of valid entries that differ from their left neighbour."""
+        ops = self._ops
+        stack = ops.stack([ops.astype(idx, np.int64) for idx in top1_idxs], axis=1)
+        n_signals = stack.shape[1]
+        s = ops.take_along_axis(stack, ops.argsort(stack, axis=1), axis=1)
+        first = ops.full((s.shape[0], 1), True, dtype=bool)
+        new_value = ops.concatenate([first, s[:, 1:] != s[:, :-1]], axis=1)
+        distinct = ops.sum(ops.astype((s >= 0) & new_value, np.float64), axis=1)
+        return n_signals - distinct
 
     def _provider_columns(self, providers, texts, q_emb, rows, cols, needed=None) -> dict:
         """Run each provider over the candidate grid and collect its columns as
@@ -426,7 +517,7 @@ class FeatureAssembler:
             return {}
         ctx = FeatureContext(
             query_texts=texts,
-            query_emb=q_emb,
+            query_emb=self._ops.to_host(q_emb),
             rows=rows,
             cols=cols,
             label_space=self._space,

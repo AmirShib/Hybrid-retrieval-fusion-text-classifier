@@ -30,6 +30,7 @@ import numpy as np
 
 from ..config import EncoderConfig
 from ..domain import (
+    ArrayOps,
     EpochSelectionPolicy,
     LabeledItem,
     LabelSpace,
@@ -87,9 +88,18 @@ class SentenceTransformerEncoder(TextEncoder):
     prepended per role, or a ``*_prompt_name`` selects a model-card prompt
     (an explicit prompt wins over its prompt_name). ``encode_kwargs`` merge
     into every ``model.encode(...)`` call, with user keys winning over our
-    defaults — except ``normalize_embeddings``/``convert_to_numpy``, which are
-    forced ``True``: L2-normalized numpy output (dot == cosine) is a
-    package-wide invariant and cannot be configured away.
+    defaults — except ``normalize_embeddings``/``convert_to_numpy``, which the
+    adapter owns: ``normalize_embeddings`` is forced ``True`` (dot == cosine is
+    a package-wide invariant and cannot be configured away), and the output
+    container follows the run's array backend.
+
+    **Output container** (T85). Under the default numpy backend the encoder
+    calls ``convert_to_numpy=True`` and returns ``np.float32`` — byte-for-byte
+    what it always did. Under a device backend (``set_array_ops``) it calls
+    ``convert_to_tensor=True`` instead and hands the tensor straight to the
+    retriever, which is the whole point: the encoder's forward pass already ran
+    on the device, and copying its output to the host only to copy the derived
+    feature matrix back is the round trip T85 removes.
 
     ``training_history`` is the per-epoch record of a fine-tune that selected its
     best epoch (see ``train_encoder``); it is evidence, not state — ``save``
@@ -114,16 +124,17 @@ class SentenceTransformerEncoder(TextEncoder):
     ):
         self._model = model
         self._batch_size = batch_size
+        self._ops: Optional[ArrayOps] = None  # set by set_array_ops; None == numpy output
         self.training_history: Dict[str, Any] = dict(training_history or {})
         cleaned = dict(encode_kwargs or {})
         for key in self._PROTECTED_ENCODE_KWARGS:
             if key in cleaned:
                 logger.warning(
-                    "encode_kwargs[%r]=%r is ignored: %s=True is required so "
-                    "embeddings stay L2-normalized numpy arrays (dot == cosine)",
+                    "encode_kwargs[%r]=%r is ignored: the adapter owns it — "
+                    "normalize_embeddings=True is the dot==cosine invariant, and the "
+                    "output container follows the configured array backend",
                     key,
                     cleaned.pop(key),
-                    key,
                 )
         self._encode_kwargs = cleaned
         self._query_prompt = query_prompt
@@ -160,6 +171,12 @@ class SentenceTransformerEncoder(TextEncoder):
     def model(self):
         return self._model
 
+    def set_array_ops(self, ops: ArrayOps) -> None:
+        # `"numpy"` is stored as None so the encode path stays exactly the
+        # pre-T85 one (no tensor conversion, no device concept) rather than
+        # merely equivalent to it.
+        self._ops = None if ops is None or ops.name == "numpy" else ops
+
     def encode(self, texts: Sequence[str]) -> np.ndarray:
         return self._encode(texts, prompt=None, prompt_name=None)
 
@@ -179,10 +196,18 @@ class SentenceTransformerEncoder(TextEncoder):
             texts = [prompt + t for t in texts]
         elif prompt_name:
             kwargs["prompt_name"] = prompt_name
-        kwargs["convert_to_numpy"] = True
         kwargs["normalize_embeddings"] = True
+        if self._ops is None:
+            kwargs["convert_to_numpy"] = True
+            emb = self._model.encode(texts, **kwargs)
+            return np.ascontiguousarray(emb, dtype=np.float32)
+        # Device backend: keep the forward pass's output where it was computed.
+        # `convert_to_numpy` must be False explicitly — sentence-transformers
+        # defaults it to True and it wins over `convert_to_tensor`.
+        kwargs["convert_to_numpy"] = False
+        kwargs["convert_to_tensor"] = True
         emb = self._model.encode(texts, **kwargs)
-        return np.ascontiguousarray(emb, dtype=np.float32)
+        return self._ops.astype(self._ops.asarray(emb), np.float32)
 
     def save(self, directory: str) -> None:
         self._model.save(directory)

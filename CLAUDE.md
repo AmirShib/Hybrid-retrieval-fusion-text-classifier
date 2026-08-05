@@ -29,6 +29,14 @@ Dependency rule: `domain` imports no ML framework. `infrastructure` depends on `
   built from *other* folds only. Calibration and the coverage report come from folds the
   fusion model never trained on. Never let an item see itself in its own index.
 - **Embeddings are L2-normalized** so dot product == cosine. Encoders must preserve this.
+  The *container* is not part of the invariant: an encoder returns embeddings in whatever
+  array type the configured `array_backend` uses (numpy by default, device arrays under the
+  torch backend — T85). Persistence is numpy either way.
+- **CPU is the reference implementation.** A device backend (`array_backend="torch"`,
+  `dense_kind="torch"`) agrees with it to float tolerance, not bit-for-bit: float32 reduction
+  order differs, and a near-tie can flip an ordinal feature and with it the candidate set.
+  Same host + same device + same seed stays reproducible; cross-device does not. Benchmarks
+  and golden fixtures are numpy-backend. See `docs/device-policy.md`.
 - **`LabelSpace` owns the canonical key↔index map.** Column `c` always means `key_at(c)`.
 - A trained **model directory must be portable** (numpy + json + native
   XGBoost/SentenceTransformer formats only; no pickle) — it ships to an air-gapped

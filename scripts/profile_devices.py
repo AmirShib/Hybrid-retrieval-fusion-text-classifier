@@ -53,6 +53,7 @@ from text_classifier.infrastructure import (
     build_fusion,
 )
 from text_classifier.infrastructure.device import cuda_available
+from text_classifier.infrastructure.registry import build_array_ops
 
 logging.basicConfig(level=logging.WARNING)  # the harness's own prints carry the signal
 
@@ -122,9 +123,15 @@ def _profile_one_config(
     cfg: PipelineConfig,
     device: DeviceConfig,
     query_frac: float = 0.1,
+    array_backend: str = "numpy",
 ) -> Dict[str, Any]:
     if not device.available():
         return {"status": "skipped", "reason": device.skip_reason()}
+    # T85: the same stages, on the configured ArrayOps backend. On a CPU-only
+    # host `--array-backend torch` measures torch's CPU kernels, not a device
+    # win -- useful as an overhead floor for the seam, not as the GPU number
+    # the T85 acceptance criterion asks for (that needs a CUDA host).
+    ops = build_array_ops(array_backend)
 
     texts = [it.text for it in items]
     y = np.asarray(label_space.encode_labels([it.label for it in items]), dtype=np.int64)
@@ -156,8 +163,9 @@ def _profile_one_config(
 
     pool_emb, desc_emb, q_emb = _measure("1_encode", _encode_all)
 
+    pool_emb, desc_emb, q_emb = (ops.asarray(pool_emb), ops.asarray(desc_emb), ops.asarray(q_emb))
     dense = DenseRetrieverAdapter.build_from_embeddings(
-        pool_emb, y, desc_emb, label_space, cfg.retrieval
+        pool_emb, y, desc_emb, label_space, cfg.retrieval, ops
     )
     lexical = LexicalRetrieverAdapter.build(texts, y, label_space, cfg.retrieval)
 
@@ -170,12 +178,12 @@ def _profile_one_config(
     # Already computed inside DenseRetrieverAdapter.build_from_embeddings above;
     # re-time it standalone (identical inputs) so this stage's cost is isolated
     # rather than folded into index construction.
-    _measure("2_prototypes_and_freq", lambda: _prototypes_and_freq(pool_emb, y, C))
+    _measure("2_prototypes_and_freq", lambda: _prototypes_and_freq(pool_emb, y, C, ops))
 
     def _desc_proto_sim():
         return (
-            np.asarray(dense.description_similarity(q_emb), dtype=np.float64),
-            np.asarray(dense.prototype_similarity(q_emb), dtype=np.float64),
+            ops.astype(dense.description_similarity(q_emb), np.float64),
+            ops.astype(dense.prototype_similarity(q_emb), np.float64),
         )
 
     desc_d, proto = _measure("3_description_prototype_similarity", _desc_proto_sim)
@@ -184,37 +192,33 @@ def _profile_one_config(
 
     def _bm25():
         lab, sco = lexical.knn_example_labels(q_texts, k)
-        raw = np.asarray(lexical.description_score(q_texts), dtype=np.float64)
-        return lab, sco, np.where(raw > 0, raw, np.nan)
+        raw = ops.astype(ops.asarray(lexical.description_score(q_texts)), np.float64)
+        # The one host->device crossing per chunk (T85): BM25 stays on the host.
+        return ops.asarray(lab), ops.asarray(sco), ops.where(raw > 0, raw, np.nan)
 
     bn_lab, bn_sco, bdesc = _measure("5_bm25", _bm25)
 
     def _scatter():
-        return _scatter_knn(dn_lab, dn_sim, C), _scatter_knn(bn_lab, bn_sco, C)
+        return _scatter_knn(dn_lab, dn_sim, C, ops), _scatter_knn(bn_lab, bn_sco, C, ops)
 
     (d_sum, d_max, d_cnt), (b_sum, b_max, b_cnt) = _measure("6_scatter_knn", _scatter)
 
     mask = (
-        _topn_mask(desc_d, n_top)
-        | _topn_mask(proto, n_top)
-        | _topn_mask(bdesc, n_top, positive_only=True)
-        | _topn_mask(d_sum, n_top)
-        | _topn_mask(b_sum, n_top)
+        _topn_mask(desc_d, n_top, ops=ops)
+        | _topn_mask(proto, n_top, ops=ops)
+        | _topn_mask(bdesc, n_top, positive_only=True, ops=ops)
+        | _topn_mask(d_sum, n_top, ops=ops)
+        | _topn_mask(b_sum, n_top, ops=ops)
     )
-    rows, cols = np.nonzero(mask)
+    rows, cols = (ops.to_host(a) for a in ops.nonzero(mask))
 
     def _leaf_ops():
-        _row_rank(desc_d, mask)
-        _row_rank(bdesc, mask)
-        _row_rank(d_sum, mask)
-        _row_rank(b_sum, mask)
-        _row_minmax(desc_d, mask)
-        _row_minmax(bdesc, mask)
-        _row_margin(desc_d, mask)
-        _row_margin(proto, mask)
-        _row_margin(d_sum, mask)
-        _row_margin(bdesc, mask)
-        _row_margin(b_sum, mask)
+        for M in (desc_d, bdesc, d_sum, b_sum):
+            _row_rank(M, mask, ops)
+        for M in (desc_d, bdesc):
+            _row_minmax(M, mask, ops)
+        for M in (desc_d, proto, d_sum, bdesc, b_sum):
+            _row_margin(M, mask, ops)
 
     _measure("7_ranks_margins_topn_minmax", _leaf_ops)
 
@@ -260,7 +264,7 @@ def _profile_one_config(
     )
 
     # ---- cross-check: black-box assemble() wall time vs the stage sum above ----
-    assembler = FeatureAssembler(label_space, CandidatePolicy(n_top))
+    assembler = FeatureAssembler(label_space, CandidatePolicy(n_top), ops)
     _, assemble_wall = _median_call(
         lambda: assembler.assemble(
             q_texts, q_emb, dense, lexical, k, query_ids=np.arange(len(q_texts))
@@ -275,6 +279,7 @@ def _profile_one_config(
 
     return {
         "status": "ok",
+        "array_backend": ops.name,
         "n_items": n,
         "n_classes": C,
         "n_query": n_query,
@@ -315,7 +320,11 @@ def _oof_timing(label_space: LabelSpace, items, n_folds: int) -> Dict[str, float
 
 
 def run_grid(
-    n_items_grid: List[int], n_classes_grid: List[int], seed: int, oof_folds: Optional[int]
+    n_items_grid: List[int],
+    n_classes_grid: List[int],
+    seed: int,
+    oof_folds: Optional[int],
+    array_backend: str = "numpy",
 ) -> Dict[str, Any]:
     results: List[Dict[str, Any]] = []
     for n_classes in n_classes_grid:
@@ -327,16 +336,28 @@ def run_grid(
             cfg.retrieval = RetrievalConfig()
             entry: Dict[str, Any] = {"n_items_requested": n_items, "n_classes": n_classes, "configs": {}}
             for device in DEVICE_CONFIGS:
-                entry["configs"][device.name] = _profile_one_config(label_space, items, cfg, device)
+                entry["configs"][device.name] = _profile_one_config(
+                    label_space, items, cfg, device, array_backend=array_backend
+                )
             if oof_folds:
                 entry["oof_timing"] = _oof_timing(label_space, items, oof_folds)
             results.append(entry)
             print(f"done: n_items~{n_items} n_classes={n_classes}")
-    return {"grid": results, "cuda_available": cuda_available()}
+    return {
+        "grid": results,
+        "cuda_available": cuda_available(),
+        "array_backend": array_backend,
+    }
 
 
 def _to_markdown(report: Dict[str, Any]) -> str:
-    lines = ["# Device profile (T83)", "", f"`cuda_available()` on this host: `{report['cuda_available']}`", ""]
+    lines = [
+        "# Device profile (T83)",
+        "",
+        f"`cuda_available()` on this host: `{report['cuda_available']}`",
+        f"array backend: `{report.get('array_backend', 'numpy')}`",
+        "",
+    ]
     for entry in report["grid"]:
         lines.append(f"## n_items~{entry['n_items_requested']}, n_classes={entry['n_classes']}")
         for name, res in entry["configs"].items():
@@ -373,6 +394,16 @@ def main() -> None:
     p.add_argument("--quick", action="store_true", help="small smoke grid, overrides --n-items/--n-classes")
     p.add_argument("--oof-folds", type=int, default=3, help="0 disables the end-to-end OOF timing")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument(
+        "--array-backend",
+        type=str,
+        default="numpy",
+        help=(
+            "ArrayOps backend to run the stages on (T85). 'torch' on a CPU-only "
+            "host measures torch's CPU kernels -- an overhead floor for the seam, "
+            "not a device win."
+        ),
+    )
     p.add_argument("--out-json", type=str, default="docs/device-profile.json")
     p.add_argument("--out-md", type=str, default="docs/device-profile.md")
     args = p.parse_args()
@@ -384,7 +415,9 @@ def main() -> None:
         n_items_grid = [int(x) for x in args.n_items.split(",")]
         n_classes_grid = [int(x) for x in args.n_classes.split(",")]
 
-    report = run_grid(n_items_grid, n_classes_grid, args.seed, args.oof_folds or None)
+    report = run_grid(
+        n_items_grid, n_classes_grid, args.seed, args.oof_folds or None, args.array_backend
+    )
 
     with open(args.out_json, "w") as fh:
         json.dump(report, fh, indent=2, default=float)
