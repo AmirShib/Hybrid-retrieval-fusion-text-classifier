@@ -8,6 +8,8 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-05
+
 ### Added
 - **Per-class calibration behind the `ConfidenceCalibrator` port (T45)** — a
   `PerClassCalibrator` fits a separate inner calibrator (isotonic, platt, or
