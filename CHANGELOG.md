@@ -8,7 +8,177 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-05
+
 ### Added
+- **Per-class calibration behind the `ConfidenceCalibrator` port (T45)** — a
+  `PerClassCalibrator` fits a separate inner calibrator (isotonic, platt, or
+  beta) per class, falling back to a single global inner calibrator for
+  classes whose out-of-fold support is below `min_support`. A raw score of
+  0.8 does not mean the same thing for a common class and a rare one; a
+  global curve averages the two and is wrong for both, and thresholds
+  (`AbstentionPolicy`) already go per-class — calibration was the remaining
+  global stage. Selected via `CalibrationConfig(kind="per-class", inner=...,
+  min_support=...)`; `ConfidenceCalibrator.fit`/`transform` both gained an
+  optional `classes=None` keyword so the existing isotonic/platt/beta
+  calibrators are unaffected when it's absent. Persists as a directory (a
+  manifest plus one file per class calibrator and one for the global),
+  registered in the same registry as the other calibrator kinds. Class-blind
+  callers (`classes=None`) reproduce the prior global-only behaviour exactly.
+- **Torch-optional install via extras (T63)** — `sentence-transformers` (and the
+  torch it pulls in) moves out of core `dependencies` into an opt-in
+  `sentence-transformers` extra: `pip install text-classifier[sentence-transformers]`.
+  Plain `pip install text-classifier` stays torch-free and trains/infers with
+  `--encoder-kind tfidf` or `--encoder-kind hashing`. The default encoder kind
+  stays `sentence-transformers` for out-of-the-box quality; selecting it
+  without the extra installed now raises a clear, actionable `ImportError`
+  (pointing at the extra and the torch-free alternatives) instead of failing
+  deep in the pipeline. `requirements.lock` is regenerated with
+  `--extra sentence-transformers --python-platform x86_64-unknown-linux-gnu` so
+  the air-gapped bundle is unaffected. CI gained two jobs: one asserting the
+  core install has no torch and fails clearly on the sentence-transformers
+  kind, one asserting the extra actually installs torch and the suite stays
+  green with it present.
+- **BM25 at scale: bounded memory and throughput (T32)** — four independent
+  fixes to the lexical retrieval path:
+  - **Tokenize/build once per training run, not once per fold.** The example
+    corpus is tokenized once (`BM25Index.tokenize_corpus` + `fit_from_counts`,
+    row-sliced per fold — IDF/length-norm are legitimately fold-local, only
+    the tokenization is shared) and the class-description BM25 index is built
+    once and reused verbatim (it is never row-sliced, so nothing about the
+    per-fold concern applies to it). `bm25_token_kwargs` that prune vocabulary
+    by corpus statistics (`min_df`/`max_df`/`max_features`) fall back to the
+    ordinary per-fold path automatically — full-corpus and per-fold
+    vocabularies genuinely differ then.
+  - **`top_k` never densifies.** The `(chunk, n_docs)` dense block used to be
+    materialized and then argpartitioned; the sparse `Qbin @ Wt` product's
+    positive-only explicit nonzeros now go straight through a vectorized
+    sparse row-top-k (one lexsort, no per-row Python loop, no memory blow-up
+    at scale).
+  - **`RetrievalConfig.bm25_max_df_ratio`** (opt-in, `None` by default):
+    drops terms above a document-frequency ratio before building the weight
+    matrix, shrinking it for near-zero ranking cost — the one knob here that
+    can change scores, so it is opt-in and persisted in `meta.json`.
+  - **`RetrievalConfig.bm25_max_block_elems`** (opt-in, `None` by default):
+    `BM25Index.score_matrix` (the small class-description path; the example
+    pool must go through `top_k`) now raises rather than silently allocating
+    a block over the configured cap.
+  Byte-identical on the default config (empty `bm25_token_kwargs`,
+  `bm25_max_df_ratio=None`, `bm25_max_block_elems=None`); legacy model
+  directories load unchanged via `.get`-based defaults on the new persisted
+  fields.
+- **Encode the corpus once, not once per fold (T88)** — on the shared-encoder
+  training path, `_build_oof` now encodes the full example pool and every
+  class description once per run and slices per fold
+  (`DenseRetrieverAdapter.build_from_embeddings`), instead of paying
+  `encode_documents` again for every fold; `_build_deployment_index` reuses
+  the same cached embeddings rather than encoding a second time. At
+  `n_folds=5` this cuts document-encode work from `5n + 6C` to `n + C` —
+  roughly a 5x reduction on the dominant cost of a sentence-transformer
+  training run, and it compounds directly with `n_folds`. `build()` still
+  encodes internally and delegates to the new classmethod, so every existing
+  caller is unaffected. The per-fold-encoder path (`use_per_fold_encoder`) and
+  corpus-dependent encoders (e.g. TF-IDF, which must refit per fold to stay
+  leakage-free) are untouched — the cache only engages for a frozen, shared
+  encoder. No feature value changes: the OOF frame, fusion model, thresholds
+  and evaluation are unaffected on a fixed corpus.
+- **Feature dependency graph + demand-driven computation (T87)** — the
+  assembler now computes only the columns a caller actually requests
+  (`FeatureAssembler.assemble(..., requested=...)`), resolved through a
+  declared dependency graph (`domain.FEATURE_DEPS` / `feature_closure`)
+  instead of unconditionally building the full ~36-column schema every call.
+  Training and scoring (`predict`, `predict_topk`, fit) request
+  `fusion_feature_names(...)` — the model's own columns; `explain`,
+  `explain_records`, `signal_report` and the ablation report request
+  `composed_feature_names(...)` — everything, because they read core columns
+  by name. The candidate mask is never pruned (every signal that feeds it
+  still runs on every call); what's skipped is downstream leaf work nothing
+  reads — the `rank_*`/`margin_*`/`norm_*`/`n_signal_agreement` sorts and
+  partitions, and, sharpest of all, a custom `FeatureProvider`'s `compute()`
+  when every one of its declared columns is dropped (previously it ran
+  unconditionally, the exact cost `drop_features` claimed to avoid for a
+  provider calling an external service or a reranker). **Behaviour change,
+  accepted:** a model trained with `FusionConfig.drop_features` now gets a
+  correspondingly narrower `signal_report` on its training out-of-fold data
+  (it names the skipped signals rather than reporting on columns that were
+  never assembled); diagnostics computed fresh at inference time
+  (`explain`/`explain_records`/`importance_report`) are unaffected, since they
+  always request the full schema. Pruning is value-preserving by construction
+  and fuzz-tested: for any requested subset, every surviving column's value is
+  identical to the unpruned computation. Empty `drop_features` (the default)
+  is byte-for-byte unchanged.
+- **Retrain-based feature ablation (T82)** — `FusionConfig.drop_features` (plus
+  `--drop-features` on the train CLI) withholds named columns from the fusion
+  model, and `text-classifier-retrain-ablate` trains each arm plus a paired
+  no-drop baseline once per seed to report the effect with error bars. This is
+  the counterpart to T40's masking ablation: masking a column on an
+  already-trained model answers "what if this signal fails at inference?", while
+  training without it answers "should this column be in the schema?" — a model
+  fitted with a column has splits on it either way. Deltas are paired by seed
+  (removing the fold-split variance both arms saw), reported against
+  `accepted_correct` (coverage x accuracy, which does not move when the tuned
+  threshold slides without the model changing), and turned into an
+  `earns_place` / `redundant` / `inconclusive` verdict only when the effect
+  exceeds the spread of its own per-seed differences. Dropping narrows the model
+  only: the assembler still computes every column, so `explain`, `signal_report`
+  and the masking ablation keep working on a subset-trained model. The drop list
+  rides in `meta.json` and is re-applied at load, so inference rebuilds the exact
+  column list the model was fitted on. Empty (the default) is byte-for-byte the
+  existing behaviour.
+
+- **Competition features for the fusion model (T81)** — eight new core columns
+  (`FEATURE_NAMES` grows 28 → 36) giving the pointwise fusion model information
+  about how a candidate compares to the rest of *its own query*, which it
+  previously could not infer. `margin_d_desc`, `margin_d_proto`, `margin_d_knn`,
+  `margin_b_desc`, `margin_b_knn` hold each candidate's signal value minus the
+  best *other* candidate's value for that signal — positive only for the
+  signal's leader, where it is the top1−top2 gap, and negative elsewhere as a
+  deficit behind the leader. `q_gap_d_desc`, `q_gap_d_knn`, `q_gap_b_desc` carry
+  that top1−top2 gap as a per-query column, so trailing candidates also see how
+  contested the lead is. Previously a leader at `0.85` over a `0.84` rival and
+  one at `0.85` over `0.40` were identical in every column — one a coin flip,
+  the other decided — which matters most for calibrated abstention, where
+  top1−top2 is the classic confidence signal. `NaN` discipline is preserved
+  throughout: a signal that did not retrieve a candidate yields a `NaN` margin
+  and does not compete for the top-2, and a candidate with no rival at all gets
+  `NaN` (undefined) rather than `0.0` (a tie). Pure transforms of the `(b, C)`
+  signal matrices already computed per chunk (`_row_margin` in
+  `application/features.py`, top-2 by `argpartition`): no new retrieval, no new
+  persisted state, and no leakage surface. **Effect not established:** a single
+  run showed +1.3pp accuracy-on-accepted for the hashing encoder, but the seeded
+  retrain-ablation added in T82 puts the benchmark's own seed-to-seed spread at
+  +/-1.6pp and finds dropping all eight columns indistinguishable from keeping
+  them on both encoders. The columns are retained on the design argument (a
+  pointwise model cannot otherwise see the top1-top2 gap that drives abstention),
+  not on a measured gain; the offline benchmark is too small to resolve
+  feature-level effects below ~2-3pp, so the question is open pending a run on
+  real data.
+
+- **Best-epoch selection for encoder fine-tuning (T80)** — a multi-epoch
+  fine-tune no longer returns whatever the last epoch happened to produce. With
+  `encoder.train_epochs > 1`, a stratified `encoder.train_holdout_ratio`
+  (default `0.1`) of the fine-tuning items is withheld from the gradient updates
+  and re-scored after every epoch; the epoch scoring best on
+  `encoder.train_select_metric` is the one returned and saved.
+  `encoder.train_early_stopping_patience` stops the run once the metric stalls
+  (default `0` = run every epoch), and `encoder.train_select_min_delta` sets how
+  much an epoch must improve by to count. New train-CLI flags:
+  `--encoder-epochs` (the epoch count was previously reachable only via
+  `--config`), `--encoder-epoch-holdout`, `--encoder-select-metric`,
+  `--encoder-patience`. Selectable metrics (`domain/services.py`:
+  `ENCODER_SELECTION_METRICS`, computed by `encoder_retrieval_metrics`) are
+  `desc_acc@1` (default), `desc_mrr`, `desc_pos_sim`, and `knn_acc@1`. The
+  per-epoch table travels with the encoder and is written to
+  `<model_dir>/encoder/encoder_training.json` alongside which epoch won.
+  Decision logic lives in the framework-free `EpochSelectionPolicy` (ties go to
+  the earlier epoch); the per-epoch loop is `EncoderEpochTracker`, driven by one
+  evaluator call per epoch from `SentenceTransformer.fit`. Leakage-neutral: the
+  holdout comes out of the caller's own items (in the out-of-fold loop, one
+  fold's training rows), so withheld-from-the-gradient is still in-fold, and the
+  fusion model's rows are untouched. Defaults are behaviour-preserving —
+  `train_epochs` is still `1`, where there is nothing to select between; a
+  holdout too small to rank epochs by (< 4 items) disables selection with a
+  warning rather than picking on noise.
 - **Add classes/examples to a deployed model without retraining (T68)** — a
   `text-classifier-update` console script (+ `application/updating.py::update`)
   that rebuilds only the cheap, class-indexed retrieval state (dense
@@ -127,6 +297,11 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
   unaffected (defaults are byte-identical to previous behavior).
 
 ### Changed
+- **Model directories trained before T81 must be retrained.** The core feature
+  schema grew from 28 to 36 columns, so a `meta.json` written before it no
+  longer matches the schema the code composes and loading raises the existing
+  `_check_feature_schema` error. That is the guard working as designed — the
+  alternative is silently feeding XGBoost mislabelled columns.
 - **Behavior change:** `RetrievalConfig.bm25_token_kwargs` now defaults to
   `{}` (no stopword removal) instead of `{"stop_words": "english"}`. BM25
   silently applied English stopword removal to every corpus regardless of

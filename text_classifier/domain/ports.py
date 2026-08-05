@@ -8,12 +8,91 @@ All array shapes are documented as (rows, cols). `b` = query batch size,
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 import numpy as np
 
 from .models import LabeledItem, LabelSpace
+
+
+class ArrayOps(ABC):
+    """Narrow array-backend seam (T84) for the numeric kernels in feature
+    assembly and dense retrieval. A numpy backend is the only one registered
+    today; a torch backend (T85) implements the same surface so those kernels
+    run device-resident without a second, drifting implementation.
+
+    Deliberately narrow: only the primitives the existing kernels actually
+    call, not an array-API reimplementation. ``to_host`` is the *only*
+    sanctioned exit to a plain ``numpy.ndarray`` — every other method may
+    return a backend-native array — so every transfer off-device is one
+    greppable call."""
+
+    name: str  # "numpy" | "torch"
+
+    @abstractmethod
+    def asarray(self, x: Any, dtype: Optional[Any] = None) -> Any: ...
+
+    @abstractmethod
+    def to_host(self, x: Any) -> np.ndarray:
+        """Materialize ``x`` as a plain ``numpy.ndarray`` on the host. The only
+        sanctioned exit from backend-native arrays."""
+
+    @abstractmethod
+    def zeros(self, shape: Any, dtype: Any) -> Any: ...
+
+    @abstractmethod
+    def full(self, shape: Any, value: Any, dtype: Any) -> Any: ...
+
+    @abstractmethod
+    def where(self, cond: Any, a: Any, b: Any) -> Any: ...
+
+    @abstractmethod
+    def isnan(self, x: Any) -> Any: ...
+
+    @abstractmethod
+    def isfinite(self, x: Any) -> Any: ...
+
+    @abstractmethod
+    def maximum(self, a: Any, b: Any) -> Any: ...
+
+    @abstractmethod
+    def log1p(self, x: Any) -> Any: ...
+
+    @abstractmethod
+    def matmul(self, a: Any, b: Any) -> Any: ...
+
+    @abstractmethod
+    def topk(self, x: Any, k: int, axis: int = -1) -> Tuple[Any, Any]:
+        """Top-``k`` values and indices along ``axis``, best-first."""
+
+    @abstractmethod
+    def argsort(self, x: Any, axis: int = -1) -> Any: ...
+
+    @abstractmethod
+    def argpartition(self, x: Any, k: int, axis: int = -1) -> Any: ...
+
+    @abstractmethod
+    def nanmin(self, x: Any, axis: Optional[int] = None) -> Any: ...
+
+    @abstractmethod
+    def nanmax(self, x: Any, axis: Optional[int] = None) -> Any: ...
+
+    @abstractmethod
+    def scatter_add(self, target: Any, rows: Any, cols: Any, values: Any) -> Any:
+        """``target[rows[i], cols[i]] += values[i]`` for every ``i``, summing
+        duplicates. Returns the updated array (backends need not mutate
+        in place); ``target`` is 2-D, ``rows``/``cols``/``values`` are 1-D and
+        the same length."""
+
+    @abstractmethod
+    def scatter_max(self, target: Any, rows: Any, cols: Any, values: Any) -> Any:
+        """``target[rows[i], cols[i]] = max(target[rows[i], cols[i]], values[i])``
+        for every ``i``. Same shape contract as ``scatter_add``."""
+
+    @abstractmethod
+    def gather(self, M: Any, rows: Any, cols: Any) -> Any:
+        """``(n,)``: ``M[rows[i], cols[i]]`` for every ``i``."""
 
 
 class TextEncoder(ABC):
@@ -107,6 +186,144 @@ class LexicalRetriever(ABC):
         """(b, C) BM25 score against each class description; 0 where no overlap."""
 
 
+@dataclass(frozen=True)
+class SignalContext:
+    """The per-chunk inputs a ``SignalProvider.build`` computes over — the same
+    chunk ``FeatureAssembler._assemble_chunk`` is assembling, so a provider that
+    wraps a retriever sees exactly the arguments the retriever ports already take.
+
+    ``self_ids`` mirrors ``FeatureAssembler.assemble``'s leave-one-out mode
+    (``n_folds=1``): when given, each query is itself in the pool being
+    retrieved against, and a provider whose signal can self-match (kNN, a
+    prototype) must mask its own index out, exactly like
+    ``DenseRetriever.knn_example_labels``/``loo_prototype_similarity``."""
+
+    texts: Sequence[str]
+    q_emb: np.ndarray  # (b, dim), L2-normalized
+    k: int
+    n_classes: int
+    self_ids: Optional[np.ndarray] = None
+
+
+@dataclass
+class SignalMatrix:
+    """One ``(b, C)`` intermediate a ``SignalProvider`` contributes for one query
+    chunk, plus how it participates in candidate selection and the *generic*
+    per-signal derivations ``FeatureAssembler`` already computes uniformly for
+    any matrix by name (raw value, rank, min-max norm, missing flag, margin +
+    per-query gap — see ``application/features.py``'s ``_row_rank``/
+    ``_row_minmax``/``_row_margin`` helpers).
+
+    The five built-in signals are *not* symmetric (``d_desc_sim`` has no
+    missing-flag column; ``d_proto_sim`` has no rank/norm at all), so which
+    derivations apply and what each derived column is named is declared here,
+    per matrix, rather than inferred from a fixed naming convention.
+
+    - ``node``: the ``FEATURE_DEPS``/candidate-mask name (e.g. ``"dense.desc"``).
+    - ``value``: the ``(b, C)`` matrix itself. NaN means "this signal did not
+      retrieve this class" (never a true 0) — the CLAUDE.md invariant.
+    - ``derive``: subset of ``{"raw", "rank", "norm", "missing", "margin"}`` —
+      which generic derivations to compute for this matrix. ``"margin"`` also
+      produces the paired per-query top1-top2 gap when ``gap_column`` is set.
+    - ``columns``: derivation name -> output column name, for every entry in
+      ``derive`` (e.g. ``{"raw": "d_desc_sim", "rank": "rank_d_desc"}``).
+    - ``gap_column``: output column name for the per-query top1-top2 gap paired
+      with the ``"margin"`` derivation, or ``None`` if this signal has no
+      ``q_gap_*`` column (e.g. ``dense.proto``/``bm25.knn`` today).
+    - ``top1_idx``/``top1_column``: an ``is_<x>_top1`` column naming the (b,)
+      class-index array that defines "this signal's pick" for the query — not
+      always ``argmax(value)`` (a kNN-style signal's top1 is its single nearest
+      neighbor's own class, not the arg-max of its aggregated per-class sum).
+      ``top1_column`` is ``None`` when this matrix contributes no top1 column.
+    - ``top1_check_valid``: AND the top1 comparison with ``top1_idx >= 0`` (an
+      argmax-derived top1 can be "no valid pick", encoded as -1).
+    - ``extra_columns``: additional ``(b, C)`` matrices gathered directly at the
+      same ``(rows, cols)`` grid, under their own explicit names, that are not
+      one of the generic derivations (e.g. ``d_knn_max``/``d_knn_count`` sit
+      beside ``d_knn_sum``'s node without being a rank/norm/margin of it).
+    - ``extra_scalars``: additional per-query ``(b,)`` columns broadcast across
+      every candidate row of that query (e.g. ``abs_top_dense_sim``).
+    - ``topn_positive_only``: whether this matrix's contribution to the
+      candidate top-n union drops non-positive values (``bm25.desc`` today).
+    """
+
+    node: str
+    value: np.ndarray
+    derive: FrozenSet[str] = frozenset()
+    columns: Dict[str, str] = field(default_factory=dict)
+    gap_column: Optional[str] = None
+    top1_idx: Optional[np.ndarray] = None
+    top1_column: Optional[str] = None
+    top1_check_valid: bool = False
+    extra_columns: Dict[str, np.ndarray] = field(default_factory=dict)
+    extra_scalars: Dict[str, np.ndarray] = field(default_factory=dict)
+    topn_positive_only: bool = False
+
+
+class SignalProvider(ABC):
+    """A pluggable source of retrieval *signals* (T34 phase 2) — the layer below
+    ``FeatureProvider`` (T70): a ``FeatureProvider`` appends fusion columns after
+    the core schema and never joins candidate selection; a ``SignalProvider``
+    contributes one or more ``(b, C)`` matrices that *do* join the top-n
+    candidate union, exactly like the five built-in retrieval signals.
+
+    The built-in ``DenseSignalProvider``/``LexicalSignalProvider`` (see
+    ``infrastructure/signals.py``) wrap an already-built/loaded
+    ``DenseRetriever``/``LexicalRetriever`` — a ``SignalProvider`` is not itself
+    a retriever and does not re-implement retrieval; ``TrainingPipeline`` builds
+    the underlying retriever per fold (the existing leakage-free discipline) and
+    wraps it. A provider with its own learned state (not wrapping a retriever)
+    persists that state directly in ``save``/``load``.
+
+    - ``name``: unique prefix identifying this provider (registry key).
+    - ``candidate_features``: which of this provider's ``SignalMatrix.node``
+      names join the top-n candidate union for this query chunk. Every node
+      returned by ``build`` that is *not* named here still computes its generic
+      derivations but never contributes to candidate selection.
+    - ``build(ctx)``: compute this provider's ``SignalMatrix`` list for one
+      query chunk. Must be vectorized (CLAUDE.md convention) and must emit NaN,
+      never a true 0, for "did not retrieve" cells.
+    - ``save``/``load``: persist any fitted state through a directory using
+      portable formats only (numpy + json + native model formats; no pickle),
+      so the model dir ships to an air-gapped host.
+    """
+
+    name: str
+
+    @abstractmethod
+    def candidate_features(self) -> Sequence[str]:
+        """Node names (``SignalMatrix.node``) that join the top-n candidate
+        union. A node this provider computes but omits here still gets its
+        generic derivations, just never selects candidates on its own."""
+
+    @abstractmethod
+    def column_names(self) -> List[str]:
+        """Every feature-column name this provider will contribute, independent
+        of any query batch -- the ``SignalMatrix``-level ``SignalProvider``
+        analogue of ``FeatureProvider.names()``, needed to compose the full
+        schema (for training-column selection and the persisted ``meta.json``
+        schema check) before ``build`` ever runs against real data. Must stay
+        stable and match ``build``'s actual output columns exactly.
+
+        The two built-in providers' ``column_names()`` reconstruct the relevant
+        slice of the core ``FEATURE_NAMES`` schema; the assembler special-cases
+        them (by ``name in ("dense", "lexical")``) so the *default* config's
+        schema stays exactly ``FEATURE_NAMES`` rather than double-declaring it."""
+
+    @abstractmethod
+    def build(self, ctx: SignalContext) -> List[SignalMatrix]:
+        """Compute this provider's signal matrices for one query chunk."""
+
+    @abstractmethod
+    def save(self, path: str) -> None:
+        """Persist fitted state to directory ``path`` (portable formats only)."""
+
+    @classmethod
+    @abstractmethod
+    def load(cls, path: str) -> "SignalProvider":
+        """Reload a provider persisted by ``save`` — no labels, no network."""
+
+
 class FusionModel(ABC):
     """Model scoring P(candidate is the true class). Must tolerate NaN features
     (the 'not retrieved' encoding).
@@ -127,6 +344,12 @@ class FusionModel(ABC):
     @abstractmethod
     def predict_proba(self, X: np.ndarray) -> np.ndarray:  # (n,) P(class==1)
         ...
+
+    def set_device(self, device: Optional[str]) -> None:
+        """Pin inference to a specific device (e.g. "cuda", "cpu"), overriding
+        auto-detection. ``None`` restores auto-detection. No-op (the default)
+        for backends with no device concept -- e.g. LightGBM's CPU-only wheel."""
+        return None
 
     def predict_contribs(self, X: np.ndarray) -> Optional[np.ndarray]:
         """Optional per-feature contributions toward the *raw* (pre-calibration)
@@ -151,13 +374,23 @@ class FusionModel(ABC):
 
 
 class ConfidenceCalibrator(ABC):
-    """Maps raw fusion scores onto calibrated P(correct)."""
+    """Maps raw fusion scores onto calibrated P(correct).
+
+    ``classes`` (optional, ``(n,)`` int, one candidate class index per score) lets
+    a class-aware backend (e.g. ``PerClassCalibrator``) fit/apply a per-class
+    curve. ``None`` (the default) is the class-blind path every existing
+    calibrator implements; a backend that ignores ``classes`` behaves exactly as
+    it did before this parameter existed."""
 
     @abstractmethod
-    def fit(self, scores: np.ndarray, correct: np.ndarray) -> None: ...
+    def fit(
+        self, scores: np.ndarray, correct: np.ndarray, *, classes: Optional[np.ndarray] = None
+    ) -> None: ...
 
     @abstractmethod
-    def transform(self, scores: np.ndarray) -> np.ndarray: ...
+    def transform(
+        self, scores: np.ndarray, *, classes: Optional[np.ndarray] = None
+    ) -> np.ndarray: ...
 
     @abstractmethod
     def save(self, path: str) -> None: ...

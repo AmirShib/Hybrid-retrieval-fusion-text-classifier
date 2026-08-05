@@ -28,7 +28,7 @@ def add_confidence(
     X = features[cols].to_numpy(dtype=np.float32)
     raw = fusion.predict_proba(X)
     out = features.copy()
-    out["conf"] = calibrator.transform(raw)
+    out["conf"] = calibrator.transform(raw, classes=features["candidate"].to_numpy())
     return out
 
 

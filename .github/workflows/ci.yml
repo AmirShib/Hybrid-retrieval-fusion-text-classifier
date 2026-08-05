@@ -75,6 +75,62 @@ jobs:
       - name: Run the quality benchmark
         run: pytest -q -m quality
 
+  core-install-torch-free:
+    # T63: `pip install .` (no extras) must not pull in torch, and selecting the
+    # sentence-transformers encoder without the extra must fail with an
+    # actionable install hint rather than a raw ImportError.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install core (no extras)
+        run: pip install -e .
+
+      - name: Assert torch is absent
+        run: "! python -c 'import torch' 2>/dev/null"
+
+      - name: Assert the sentence-transformers encoder fails with an install hint
+        run: |
+          python - <<'PY'
+          from text_classifier.config import EncoderConfig
+          from text_classifier.infrastructure.registry import build_encoder
+
+          try:
+              build_encoder(EncoderConfig(kind="sentence-transformers"))
+          except ImportError as exc:
+              assert "pip install text-classifier[sentence-transformers]" in str(exc), exc
+              print("OK:", exc)
+          else:
+              raise SystemExit("expected ImportError")
+          PY
+
+  sentence-transformers-extra:
+    # T63: the opt-in extra actually installs torch, and the existing suite
+    # (which stubs sentence-transformers rather than requiring the real
+    # download) stays green with the real package present too.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install core + sentence-transformers extra + test deps
+        run: pip install -e .[sentence-transformers,test]
+
+      - name: Assert torch is present
+        run: python -c "import torch"
+
+      - name: Run the test suite with the extra installed
+        run: pytest -q -m "not quality"
+
   package-smoke:
     # Build the wheel, install it into a clean environment, and drive the
     # console scripts end-to-end. This is what catches a packaging regression

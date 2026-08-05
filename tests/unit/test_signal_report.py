@@ -102,8 +102,21 @@ class TestAgreementAndShape:
             "n_candidate_rows": 0,
             "per_signal": [],
             "agreement": {},
+            "skipped_signals": [],
         }
 
     def test_missing_is_true_raises(self, frame):
         with pytest.raises(ValueError, match="is_true"):
             signal_report(frame.drop(columns=["is_true"]))
+
+    def test_no_signal_absent_from_a_full_frame(self, frame):
+        assert signal_report(frame)["skipped_signals"] == []
+
+    def test_a_pruned_frame_names_its_skipped_signals_instead_of_raising(self, frame):
+        """T87: a model trained with drop_features narrows the assembled frame,
+        so its diagnostics narrow with it — named, not KeyError'd."""
+        pruned = frame.drop(columns=["is_b_knn_top1", "b_knn_missing"])
+        report = signal_report(pruned)
+        assert report["skipped_signals"] == ["bm25_knn"]
+        assert "bm25_knn" not in {e["signal"] for e in report["per_signal"]}
+        assert len(report["per_signal"]) == len(SIGNALS) - 1

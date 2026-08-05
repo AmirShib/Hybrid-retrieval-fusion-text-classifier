@@ -10,7 +10,7 @@ Usage:
 
 Refits the calibrator and re-tunes the global + per-class abstention thresholds
 for ``--target-precision``, reusing the model's existing encoder, retrieval
-indices, and fusion model unchanged — no retraining. Updates ``calibrator.pkl``
+indices, and fusion model unchanged — no retraining. Updates the calibrator file
 and ``meta.json``'s abstention block in place, and writes a fresh
 ``evaluation.json``/``model_card.md`` reflecting the new operating point.
 ``--dry-run`` prints the would-be coverage / accuracy / thresholds and writes

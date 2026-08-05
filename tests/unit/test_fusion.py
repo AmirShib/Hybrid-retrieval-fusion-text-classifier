@@ -199,6 +199,35 @@ class TestIsotonicCalibrator:
 
         np.testing.assert_array_equal(original, loaded)
 
+    def test_save_writes_npz_not_pickle(self, tmp_path):
+        """T67: fresh saves are inert numpy .npz, not a pickle stream."""
+        cal, _ = self._fit_cal()
+        path = str(tmp_path / "calibrator.npz")
+        cal.save(path)
+        with open(path, "rb") as fh:
+            head = fh.read(1)
+        assert head != b"\x80"  # 0x80 is pickle's PROTO opcode
+        data = np.load(path)  # must parse as a valid npz archive
+        assert "X_thresholds" in data and "y_thresholds" in data
+
+    def test_legacy_pickle_fallback_loads_with_warning(self, tmp_path, caplog):
+        """A pre-T67 model dir has only calibrator.pkl; load() must still work."""
+        import logging
+        import pickle
+
+        cal, scores = self._fit_cal()
+        original = cal.transform(scores)
+
+        legacy_path = tmp_path / "calibrator.pkl"
+        with open(legacy_path, "wb") as fh:
+            pickle.dump(cal._iso, fh)
+
+        new_path = str(tmp_path / "calibrator.npz")  # does not exist
+        with caplog.at_level(logging.WARNING):
+            loaded = IsotonicCalibrator.load(new_path)
+        np.testing.assert_array_equal(original, loaded.transform(scores))
+        assert any("legacy pickle" in rec.message for rec in caplog.records)
+
 
 # ---------------------------------------------------------------------------
 # Part C — Determinism (T26)

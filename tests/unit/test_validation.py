@@ -235,6 +235,9 @@ class TestConfigValidation:
             (lambda c: setattr(c.retrieval, "dense_chunk", 0), "dense_chunk"),
             (lambda c: setattr(c.retrieval, "feature_chunk", 0), "feature_chunk"),
             (lambda c: setattr(c.encoder, "encode_batch_size", 0), "encode_batch_size"),
+            (lambda c: setattr(c.retrieval, "bm25_max_df_ratio", 0.0), "bm25_max_df_ratio"),
+            (lambda c: setattr(c.retrieval, "bm25_max_df_ratio", 1.5), "bm25_max_df_ratio"),
+            (lambda c: setattr(c.retrieval, "bm25_max_block_elems", 0), "bm25_max_block_elems"),
         ],
     )
     def test_each_bound_rejected_naming_the_field(self, mutate, field_name):
@@ -254,6 +257,8 @@ class TestConfigValidation:
             lambda c: setattr(c.retrieval, "dense_chunk", 1),
             lambda c: setattr(c.retrieval, "feature_chunk", 1),
             lambda c: setattr(c.encoder, "encode_batch_size", 1),
+            lambda c: setattr(c.retrieval, "bm25_max_df_ratio", 1.0),
+            lambda c: setattr(c.retrieval, "bm25_max_block_elems", 1),
         ],
     )
     def test_boundary_values_pass(self, mutate):

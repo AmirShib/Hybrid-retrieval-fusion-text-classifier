@@ -7,6 +7,11 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Dict, List, Optional, Type, TypeVar
 
+# The domain layer owns the set of encoder-epoch metrics; import it rather than
+# restate it, so a new metric is valid in config the moment it can be measured.
+# (Acyclic: `domain` imports neither config nor infrastructure.)
+from .domain.services import ENCODER_SELECTION_METRICS
+
 _T = TypeVar("_T")
 
 
@@ -20,6 +25,26 @@ class EncoderConfig:
     train_epochs: int = 1
     train_batch_size: int = 64
     warmup_ratio: float = 0.1
+    # Best-epoch selection. With train_epochs > 1, `train_holdout_ratio` of the
+    # fine-tuning items are held out from the gradient updates and re-scored after
+    # every epoch; the epoch scoring best on `train_select_metric` is the one
+    # returned and saved, instead of blindly the last. 0.0 turns selection off
+    # (last epoch wins, and every item trains). Ignored when train_epochs == 1,
+    # where there is nothing to choose between -- so the package default is
+    # unchanged by these fields.
+    train_holdout_ratio: float = 0.1
+    # One of domain.services.ENCODER_SELECTION_METRICS. "knn_acc@1" additionally
+    # re-encodes the fine-tuning pool each epoch (slower, closer to the d_knn_*
+    # signals); the desc_* metrics only re-encode the holdout + descriptions.
+    train_select_metric: str = "desc_acc@1"
+    # How much an epoch must beat the incumbent by to count as an improvement --
+    # noise suppression on small holdouts.
+    train_select_min_delta: float = 0.0
+    # Stop after this many consecutive non-improving epochs (0 = train them all).
+    train_early_stopping_patience: int = 0
+    # Seed for the stratified fine-tune/holdout split, so a rerun holds out the
+    # same items (the determinism invariant).
+    train_holdout_seed: int = 0
     # Backend-specific kwargs. For kind="tfidf" these pass straight to sklearn's
     # TfidfVectorizer (e.g. {"ngram_range": [1, 2], "max_features": 50000}). For
     # kind="sentence-transformers" these pass straight to the SentenceTransformer
@@ -50,6 +75,14 @@ class RetrievalConfig:
     k_neighbors: int = 20
     k1: float = 1.5
     b: float = 0.75
+    # T34 phase 1: which retriever *builder* backs each signal. Registry keys
+    # (see infrastructure/registry.py's register_dense_retriever/
+    # register_lexical_retriever); the built-ins ("exact" wraps
+    # DenseRetrieverAdapter, "bm25" wraps LexicalRetrieverAdapter) are the
+    # byte-for-byte-identical defaults. This is what T31 (FAISS) and other
+    # retriever backends plug into instead of forking the concrete adapter.
+    dense_kind: str = "exact"
+    lexical_kind: str = "bm25"
     # No stopword removal by default: a language-specific filter is an opt-in
     # (train CLI: --bm25-stop-words english), not a hidden assumption that
     # degrades BM25 on non-English corpora. Any sklearn CountVectorizer kwarg
@@ -57,6 +90,20 @@ class RetrievalConfig:
     bm25_token_kwargs: Dict[str, Any] = field(default_factory=dict)
     dense_chunk: int = 256  # query chunking for kNN matmuls
     feature_chunk: int = 4096  # query chunking for feature assembly
+    # T32 A4: drop BM25 terms whose document frequency exceeds this fraction of
+    # the corpus before building the weight matrix. The Lucene IDF already
+    # trends to 0 as df -> n_docs, so a high-df term contributes almost nothing
+    # to ranking while owning the longest postings list; pruning it shrinks the
+    # weight matrix for near-zero ranking cost. `None` (the default) is off and
+    # byte-for-byte today's behaviour — this is the one BM25 knob here that can
+    # change scores, so it stays opt-in.
+    bm25_max_df_ratio: Optional[float] = None
+    # T32 B: reject (rather than silently allocate) a `BM25Index.score_matrix`
+    # call that would densify a block larger than this many elements.
+    # `score_matrix` is for the small class-description set; the example pool
+    # must go through the chunked, sparse `top_k` path instead. `None` (the
+    # default) is unbounded — today's behaviour.
+    bm25_max_block_elems: Optional[int] = None
 
 
 @dataclass
@@ -82,11 +129,36 @@ class FusionConfig:
     auto_scale_pos_weight: bool = True  # set scale_pos_weight = n_neg / n_pos at fit time
     # Generic params block read by non-xgboost backends (e.g. LightGBM).
     params: Dict[str, Any] = field(default_factory=dict)
+    # Feature columns withheld from the fusion model — this is what makes a
+    # retrain-based ablation possible: "is the model better without this
+    # column?", as opposed to the masking ablation's "what if this signal fails
+    # at inference?". Persisted here inside meta.json's config block and
+    # re-applied at load, so inference rebuilds the exact column list the model
+    # was fitted on. Empty (the default) is the ordinary path and leaves the
+    # schema byte-for-byte unchanged.
+    #
+    # T87: the assembler no longer computes the full schema unconditionally —
+    # it computes what training/scoring *requests* (this narrowed list), and
+    # skips the leaf-column work (ranks, margins, a fully-dropped custom
+    # provider's `compute`) that nothing downstream reads. The trade this
+    # accepts: `signal_report` on the training out-of-fold frame narrows with
+    # it, reporting only the signals whose columns survived. `explain` /
+    # `explain_records` / `importance_report` at inference time are unaffected
+    # — they always request the full composed schema (`composed_feature_names`)
+    # in a separate assembly pass, because they read core columns by name.
+    drop_features: List[str] = field(default_factory=list)
 
 
 @dataclass
 class CalibrationConfig:
-    kind: str = "isotonic"  # registry key: "isotonic" | "platt" | "beta"
+    # registry key: "isotonic" | "platt" | "beta" | "per-class"
+    kind: str = "isotonic"
+    # "per-class" reads params["inner"] (isotonic|platt|beta, default "beta" --
+    # a per-class slice of the calibration fold is small, which is where
+    # isotonic overfits worst) and params["min_support"] (default 50): classes
+    # with fewer than that many calibration rows fall back to a global curve
+    # fit over all rows, mirroring AbstentionPolicy's per-class-with-global-
+    # fallback thresholds.
     params: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -166,6 +238,24 @@ class PipelineConfig:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     features: FeaturesConfig = field(default_factory=FeaturesConfig)
     candidate_top_n: int = 10
+    # T34 phase 2: which SignalProvider(s) compute the retrieval signals that
+    # feed candidate selection + the core feature columns. Registry keys (see
+    # infrastructure/registry.py's register_signal_provider), mirroring how
+    # retrieval.dense_kind/lexical_kind select a retriever *backend*: this
+    # selects which *signals* run at all. The default ["dense", "lexical"] is
+    # the byte-for-byte-identical five-signal schema; a third "kind" here adds
+    # a whole new signal (its own matrices, joining candidate selection via its
+    # own `candidate_features()`) without touching FeatureAssembler/pipelines.
+    signals: List[str] = field(default_factory=lambda: ["dense", "lexical"])
+    # T84: which ArrayOps backend runs the numeric kernels in feature assembly
+    # and dense retrieval. Registry key (see infrastructure/registry.py),
+    # "auto" (the default) picks numpy vs. torch from T83's measured crossover
+    # thresholds using quantities known before assembly runs, and always falls
+    # back to numpy when torch is absent, no device is visible, or the corpus
+    # is below the crossover. An explicit "numpy"/"torch" always wins. This is
+    # an execution choice recorded here for provenance, never load-bearing: a
+    # model trained under any backend loads and scores on a numpy-only host.
+    array_backend: str = "auto"
 
     def validate(self, *, external_val: bool = False, external_test: bool = False) -> None:
         """Reject config values that produce silently broken runs or deep
@@ -245,10 +335,88 @@ class PipelineConfig:
                 ">= 1 (a zero chunk never advances)",
             ),
             (
+                "retrieval.bm25_max_df_ratio",
+                self.retrieval.bm25_max_df_ratio,
+                self.retrieval.bm25_max_df_ratio is None
+                or 0.0 < self.retrieval.bm25_max_df_ratio <= 1.0,
+                "None or in (0, 1]",
+            ),
+            (
+                "retrieval.bm25_max_block_elems",
+                self.retrieval.bm25_max_block_elems,
+                self.retrieval.bm25_max_block_elems is None
+                or self.retrieval.bm25_max_block_elems >= 1,
+                "None or >= 1",
+            ),
+            (
                 "encoder.encode_batch_size",
                 self.encoder.encode_batch_size,
                 self.encoder.encode_batch_size >= 1,
                 ">= 1",
+            ),
+            (
+                "encoder.train_epochs",
+                self.encoder.train_epochs,
+                self.encoder.train_epochs >= 1,
+                ">= 1",
+            ),
+            (
+                "encoder.train_batch_size",
+                self.encoder.train_batch_size,
+                self.encoder.train_batch_size >= 1,
+                ">= 1",
+            ),
+            (
+                "encoder.train_holdout_ratio",
+                self.encoder.train_holdout_ratio,
+                0.0 <= self.encoder.train_holdout_ratio <= 0.5,
+                "in [0, 0.5] (0 disables best-epoch selection; a holdout larger "
+                "than half the data starves the fine-tune)",
+            ),
+            (
+                "encoder.train_select_metric",
+                self.encoder.train_select_metric,
+                self.encoder.train_select_metric in ENCODER_SELECTION_METRICS,
+                f"one of {list(ENCODER_SELECTION_METRICS)}",
+            ),
+            (
+                "encoder.train_select_min_delta",
+                self.encoder.train_select_min_delta,
+                self.encoder.train_select_min_delta >= 0.0,
+                ">= 0",
+            ),
+            (
+                "encoder.train_early_stopping_patience",
+                self.encoder.train_early_stopping_patience,
+                self.encoder.train_early_stopping_patience >= 0,
+                ">= 0 (0 trains every epoch)",
+            ),
+            # Membership in the schema is checked later, by fusion_feature_names,
+            # which is the only place the *composed* schema (core + providers) is
+            # known. Here we only reject shapes that are wrong on their face.
+            (
+                "fusion.drop_features",
+                self.fusion.drop_features,
+                all(isinstance(n, str) and n.strip() for n in self.fusion.drop_features),
+                "a list of non-empty feature-column names",
+            ),
+            (
+                "fusion.drop_features",
+                self.fusion.drop_features,
+                len(set(self.fusion.drop_features)) == len(self.fusion.drop_features),
+                "free of duplicates",
+            ),
+            (
+                "signals",
+                self.signals,
+                bool(self.signals) and all(isinstance(s, str) and s.strip() for s in self.signals),
+                "a non-empty list of non-empty registry-key strings",
+            ),
+            (
+                "signals",
+                self.signals,
+                len(set(self.signals)) == len(self.signals),
+                "free of duplicates",
             ),
         ]
         problems = [
@@ -295,6 +463,8 @@ class PipelineConfig:
             training=_build_section(TrainingConfig, data, "training"),
             features=_build_features_section(data),
             candidate_top_n=data.get("candidate_top_n", cls().candidate_top_n),
+            array_backend=data.get("array_backend", cls().array_backend),
+            signals=list(data.get("signals", cls().signals)),
         )
 
 

@@ -12,11 +12,18 @@ import numpy as np
 import pandas as pd
 
 from ..config import PipelineConfig
-from ..domain import CandidatePolicy, LabelSpace, Prediction, composed_feature_names
+from ..domain import (
+    CandidatePolicy,
+    LabelSpace,
+    Prediction,
+    composed_feature_names,
+    fusion_feature_names,
+)
 from ..infrastructure import ArtifactRepository, DeployedArtifacts
 from ..infrastructure.persistence import NewClass
 from .evaluation import _json_safe
 from .features import FeatureAssembler
+from .importance import ablation_report, global_feature_importance
 from .scoring import add_confidence, top_k_per_item, top_per_item
 from .signal_report import SIGNALS
 
@@ -35,11 +42,28 @@ class InferencePipeline:
         # schema (core + provider columns) the fusion model was trained on. Empty /
         # core-only for a model with no custom features.
         self._providers = artifacts.feature_providers
-        self._feature_names = composed_feature_names(self._providers)
+        # Two schemas, deliberately: `_feature_names` is what the fusion model was
+        # fitted on (the composed schema minus `fusion.drop_features`) and drives
+        # scoring + contribution alignment; `_assembled_names` is every column the
+        # assembler produces. They differ only when features were dropped, and the
+        # diagnostic surface (`explain`, and `signal_report` downstream of it)
+        # follows the *assembled* list — a dropped column is still measured, it
+        # just did not reach the model, and hiding it would break a report that
+        # reads core signal columns by name.
+        self._feature_names = fusion_feature_names(
+            self._providers, artifacts.config.fusion.drop_features, artifacts.signal_providers
+        )
+        self._assembled_names = composed_feature_names(self._providers, artifacts.signal_providers)
 
     @classmethod
-    def from_directory(cls, directory: str) -> "InferencePipeline":
-        return cls(ArtifactRepository().load(directory))
+    def from_directory(cls, directory: str, device: Optional[str] = None) -> "InferencePipeline":
+        """Load a trained model directory for inference.
+
+        ``device`` (e.g. ``"cuda"``, ``"cpu"``) pins both the encoder and the
+        fusion model to that device, overriding auto-detection. ``None`` (the
+        default) auto-detects: GPU if one is visible on this host, else CPU.
+        """
+        return cls(ArtifactRepository().load(directory, device=device))
 
     @property
     def label_space(self) -> LabelSpace:
@@ -88,6 +112,8 @@ class InferencePipeline:
             query_labels=None,
             chunk=a.config.retrieval.feature_chunk,
             providers=self._providers,
+            requested=self._feature_names,
+            signal_providers=a.signal_providers,
         )
 
         # Every item defaults to abstaining; this also covers items whose features
@@ -145,6 +171,8 @@ class InferencePipeline:
             query_labels=None,
             chunk=a.config.retrieval.feature_chunk,
             providers=self._providers,
+            requested=self._feature_names,
+            signal_providers=a.signal_providers,
         )
         results: List[List[Tuple[str, float]]] = [[] for _ in texts]
         if not len(feats):
@@ -187,7 +215,7 @@ class InferencePipeline:
         texts = list(texts)
         self._validate_texts(texts)
         a = self._a
-        columns = ["item_id", "text", "rank", "candidate_key", "conf", *self._feature_names]
+        columns = ["item_id", "text", "rank", "candidate_key", "conf", *self._assembled_names]
         q_emb = a.encoder.encode_queries(texts)
         feats = self._assembler.assemble(
             texts,
@@ -199,6 +227,8 @@ class InferencePipeline:
             query_labels=None,
             chunk=a.config.retrieval.feature_chunk,
             providers=self._providers,
+            requested=self._assembled_names,
+            signal_providers=a.signal_providers,
         )
         if not len(feats):
             return pd.DataFrame(columns=columns)
@@ -222,9 +252,65 @@ class InferencePipeline:
                 "conf": scored["conf"].to_numpy(dtype=np.float64),
             }
         )
-        for name in self._feature_names:
+        for name in self._assembled_names:
             out[name] = scored[name].to_numpy()
         return out
+
+    def importance_report(self, texts: Sequence[str], true_keys: Sequence[str]) -> Dict[str, Any]:
+        """Feature importance + per-feature ablation against a freshly labeled set.
+
+        Combines ``application.importance.global_feature_importance`` (mean
+        additive contribution per column, aggregated from the same attribution
+        ``explain_records(..., include_contributions=True)`` exposes per row) with
+        ``ablation_report`` (mask each column to ``NaN`` — the domain's own
+        "signal missing" encoding — and re-score with this unchanged model, to
+        measure the actual accuracy/coverage cost of losing it). Neither retrains;
+        both reuse a single encode -> assemble pass.
+
+        ``true_keys`` must align 1:1 with ``texts``; every key must be in
+        ``label_space.keys`` or this raises ``KeyError`` naming the unknown keys,
+        matching the ``evaluate`` CLI's fail-fast validation.
+        """
+        texts = list(texts)
+        self._validate_texts(texts)
+        a = self._a
+        key_to_idx = {k: i for i, k in enumerate(a.label_space.keys)}
+        unknown = sorted({k for k in true_keys if k not in key_to_idx})
+        if unknown:
+            shown = unknown[:10]
+            suffix = " ..." if len(unknown) > 10 else ""
+            raise KeyError(f"label(s) not in model's label space: {shown}{suffix}")
+        true_idx_by_item = np.array([key_to_idx[k] for k in true_keys], dtype=np.intp)
+
+        q_emb = a.encoder.encode_queries(texts)
+        feats = self._assembler.assemble(
+            texts,
+            q_emb,
+            a.dense,
+            a.lexical,
+            a.config.retrieval.k_neighbors,
+            query_ids=list(range(len(texts))),
+            query_labels=None,
+            chunk=a.config.retrieval.feature_chunk,
+            providers=self._providers,
+            requested=self._assembled_names,
+            signal_providers=a.signal_providers,
+        )
+        if not len(feats):
+            empty = {
+                "n_items": 0,
+                "coverage": None,
+                "accuracy_on_accepted": None,
+                "accuracy_if_no_abstain": None,
+            }
+            return {"importance": None, "ablation": {"baseline": empty, "ablations": []}}
+
+        X = feats[self._feature_names].to_numpy(dtype=np.float32)
+        importance = global_feature_importance(a.fusion, X, self._feature_names)
+        ablation = ablation_report(
+            feats, a.fusion, a.calibrator, a.abstention, self._feature_names, true_idx_by_item
+        )
+        return {"importance": importance, "ablation": ablation}
 
     def explain_records(
         self,
@@ -274,6 +360,8 @@ class InferencePipeline:
             query_labels=None,
             chunk=a.config.retrieval.feature_chunk,
             providers=self._providers,
+            requested=self._assembled_names,
+            signal_providers=a.signal_providers,
         )
         neighbors = self._neighbor_evidence(texts, q_emb, keys, n_neighbors)
 

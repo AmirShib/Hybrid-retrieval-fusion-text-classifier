@@ -59,7 +59,7 @@ def _train_model(tmp_path, target_precision="0.5"):
     """Train a model on one half of a synthetic generation; return
     (model_dir, train_items_csv, tune_items_csv) where the tune set is the
     disjoint other half (same classes/vocabulary, different concrete items)."""
-    label_space, items = make_synthetic(n_classes=4, per_class=24, seed=23)
+    label_space, items = make_synthetic(n_classes=4, per_class=24, seed=3)
     train_items, tune_items = _split_items(items)
 
     items_csv = _write_items_csv(tmp_path / "items.csv", train_items)
@@ -156,11 +156,11 @@ def test_meta_and_calibrator_change_other_artifacts_untouched(tmp_path):
     )
     after = _file_hashes(out)
 
-    for changed in ("calibrator.pkl", "meta.json", "evaluation.json", "model_card.md"):
+    for changed in ("calibrator.npz", "meta.json", "evaluation.json", "model_card.md"):
         assert before[changed] != after[changed], f"{changed} should have changed"
 
-    # everything else (encoder/, dense.npz, lexical.pkl, fusion file) untouched
-    untouched = set(before) - {"calibrator.pkl", "meta.json", "evaluation.json", "model_card.md"}
+    # everything else (encoder/, dense.npz, lexical.npz/.json, fusion file) untouched
+    untouched = set(before) - {"calibrator.npz", "meta.json", "evaluation.json", "model_card.md"}
     assert untouched, "expected other artifacts to exist"
     for path in untouched:
         assert before[path] == after[path], f"{path} should be byte-identical after retune"

@@ -18,6 +18,7 @@ import pytest
 from text_classifier.application.features import (
     FeatureAssembler,
     _argmax_or_missing,
+    _row_margin,
     _row_minmax,
     _row_rank,
     _scatter_knn,
@@ -224,6 +225,109 @@ class TestRowMinmax:
         assert np.all(np.isnan(result))
 
 
+class TestRowMargin:
+    def test_leader_gets_top1_top2_gap_others_get_deficit(self):
+        M = np.array([[0.9, 0.5, 0.1]])
+        cand = np.array([[True, True, True]])
+        margin, gap = _row_margin(M, cand)
+        npt.assert_allclose(margin[0], [0.4, -0.4, -0.8], atol=1e-9)
+        npt.assert_allclose(gap, [0.4], atol=1e-9)
+
+    def test_leader_margin_equals_gap(self):
+        M = np.array([[0.2, 0.7, 0.65], [0.9, 0.1, 0.3]])
+        cand = np.full((2, 3), True)
+        margin, gap = _row_margin(M, cand)
+        npt.assert_allclose(margin.max(axis=1), gap, atol=1e-9)
+
+    def test_only_the_leader_is_positive(self):
+        M = np.array([[0.2, 0.7, 0.65]])
+        cand = np.full((1, 3), True)
+        margin, _ = _row_margin(M, cand)
+        assert int((margin[0] > 0).sum()) == 1
+
+    def test_nan_value_stays_nan(self):
+        """NaN means 'signal did not retrieve this class' — never a low score."""
+        M = np.array([[0.9, np.nan, 0.1]])
+        cand = np.array([[True, True, True]])
+        margin, gap = _row_margin(M, cand)
+        assert np.isnan(margin[0, 1])
+        # NaN does not compete: the gap is 0.9 - 0.1, not 0.9 - NaN.
+        npt.assert_allclose(gap, [0.8], atol=1e-9)
+
+    def test_non_candidate_does_not_compete(self):
+        M = np.array([[0.9, 0.5, 0.1]])
+        cand = np.array([[True, False, True]])
+        margin, gap = _row_margin(M, cand)
+        # 0.5 is masked out of the competition, so the runner-up is 0.1.
+        npt.assert_allclose(margin[0, 0], 0.8, atol=1e-9)
+        npt.assert_allclose(gap, [0.8], atol=1e-9)
+
+    def test_single_scored_candidate_has_no_defined_margin(self):
+        """One competitor-free candidate: undefined margin (NaN), not 0.0 (a tie)."""
+        M = np.array([[0.9, np.nan, np.nan]])
+        cand = np.array([[True, True, True]])
+        margin, gap = _row_margin(M, cand)
+        assert np.isnan(margin[0, 0])
+        assert np.isnan(gap[0])
+
+    def test_all_missing_row_is_all_nan(self):
+        M = np.array([[np.nan, np.nan]])
+        cand = np.array([[True, True]])
+        margin, gap = _row_margin(M, cand)
+        assert np.all(np.isnan(margin))
+        assert np.isnan(gap[0])
+
+    def test_no_candidates_row_is_all_nan(self):
+        M = np.array([[0.4, 0.8]])
+        cand = np.array([[False, False]])
+        margin, gap = _row_margin(M, cand)
+        assert np.all(np.isnan(margin))
+        assert np.isnan(gap[0])
+
+    def test_tie_at_the_top_gives_zero_margin_to_both(self):
+        M = np.array([[0.7, 0.7, 0.1]])
+        cand = np.full((1, 3), True)
+        margin, gap = _row_margin(M, cand)
+        npt.assert_allclose(margin[0, 0], 0.0, atol=1e-9)
+        npt.assert_allclose(margin[0, 1], 0.0, atol=1e-9)
+        npt.assert_allclose(gap, [0.0], atol=1e-9)
+
+    def test_single_class_label_space(self):
+        """C == 1: the lone class never has a competitor."""
+        M = np.array([[0.9]])
+        cand = np.array([[True]])
+        margin, gap = _row_margin(M, cand)
+        assert np.isnan(margin[0, 0])
+        assert np.isnan(gap[0])
+
+    def test_runtimewarning_is_suppressed(self):
+        """The internal -inf arithmetic on all-missing rows must not escape."""
+        M = np.array([[np.nan, np.nan]])
+        cand = np.array([[True, True]])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # any warning → error
+            margin, gap = _row_margin(M, cand)  # must not raise
+        assert np.all(np.isnan(margin)) and np.isnan(gap[0])
+
+    def test_rows_are_independent(self):
+        M = np.array([[0.9, 0.5], [0.1, 0.4]])
+        cand = np.full((2, 2), True)
+        margin, gap = _row_margin(M, cand)
+        npt.assert_allclose(margin[0], [0.4, -0.4], atol=1e-9)
+        npt.assert_allclose(margin[1], [-0.3, 0.3], atol=1e-9)
+        npt.assert_allclose(gap, [0.4, 0.3], atol=1e-9)
+
+    def test_margin_is_invariant_to_a_row_wide_shift(self):
+        """The point of a margin: it removes the query-level offset that makes raw
+        cosines incomparable across items."""
+        M = np.array([[0.9, 0.5, 0.1]])
+        cand = np.full((1, 3), True)
+        base, base_gap = _row_margin(M, cand)
+        shifted, shifted_gap = _row_margin(M + 0.05, cand)
+        npt.assert_allclose(base, shifted, atol=1e-9)
+        npt.assert_allclose(base_gap, shifted_gap, atol=1e-9)
+
+
 class TestArgmaxOrMissing:
     def test_returns_argmax_for_normal_row(self):
         M = np.array([[0.1, 0.9, 0.5]])
@@ -360,6 +464,110 @@ class TestAssembleDerivedFeatures:
         df = _assemble(fenv)
         vals = df["n_signal_agreement"].values
         assert np.all(vals >= 0) and np.all(vals <= 4)
+
+
+class TestAssembleCompetitionFeatures:
+    """The margin / top1-top2 columns, checked against the assembled frame."""
+
+    MARGINS = {
+        "margin_d_desc": "d_desc_sim",
+        "margin_d_proto": "d_proto_sim",
+        "margin_d_knn": "d_knn_sum",
+        "margin_b_desc": "b_desc_sim",
+        "margin_b_knn": "b_knn_sum",
+    }
+    GAPS = {
+        "q_gap_d_desc": "margin_d_desc",
+        "q_gap_d_knn": "margin_d_knn",
+        "q_gap_b_desc": "margin_b_desc",
+    }
+
+    @pytest.mark.parametrize("margin_col,score_col", sorted(MARGINS.items()))
+    def test_margin_is_nan_exactly_where_its_signal_is_nan_or_uncontested(
+        self, fenv, margin_col, score_col
+    ):
+        """NaN-as-missing: a margin exists only where the signal scored the
+        candidate *and* the candidate had a rival."""
+        df = _assemble(fenv)
+        signal_nan = np.isnan(df[score_col].values)
+        assert np.all(np.isnan(df.loc[signal_nan, margin_col].values))
+
+    @pytest.mark.parametrize("margin_col,score_col", sorted(MARGINS.items()))
+    def test_at_most_one_positive_margin_per_item(self, fenv, margin_col, score_col):
+        """Only a signal's own leader can be ahead of the field."""
+        df = _assemble(fenv)
+        n_positive = df.assign(pos=df[margin_col].values > 0).groupby("item_id")["pos"].sum()
+        assert n_positive.max() <= 1
+
+    @pytest.mark.parametrize("gap_col,margin_col", sorted(GAPS.items()))
+    def test_gap_is_constant_within_an_item(self, fenv, gap_col, margin_col):
+        """A per-query column: every candidate row of an item carries the same value."""
+        df = _assemble(fenv)
+        spread = df.groupby("item_id")[gap_col].nunique(dropna=False)
+        assert spread.max() == 1
+
+    @pytest.mark.parametrize("gap_col,margin_col", sorted(GAPS.items()))
+    def test_gap_equals_the_leader_margin(self, fenv, gap_col, margin_col):
+        """top1 - top2 is exactly what the winning candidate's margin measures."""
+        df = _assemble(fenv)
+        per_item = df.groupby("item_id")
+        best_margin = per_item[margin_col].max()
+        gap = per_item[gap_col].first()
+        both = ~(np.isnan(best_margin.values) | np.isnan(gap.values))
+        npt.assert_allclose(best_margin.values[both], gap.values[both], atol=1e-5)
+
+    def test_gap_is_never_negative(self, fenv):
+        df = _assemble(fenv)
+        for gap_col in self.GAPS:
+            vals = df[gap_col].values
+            assert np.all(vals[~np.isnan(vals)] >= -1e-6), gap_col
+
+    def test_margin_separates_a_contested_lead_from_a_decided_one(self, fenv):
+        """The regression these features exist to prevent: two candidates with the
+        same raw similarity but different competition must not look identical."""
+        e = fenv
+        C = e["label_space"].size
+        assembler = e["assembler"]
+
+        class _Fixed(DenseRetriever):
+            """Item 0: leader 0.85 over a 0.84 rival. Item 1: 0.85 over 0.40."""
+
+            def __init__(self, desc):
+                self._desc = desc
+
+            @property
+            def class_freq(self):
+                return np.ones(C, dtype=np.int64)
+
+            def knn_example_labels(self, query_emb, k):
+                b = query_emb.shape[0]
+                return np.full((b, k), -1, np.int64), np.full((b, k), np.nan, np.float32)
+
+            def prototype_similarity(self, query_emb):
+                return np.full((query_emb.shape[0], C), np.nan, np.float32)
+
+            def description_similarity(self, query_emb):
+                return self._desc
+
+        desc = np.full((2, C), 0.0, dtype=np.float32)
+        desc[0, 0], desc[0, 1] = 0.85, 0.84  # contested
+        desc[1, 0], desc[1, 1] = 0.85, 0.40  # decided
+        df = assembler.assemble(
+            e["q_texts"][:2],
+            e["q_emb"][:2],
+            _Fixed(desc),
+            _ZeroLexical(C),
+            k_neighbors=3,
+            query_ids=[0, 1],
+        )
+        lead = df[df["candidate"] == 0].set_index("item_id")
+        # Identical raw similarity …
+        npt.assert_allclose(lead.loc[0, "d_desc_sim"], lead.loc[1, "d_desc_sim"], atol=1e-6)
+        # … but the margin and the query gap tell them apart.
+        npt.assert_allclose(lead.loc[0, "margin_d_desc"], 0.01, atol=1e-5)
+        npt.assert_allclose(lead.loc[1, "margin_d_desc"], 0.45, atol=1e-5)
+        npt.assert_allclose(lead.loc[0, "q_gap_d_desc"], 0.01, atol=1e-5)
+        npt.assert_allclose(lead.loc[1, "q_gap_d_desc"], 0.45, atol=1e-5)
 
 
 class TestAssembleChunking:

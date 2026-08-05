@@ -31,7 +31,6 @@ dependencies = [
     "scipy>=1.9",
     "scikit-learn>=1.1",
     "xgboost>=1.7",
-    "sentence-transformers>=2.2",
 ]
 
 [project.optional-dependencies]
@@ -42,6 +41,10 @@ dev = ["ruff==0.15.8", "mypy==1.19.1", "pre-commit"]
 # dependency: air-gapped hosts may not have it, and the suite skips its tests when
 # it is absent.
 lightgbm = ["lightgbm"]
+# The semantic (bi-encoder) TextEncoder backend, encoder_kind="sentence-transformers"
+# (the pipeline default). Pulls in torch. Core installs stay torch-free and can
+# still train/infer with --encoder-kind tfidf or --encoder-kind hashing (T63).
+sentence-transformers = ["sentence-transformers>=2.2"]
 
 [project.urls]
 Repository = "https://github.com/amirshib/hybrid-retrieval-fusion-text-classifier"
@@ -53,6 +56,8 @@ text-classifier-infer = "text_classifier.cli.infer:main"
 text-classifier-eval = "text_classifier.cli.evaluate:main"
 text-classifier-tune = "text_classifier.cli.tune:main"
 text-classifier-update = "text_classifier.cli.update:main"
+text-classifier-importance = "text_classifier.cli.importance:main"
+text-classifier-retrain-ablate = "text_classifier.cli.retrain_ablate:main"
 
 # Flat layout: pick up the package, leave scripts/ as runnable dev wrappers.
 [tool.setuptools.packages.find]
@@ -61,6 +66,9 @@ include = ["text_classifier*"]
 [tool.setuptools.package-data]
 # Ship the PEP 561 marker so downstream consumers get the package's type hints.
 text_classifier = ["py.typed"]
+# Bundled BM25 stopword lists (e.g. stopwords-he.json), so they're available
+# after `pip install .`, not just from a source checkout.
+"text_classifier.infrastructure.resources" = ["*.json"]
 
 [tool.setuptools.dynamic]
 # Single-sourced from text_classifier/_version.py -- see RELEASING.md.

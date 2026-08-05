@@ -62,9 +62,7 @@ class TestComposedFeatureNames:
 # --------------------------------------------------------------------------- #
 @pytest.fixture
 def fitted_provider():
-    ls = LabelSpace.from_pairs(
-        [("sport", "games and athletics"), ("food", "cooking and cuisine")]
-    )
+    ls = LabelSpace.from_pairs([("sport", "games and athletics"), ("food", "cooking and cuisine")])
     items = [
         LabeledItem("football tennis soccer", "sport"),
         LabeledItem("running marathon race", "sport"),
@@ -203,8 +201,13 @@ class TestAssemblerComposition:
         assembler = FeatureAssembler(ls, CandidatePolicy(top_n_per_signal=3))
         q_emb = hashing_encoder.encode(texts[:6])
         feats = assembler.assemble(
-            texts[:6], q_emb, dense, lexical, k_neighbors=3,
-            query_ids=list(range(6)), providers=providers,
+            texts[:6],
+            q_emb,
+            dense,
+            lexical,
+            k_neighbors=3,
+            query_ids=list(range(6)),
+            providers=providers,
         )
         return feats
 

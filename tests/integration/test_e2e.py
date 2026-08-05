@@ -146,9 +146,65 @@ class TestTrainReport:
 
 class TestPersistence:
     def test_expected_files_exist(self, saved_dir):
-        for name in ("dense.npz", "lexical.pkl", "fusion.json", "calibrator.pkl", "meta.json"):
+        for name in (
+            "dense.npz",
+            "lexical.npz",
+            "lexical.json",
+            "fusion.json",
+            "calibrator.npz",
+            "meta.json",
+        ):
             assert os.path.exists(os.path.join(saved_dir, name)), f"Missing {name}"
         assert os.path.isdir(os.path.join(saved_dir, "encoder"))
+
+    def test_no_pickle_artifacts_in_fresh_save(self, saved_dir):
+        """T67: a freshly saved model directory ships no .pkl files at all."""
+        pkl_files = [
+            os.path.join(root, name)
+            for root, _, names in os.walk(saved_dir)
+            for name in names
+            if name.endswith(".pkl")
+        ]
+        assert pkl_files == []
+
+    def test_fresh_load_never_calls_pickle_load(self, saved_dir, monkeypatch):
+        """T67: loading a freshly saved (non-legacy) model directory must not
+        touch pickle.load anywhere on the artifact path -- only the legacy
+        fallback branches may, and this directory has no legacy files."""
+        import pickle
+
+        def _forbidden(*a, **kw):
+            raise AssertionError(
+                "pickle.load was called while loading a fresh (non-legacy) model dir"
+            )
+
+        monkeypatch.setattr(pickle, "load", _forbidden)
+        ArtifactRepository().load(saved_dir)  # must not raise
+
+    def test_legacy_lexical_pickle_fallback_loads_with_warning(
+        self, saved_dir, loaded_artifacts, tmp_path, caplog
+    ):
+        """A pre-T67 model dir has only lexical.pkl; ArtifactRepository.load must
+        still work, with a warning pointing at the legacy artifact."""
+        import logging
+        import pickle
+        import shutil
+
+        legacy_dir = str(tmp_path / "legacy_model")
+        shutil.copytree(saved_dir, legacy_dir)
+        os.remove(os.path.join(legacy_dir, "lexical.npz"))
+        os.remove(os.path.join(legacy_dir, "lexical.json"))
+        with open(os.path.join(legacy_dir, "lexical.pkl"), "wb") as fh:
+            pickle.dump(loaded_artifacts.lexical, fh)
+
+        with caplog.at_level(logging.WARNING):
+            reloaded = ArtifactRepository().load(legacy_dir)
+
+        queries = ["some text to score"]
+        before = loaded_artifacts.lexical.description_score(queries)
+        after = reloaded.lexical.description_score(queries)
+        np.testing.assert_array_equal(before, after)
+        assert any("legacy pickle" in rec.message for rec in caplog.records)
 
     def test_meta_json_feature_names(self, saved_dir):
         with open(os.path.join(saved_dir, "meta.json")) as fh:
@@ -363,11 +419,16 @@ class TestCalibratorBackends:
     """T42 — the whole pipeline trains/saves/loads/predicts over multiple
     calibrator backends selected purely by config, fully offline."""
 
-    @pytest.mark.parametrize("calibrator_kind", ["isotonic", "platt", "beta"])
+    @pytest.mark.parametrize("calibrator_kind", ["isotonic", "platt", "beta", "per-class"])
     def test_full_pipeline_round_trip(self, calibrator_kind, tmp_path):
         label_space, items = make_synthetic(n_classes=6, per_class=15, seed=17)
         cfg = _e2e_cfg()  # encoder kind="hashing", xgboost fusion
-        cfg.calibration = CalibrationConfig(kind=calibrator_kind)
+        if calibrator_kind == "per-class":
+            cfg.calibration = CalibrationConfig(
+                kind=calibrator_kind, params={"inner": "beta", "min_support": 3}
+            )
+        else:
+            cfg.calibration = CalibrationConfig(kind=calibrator_kind)
 
         enc = HashingEncoder(dim=64)
         artifacts, report = TrainingPipeline(cfg, shared_encoder=enc).run(items, label_space)

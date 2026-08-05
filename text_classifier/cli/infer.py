@@ -47,6 +47,13 @@ def main() -> None:
     p.add_argument("--output", required=True)
     p.add_argument("--text-col", default="text")
     p.add_argument(
+        "--device",
+        default=None,
+        help="pin inference to this device (e.g. 'cuda', 'cpu', 'cuda:1'), overriding "
+        "auto-detection for both the encoder and the fusion model. Default: auto-detect "
+        "(GPU if visible on this host, else CPU).",
+    )
+    p.add_argument(
         "--top-k",
         type=int,
         default=1,
@@ -85,7 +92,7 @@ def main() -> None:
 
     _, texts = read_texts(args.input, args.text_col)
 
-    pipeline = InferencePipeline.from_directory(args.model)
+    pipeline = InferencePipeline.from_directory(args.model, device=args.device)
     preds = pipeline.predict(texts)
 
     out = pd.DataFrame(

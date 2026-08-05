@@ -1,13 +1,19 @@
-"""Persistence: writes/reads a self-contained model directory. Uses only stdlib
-pickle + numpy + json so there is no extra dependency and the directory is
-portable to the air-gapped host.
+"""Persistence: writes/reads a self-contained model directory. Uses only numpy +
+json + native model formats (no pickle) so a directory loaded on the air-gapped
+host is inert data, never attacker-controlled code. Directories written before
+this change fall back to a legacy pickle loader (with a warning) for the one or
+two files that used to be pickled.
 
 Layout:
-    <dir>/encoder/         SentenceTransformer.save() output
+    <dir>/encoder/         SentenceTransformer.save() output (+ encoder_training.json:
+                           the per-epoch table when a fine-tune selected its best epoch)
     <dir>/dense.npz        dense retriever numeric state
-    <dir>/lexical.pkl      pickled LexicalRetrieverAdapter (vectorizers + BM25 weights)
+    <dir>/lexical.npz      BM25 weight matrices + example labels (see lexical.json)
+    <dir>/lexical.json     BM25 vocab/analyzer config + scalars, pairs with lexical.npz
     <dir>/fusion.json      XGBoost model
-    <dir>/calibrator.pkl   calibrator (isotonic | platt | beta)
+    <dir>/calibrator.npz   isotonic calibrator breakpoints (kind == "isotonic")
+    <dir>/calibrator.json  parametric calibrator coefficients (kind in platt|beta)
+    <dir>/calibrator_per_class/  manifest + one inner calibrator per class (kind == "per-class")
     <dir>/meta.json        label space, thresholds, config, feature schema
     <dir>/corpus.jsonl.gz  optional: raw training corpus (text+label), see TrainingConfig.store_corpus
 """
@@ -21,7 +27,7 @@ import logging
 import os
 import pickle
 from dataclasses import dataclass, field, replace
-from typing import Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 import numpy as np
 
@@ -35,11 +41,22 @@ from ..domain import (
     FusionModel,
     LabeledItem,
     LabelSpace,
+    SignalProvider,
     TextEncoder,
-    composed_feature_names,
+    fusion_feature_names,
 )
-from .registry import calibrator_spec, encoder_spec, feature_provider_spec, fusion_spec
-from .retrieval import DenseRetrieverAdapter, DenseState, LexicalRetrieverAdapter
+from .registry import (
+    build_signal_providers,
+    calibrator_spec,
+    dense_retriever_spec,
+    encoder_spec,
+    feature_provider_spec,
+    fusion_spec,
+    lexical_retriever_spec,
+    load_signal_providers,
+)
+from .retrieval import DenseRetrieverAdapter, LexicalRetrieverAdapter
+from .signals import rewrap_signal_providers
 
 log = logging.getLogger(__name__)
 
@@ -49,11 +66,26 @@ _LEGACY_COMPONENTS = {
     "encoder": "sentence-transformers",
     "fusion": "xgboost",
     "calibrator": "isotonic",
+    "dense": "exact",
+    "lexical": "bm25",
 }
+# T34 phase 2: the signal-provider list for model dirs written before it was
+# recorded -- the two built-ins, unconditionally (byte-identical legacy schema).
+_LEGACY_SIGNALS = ["dense", "lexical"]
 
 
 # A new class may be given as a ClassDefinition or a plain (key, description) pair.
 NewClass = Union[ClassDefinition, Sequence[str]]
+
+
+def _lexical_json_path(npz_filename: str) -> str:
+    """The JSON sidecar path that pairs with a lexical retriever's ``.npz``
+    filename (e.g. ``lexical.npz`` -> ``lexical.json``) -- the built-in BM25
+    backend manages two files, so its ``LexicalRetrieverSpec.filename`` names
+    only the array half and this derives the other, deterministically, rather
+    than the spec needing a second field only one backend uses today."""
+    root, _ = os.path.splitext(npz_filename)
+    return root + ".json"
 
 
 @dataclass
@@ -74,6 +106,12 @@ class DeployedArtifacts:
     # for a model with no custom features — the byte-for-byte-identical default.
     # A trailing field with a default keeps every positional construction valid.
     feature_providers: List[FeatureProvider] = field(default_factory=list)
+    # T34 phase 2: the SignalProviders that compute the (now pluggable)
+    # retrieval signals, in ``config.signals`` order. Empty is never persisted
+    # for a trained model (``ArtifactRepository.save``/``.load`` always fill
+    # this in, defaulting to the two built-ins) — the default kept as an empty
+    # list here only so direct construction (e.g. in tests) stays valid.
+    signal_providers: List[SignalProvider] = field(default_factory=list)
 
     def with_added_classes(self, new_classes: Sequence[NewClass]) -> "DeployedArtifacts":
         """Widen this model's label space with new classes, **without retraining**.
@@ -127,7 +165,17 @@ class DeployedArtifacts:
 
         dense = self.dense.with_added_classes(self.encoder, [d.description for d in defs])
         lexical = self.lexical.with_added_descriptions(extended_space.descriptions)
-        return replace(self, label_space=extended_space, dense=dense, lexical=lexical)
+        # T34 phase 2: a DenseSignalProvider/LexicalSignalProvider wraps a
+        # specific dense/lexical instance by reference; rewrap onto the
+        # extended indices so a later `assemble()` call sees the new classes.
+        signal_providers = rewrap_signal_providers(self.signal_providers, dense, lexical)
+        return replace(
+            self,
+            label_space=extended_space,
+            dense=dense,
+            lexical=lexical,
+            signal_providers=signal_providers,
+        )
 
 
 class ArtifactRepository:
@@ -142,20 +190,18 @@ class ArtifactRepository:
         enc_spec = encoder_spec(cfg.encoder.kind)
         fus_spec = fusion_spec(cfg.fusion.kind)
         cal_spec = calibrator_spec(cfg.calibration.kind)
+        dense_spec = dense_retriever_spec(cfg.retrieval.dense_kind)
+        lex_spec = lexical_retriever_spec(cfg.retrieval.lexical_kind)
 
         artifacts.encoder.save(os.path.join(directory, enc_spec.dirname))
 
-        s = artifacts.dense.state
-        np.savez_compressed(
-            os.path.join(directory, "dense.npz"),
-            example_emb=s.example_emb,
-            example_labels=s.example_labels,
-            prototypes=s.prototypes,
-            description_emb=s.description_emb,
-            class_freq=s.class_freq,
-        )
-        with open(os.path.join(directory, "lexical.pkl"), "wb") as fh:
-            pickle.dump(artifacts.lexical, fh)
+        dense_arrays = artifacts.dense.to_state()
+        np.savez_compressed(os.path.join(directory, dense_spec.filename), **dense_arrays)
+
+        arrays, lex_meta = artifacts.lexical.to_state()
+        np.savez_compressed(os.path.join(directory, lex_spec.filename), **arrays)
+        with open(os.path.join(directory, _lexical_json_path(lex_spec.filename)), "w") as fh:
+            json.dump(lex_meta, fh)
 
         artifacts.fusion.save(os.path.join(directory, fus_spec.filename))
         artifacts.calibrator.save(os.path.join(directory, cal_spec.filename))
@@ -165,7 +211,15 @@ class ArtifactRepository:
         # records kind + relative path + declared names so load rebuilds them in
         # order; the composed feature-name list below is the authoritative schema.
         provider_manifest = self._save_providers(directory, cfg, artifacts.feature_providers)
-        feature_names = composed_feature_names(artifacts.feature_providers)
+        feature_names = fusion_feature_names(
+            artifacts.feature_providers, cfg.fusion.drop_features, artifacts.signal_providers
+        )
+
+        # T34 phase 2: each SignalProvider persists to `signals/<name>/` via its
+        # own `save()` -- a no-op for the two built-ins (their state already
+        # lives in dense.npz/lexical.npz above), a real write for any custom
+        # provider with its own learned state.
+        self._save_signal_providers(directory, artifacts.signal_providers)
 
         meta = {
             "feature_names": feature_names,
@@ -175,6 +229,9 @@ class ArtifactRepository:
                 "encoder": cfg.encoder.kind,
                 "fusion": cfg.fusion.kind,
                 "calibrator": cfg.calibration.kind,
+                "dense": cfg.retrieval.dense_kind,
+                "lexical": cfg.retrieval.lexical_kind,
+                "signals": list(cfg.signals),
             },
             "feature_providers": provider_manifest,
             "classes": [
@@ -244,8 +301,9 @@ class ArtifactRepository:
         ``update`` can add labeled examples without needing
         ``--base-items``: appending examples to BM25 requires refitting on the
         *full* corpus (its IDF is corpus-global), and the model dir otherwise
-        keeps no raw text at all (``dense.npz`` is embeddings, ``lexical.pkl``
-        a fitted vectorizer). Opt out via ``TrainingConfig.store_corpus=False``."""
+        keeps no raw text at all (``dense.npz`` is embeddings, ``lexical.npz``/
+        ``.json`` a fitted vectorizer's numeric state). Opt out via
+        ``TrainingConfig.store_corpus=False``."""
         path = os.path.join(directory, "corpus.jsonl.gz")
         with gzip.open(path, "wt", encoding="utf-8") as fh:
             for it in items:
@@ -294,6 +352,47 @@ class ArtifactRepository:
             json.dump(meta, fh, indent=2)
 
     @staticmethod
+    def _load_lexical(directory: str, kind: str = "bm25"):
+        """Load the lexical retriever named by ``kind`` (the registry key
+        recorded in ``meta.json``'s ``components`` block), falling back to a
+        legacy ``lexical.pkl`` (with a warning) for a model directory saved
+        before the npz+json format existed. The legacy fallback only applies to
+        the built-in ``"bm25"`` kind -- a directory that predates ``kind`` being
+        recorded always defaults to ``"bm25"`` (see ``_components_from_meta``),
+        so this is exactly the pre-T34 lookup path, unchanged."""
+        spec = lexical_retriever_spec(kind)
+        npz_path = os.path.join(directory, spec.filename)
+        json_path = os.path.join(directory, _lexical_json_path(spec.filename))
+        if os.path.isfile(npz_path) and os.path.isfile(json_path):
+            return spec.load(directory)
+        pkl_path = os.path.join(directory, "lexical.pkl")
+        if os.path.isfile(pkl_path):
+            log.warning(
+                "loading legacy pickle artifact %r; re-save this model directory "
+                "to upgrade to the pickle-free format",
+                pkl_path,
+            )
+            with open(pkl_path, "rb") as fh:
+                return pickle.load(fh)
+        raise FileNotFoundError(
+            f"no lexical index found in {directory!r} "
+            f"(expected {spec.filename}+{_lexical_json_path(spec.filename)}, or legacy lexical.pkl)"
+        )
+
+    @staticmethod
+    def _save_signal_providers(directory: str, providers: Sequence[SignalProvider]) -> None:
+        """Persist each signal provider to ``signals/<name>/`` via its own
+        ``save()`` (T34 phase 2). The two built-ins' ``save`` is a no-op --
+        their numeric state already lives in ``dense.npz``/``lexical.npz``,
+        written above by their wrapped retriever's own spec -- so a model with
+        only the default two providers writes no ``signals/`` directory,
+        keeping its on-disk layout byte-for-byte the pre-T34-phase-2 one."""
+        if not providers:
+            return
+        for provider in providers:
+            provider.save(os.path.join(directory, "signals", provider.name))
+
+    @staticmethod
     def _save_providers(
         directory: str, cfg: PipelineConfig, providers: Sequence[FeatureProvider]
     ) -> List[Dict]:
@@ -338,7 +437,16 @@ class ArtifactRepository:
             providers.append(spec.load(os.path.join(directory, entry["path"]), pc))
         return providers
 
-    def load(self, directory: str) -> DeployedArtifacts:
+    def load(self, directory: str, device: Optional[str] = None) -> DeployedArtifacts:
+        """Load a trained model directory.
+
+        ``device`` (e.g. ``"cuda"``, ``"cpu"``) overrides auto-detection for both
+        the encoder and the fusion model, on top of whatever the model was
+        *trained* on -- useful to pin inference to a device explicitly rather
+        than letting each component probe ``torch.cuda.is_available()`` for
+        itself. ``None`` (the default) keeps auto-detection: the persisted
+        ``encoder.device`` (usually unset) and per-call fusion auto-detection.
+        """
         if not os.path.isdir(directory):
             raise FileNotFoundError(f"model directory not found: {directory!r}")
         meta_path = os.path.join(directory, "meta.json")
@@ -352,16 +460,8 @@ class ArtifactRepository:
         self._check_package_version(meta.get("package_version"))
 
         config = PipelineConfig.from_dict(meta["config"])
-        # Rebuild feature providers before the schema check: the effective schema
-        # is core + provider columns, so the providers must exist to compute it.
-        feature_providers = self._load_providers(directory, meta, config)
-        self._check_feature_schema(
-            meta.get("feature_names"), composed_feature_names(feature_providers)
-        )
-
-        label_space = LabelSpace(
-            [ClassDefinition(c["key"], c["description"]) for c in meta["classes"]]
-        )
+        if device is not None:
+            config.encoder.device = device
 
         # Dispatch each swappable component through the registry by its recorded
         # kind (defaulting for legacy dirs that predate the `components` block).
@@ -369,24 +469,44 @@ class ArtifactRepository:
         enc_spec = encoder_spec(components["encoder"])
         fus_spec = fusion_spec(components["fusion"])
         cal_spec = calibrator_spec(components["calibrator"])
+        dense_spec = dense_retriever_spec(components["dense"])
+
+        # Rebuild feature providers + a *schema-only* signal-provider list before
+        # the schema check, so a corrupt/incompatible model dir fails fast on the
+        # schema mismatch before any other file (dense.npz, the encoder dir, ...)
+        # is even opened. `column_names()` never touches the wrapped retriever
+        # (only `build()` does), so `dense=lexical=None` is safe here -- exactly
+        # the same "unfitted instance" discipline `build_feature_providers`
+        # already relies on for `FeatureProvider.names()`. An unregistered signal
+        # kind raises here too, naming the registered set -- the same
+        # schema-drift contract as encoder/fusion/calibrator/dense/lexical kind
+        # mismatches.
+        feature_providers = self._load_providers(directory, meta, config)
+        schema_signal_providers = build_signal_providers(
+            config.retrieval, components["signals"], None, None, None
+        )
+        self._check_feature_schema(
+            meta.get("feature_names"),
+            fusion_feature_names(
+                feature_providers, config.fusion.drop_features, schema_signal_providers
+            ),
+        )
+
+        label_space = LabelSpace(
+            [ClassDefinition(c["key"], c["description"]) for c in meta["classes"]]
+        )
 
         encoder = enc_spec.load(os.path.join(directory, enc_spec.dirname), config.encoder)
 
-        npz = np.load(os.path.join(directory, "dense.npz"))
-        dense = DenseRetrieverAdapter(
-            DenseState(
-                npz["example_emb"],
-                npz["example_labels"],
-                npz["prototypes"],
-                npz["description_emb"],
-                npz["class_freq"],
-            ),
-            chunk=config.retrieval.dense_chunk,
+        dense = dense_spec.load(directory, config.retrieval)
+        lexical = self._load_lexical(directory, components["lexical"])
+        # The real SignalProviders, wrapping the now-loaded dense/lexical.
+        signal_providers = load_signal_providers(
+            directory, config.retrieval, components["signals"], dense, lexical
         )
-        with open(os.path.join(directory, "lexical.pkl"), "rb") as fh:
-            lexical: LexicalRetrieverAdapter = pickle.load(fh)
 
         fusion = fus_spec.load(os.path.join(directory, fus_spec.filename))
+        fusion.set_device(device)
         calibrator = cal_spec.load(os.path.join(directory, cal_spec.filename))
 
         abstention = AbstentionPolicy(
@@ -403,11 +523,13 @@ class ArtifactRepository:
             calibrator,
             abstention,
             feature_providers=feature_providers,
+            signal_providers=signal_providers,
         )
 
     @staticmethod
-    def _components_from_meta(meta: Dict) -> Dict[str, str]:
-        """Resolve each component's ``kind`` for load dispatch.
+    def _components_from_meta(meta: Dict) -> Dict[str, Any]:
+        """Resolve each component's ``kind`` for load dispatch (``signals`` is a
+        list of kinds rather than a single one -- see ``PipelineConfig.signals``).
 
         Prefers the explicit ``components`` block; falls back
         to the kinds embedded in ``config``; finally to the built-in defaults so
@@ -425,6 +547,13 @@ class ArtifactRepository:
             "calibrator": comp.get("calibrator")
             or cfg.get("calibration", {}).get("kind")
             or _LEGACY_COMPONENTS["calibrator"],
+            "dense": comp.get("dense")
+            or cfg.get("retrieval", {}).get("dense_kind")
+            or _LEGACY_COMPONENTS["dense"],
+            "lexical": comp.get("lexical")
+            or cfg.get("retrieval", {}).get("lexical_kind")
+            or _LEGACY_COMPONENTS["lexical"],
+            "signals": comp.get("signals") or cfg.get("signals") or list(_LEGACY_SIGNALS),
         }
 
     @staticmethod

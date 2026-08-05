@@ -19,7 +19,7 @@ already shipped, and — if you need it — zero internet access at deploy time.
 ## Quickstart
 
 ```bash
-pip install .
+pip install .[sentence-transformers]   # or plain `pip install .` + --encoder-kind tfidf below
 text-classifier-train --items items.csv --classes classes.csv --out model_dir/
 text-classifier-infer --model model_dir/ --input new_items.csv --output preds.csv
 ```
@@ -103,10 +103,20 @@ to support one.
 ## Install
 
 ```bash
-pip install .                 # core (includes sentence-transformers)
-pip install .[lightgbm]       # + optional LightGBM fusion backend
-pip install .[test]           # + pytest for the test suite
+pip install .                              # core: torch-free (numpy/pandas/scipy/sklearn/xgboost)
+pip install .[sentence-transformers]       # + the semantic bi-encoder (pulls in torch)
+pip install .[lightgbm]                    # + optional LightGBM fusion backend
+pip install .[test]                        # + pytest for the test suite
 ```
+
+Core `pip install .` is deliberately torch-free: it trains and infers with the
+`tfidf` or `hashing` encoder backends (`--encoder-kind tfidf` /
+`--encoder-kind hashing`), which is what an air-gapped or lightweight host
+gets without sourcing a single torch wheel it may never use.
+`PipelineConfig`'s default encoder kind is still `sentence-transformers` (the
+best out-of-the-box quality), so training with the CLI's default settings needs
+the extra — selecting it without the extra installed raises a clear error
+pointing back at this section rather than a raw `ImportError`.
 
 Installing exposes three console commands — `text-classifier-train`,
 `text-classifier-infer`, and `text-classifier-eval`. From a source checkout you
@@ -117,16 +127,37 @@ can equivalently run `python -m scripts.train` / `scripts.infer` /
 
 `requirements.lock` pins the full transitive dependency tree (torch included)
 with sha256 hashes, resolved for the reference platform: **Linux x86_64,
-CPython 3.11**. On a connected host, build a wheelhouse:
+CPython 3.11**.
+
+**Easiest path — one file in, one command out.** On a connected host matching
+the reference platform:
+
+```bash
+scripts/build_airgap_bundle.sh
+```
+
+This writes a single `text-classifier-airgap-bundle.tar.gz` containing every
+wheel, the lockfile, and an installer. Move that one file to the air-gapped
+host and run:
+
+```bash
+tar xzf text-classifier-airgap-bundle.tar.gz
+./wheelhouse/install.sh
+```
+
+`install.sh` just wraps the two `pip install --no-index` calls below —
+`--require-hashes` guarantees the installed wheels are byte-identical to the
+ones that were tested.
+
+**Manual path**, if you want the wheelhouse directory instead of the bundled
+archive (e.g. to inspect or re-sign it before transfer):
 
 ```bash
 pip download --require-hashes -r requirements.lock -d wheelhouse/
 pip wheel . --no-deps -w wheelhouse/     # the package itself
 ```
 
-Move `wheelhouse/` to the air-gapped host, then install with no index access —
-`--require-hashes` guarantees the installed wheels are byte-identical to the
-ones that were tested:
+Move `wheelhouse/` to the air-gapped host, then install with no index access:
 
 ```bash
 pip install --no-index --find-links wheelhouse/ --require-hashes -r requirements.lock
@@ -136,8 +167,14 @@ pip install --no-index --find-links wheelhouse/ --no-deps text-classifier
 **Refresh policy.** The lock is refreshed deliberately, never implicitly:
 
 ```bash
-uv pip compile pyproject.toml --generate-hashes --python-version 3.11 -o requirements.lock
+uv pip compile pyproject.toml --extra sentence-transformers --generate-hashes \
+    --python-version 3.11 --python-platform x86_64-unknown-linux-gnu -o requirements.lock
 ```
+
+(`--extra sentence-transformers` pulls the semantic encoder's torch/sentence-transformers
+stack into the lock even though it's no longer a core dependency — see below.
+`--python-platform` pins the target to the reference platform regardless of which
+OS you run the refresh from.)
 
 then re-run the test suite and the quality benchmark before committing the
 diff. Heavy ML wheels (torch, xgboost) therefore only change versions when
@@ -264,6 +301,47 @@ dense/description-similarity signals, pick a multilingual sentence-transformer
 model via `--encoder` — see `examples/coicop_hebrew/` for a worked
 cross-lingual example.
 
+**Fine-tuning the encoder for more than one epoch:** the encoder is only
+fine-tuned on the paths that ask for it (`--per-fold-encoder`, or a
+corpus-fitted encoder kind), and `--encoder-epochs` sets how long. More epochs
+is not monotone — a bi-encoder on a small, imbalanced corpus starts overfitting
+the class descriptions well before epoch 20 — so a multi-epoch run picks its own
+epoch instead of trusting the last one:
+
+```bash
+text-classifier-train --items items.csv --classes classes.csv --out model_dir/ \
+    --per-fold-encoder --encoder-epochs 20 --encoder-patience 3
+```
+
+A stratified 10% of the fine-tuning items (`--encoder-epoch-holdout`) is
+withheld from the gradient updates and re-scored after every epoch; the
+best-scoring epoch is the one saved, and `--encoder-patience` stops the run
+once the metric has stalled for that many epochs. The per-epoch table is written
+to `model_dir/encoder/encoder_training.json`:
+
+```json
+{
+  "select_metric": "desc_acc@1", "best_epoch": 6, "epochs_run": 9,
+  "early_stopped": true, "n_fit_items": 4212, "n_holdout_items": 468,
+  "epochs": [{"epoch": 1, "desc_acc@1": 0.61, "desc_mrr": 0.72, "desc_pos_sim": 0.44}, "..."]
+}
+```
+
+`--encoder-select-metric` chooses what "best" means: `desc_acc@1` (default —
+the item's nearest class description *is* its class, the direct analogue of the
+`d_desc_sim` signal), `desc_mrr` (smoother, better at separating epochs on a
+small holdout), `desc_pos_sim` (a diagnostic — it can rise while ranking
+degrades), or `knn_acc@1` (nearest labeled *example* shares the label, closest
+to the `d_knn_*` signals, but it re-encodes the fine-tuning pool every epoch).
+Set `--encoder-epoch-holdout 0` to disable selection entirely: every item trains
+and the final epoch wins, as before. Selection is inert at the default
+`--encoder-epochs 1` — one epoch, nothing to choose between.
+
+The holdout is carved out of the items the encoder was already entitled to (in
+the out-of-fold loop, one fold's training rows), so it does not weaken the
+leakage guarantees below: withheld-from-the-gradient is still in-fold, and the
+rows the fusion model trains on are untouched.
+
 **Instruction-tuned encoders (E5/BGE/GTE...):** these models expect role
 prefixes — queries and documents encoded differently. Configure them via
 `--config`; the prompts persist into the model dir, so inference applies them
@@ -314,6 +392,16 @@ Each trained model directory carries its own evidence: `evaluation.json` (the
 full held-out report) and `model_card.md` (a human-readable summary with the
 package version, dataset shape, headline metrics, and the abstention thresholds).
 
+**Which features are pulling their weight?** `text-classifier-importance` scores
+a labeled set against a trained model as-is (no retraining) and reports two
+things: mean per-feature contribution to the raw fusion score, and — for each
+feature — the accuracy/coverage change from masking it to `NaN` (the domain's
+own "signal did not retrieve this" encoding) and re-scoring:
+
+```bash
+text-classifier-importance --model model_dir/ --input labeled.csv --output importance.json
+```
+
 **Move the coverage/precision operating point without retraining:** the target
 precision → abstention threshold is normally baked in at train time. Moving
 that knob — or responding to drift `text-classifier-eval` surfaced — does not
@@ -327,7 +415,7 @@ text-classifier-tune --model model_dir/ --input fresh_labeled.csv \
 # --dry-run prints the would-be coverage/accuracy/thresholds and writes nothing
 ```
 
-This updates `calibrator.pkl` and `meta.json`'s abstention block in place, and
+This updates the calibrator file and `meta.json`'s abstention block in place, and
 writes a fresh `evaluation.json`/`model_card.md` reflecting the new operating
 point (with a `retunes` provenance entry recording when and on how many items).
 
@@ -471,7 +559,9 @@ guard against that:
 * **Encoder** — by default a single shared encoder is used (cheap). For full
   rigor, set `use_per_fold_encoder=True` to fine-tune a fresh encoder per fold.
   The encoder is fine-tuned with `MultipleNegativesSymmetricRankingLoss` on
-  (item, class-description) pairs.
+  (item, class-description) pairs. A multi-epoch fine-tune scores a held-out
+  slice of its own training rows after every epoch and keeps the best epoch, so
+  "train longer" cannot quietly ship an overfitted encoder.
 
 **Why it's fast.** The whole scoring path is vectorized — no per-item Python
 loops:
@@ -482,6 +572,11 @@ loops:
   frequency is ignored, scoring a query batch is the sparse mat-mul
   `Q_binary @ W.T`.
 * kNN and feature assembly are query-chunked to bound peak memory.
+
+**Execution model / GPU-CPU device placement.** `docs/device-policy.md` records
+where wall-clock actually goes, stage by stage, across a synthetic scale grid
+(`scripts/profile_devices.py`), and states which stages should run on which
+device and why — the measure-first gate before any kernel moves to a GPU.
 
 **Project layout** (domain-driven / hexagonal):
 

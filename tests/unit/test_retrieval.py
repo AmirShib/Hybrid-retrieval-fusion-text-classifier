@@ -16,6 +16,8 @@ import numpy as np
 import numpy.testing as npt
 import pytest
 
+from scipy import sparse
+
 from text_classifier.config import RetrievalConfig
 from text_classifier.domain import LabelSpace, ClassDefinition
 from text_classifier.infrastructure.retrieval import (
@@ -23,6 +25,9 @@ from text_classifier.infrastructure.retrieval import (
     DenseRetrieverAdapter,
     LexicalRetrieverAdapter,
     _dense_topk,
+    _prototypes_and_freq,
+    _sparse_row_topk,
+    bm25_prunes_vocab,
 )
 from tests._doubles import HashingEncoder
 
@@ -269,6 +274,64 @@ def test_lexical_description_score_shape(lex_env):
     assert sm.shape == (2, label_space.size)
 
 
+# --------------------------------------------------------------- persistence (T67)
+def test_bm25_state_roundtrip_reproduces_scores():
+    texts = ["apple apple fruit", "orange fruit", "salmon fish ocean", "eagle falcon sky"]
+    idx = BM25Index(1.5, 0.75).fit(texts)
+    queries = ["apple orange", "salmon", "falcon eagle sky", "unseen gibberish"]
+    before = idx.score_matrix(queries)
+
+    arrays, meta = idx.to_state()
+    restored = BM25Index.from_state(arrays, meta)
+    after = restored.score_matrix(queries)
+
+    npt.assert_array_equal(before, after)
+    assert restored.k1 == idx.k1 and restored.b == idx.b and restored.n_docs == idx.n_docs
+
+
+def test_bm25_state_rejects_non_json_clean_cv_kwargs():
+    idx = BM25Index(1.5, 0.75, analyzer=lambda t: t.split())
+    idx.fit(["a b c", "d e f"])
+    with pytest.raises(ValueError):
+        idx.to_state()
+
+
+def test_lexical_adapter_state_roundtrip_reproduces_everything(lex_env):
+    adapter, label_space, _ = lex_env
+    queries = ["apple orange", "salmon trout", "eagle sky", "gibberish unseen"]
+
+    before_desc = adapter.description_score(queries)
+    before_knn = adapter.knn_example_labels(queries, k=2)
+
+    arrays, meta = adapter.to_state()
+    restored = LexicalRetrieverAdapter.from_state(arrays, meta)
+
+    npt.assert_array_equal(restored.description_score(queries), before_desc)
+    after_labels, after_scores = restored.knn_example_labels(queries, k=2)
+    npt.assert_array_equal(after_labels, before_knn[0])
+    npt.assert_array_equal(after_scores, before_knn[1])
+
+
+def test_lexical_adapter_state_roundtrip_via_npz(lex_env, tmp_path):
+    """The exact round-trip persistence.py performs: pack to npz, reload from disk."""
+    adapter, _, _ = lex_env
+    queries = ["apple orange", "salmon trout"]
+    before = adapter.description_score(queries)
+
+    arrays, meta = adapter.to_state()
+    npz_path = tmp_path / "lexical.npz"
+    np.savez_compressed(npz_path, **arrays)
+    import json
+
+    json_path = tmp_path / "lexical.json"
+    json_path.write_text(json.dumps(meta))
+
+    loaded_arrays = dict(np.load(npz_path))
+    loaded_meta = json.loads(json_path.read_text())
+    restored = LexicalRetrieverAdapter.from_state(loaded_arrays, loaded_meta)
+    npt.assert_array_equal(restored.description_score(queries), before)
+
+
 def test_lexical_description_score_values_plausible(lex_env):
     adapter, label_space, _ = lex_env
     sm = adapter.description_score(["apple fruit"])
@@ -345,6 +408,52 @@ def test_dense_prototype_direction_single_example(dense_env):
     npt.assert_allclose(adapter.state.prototypes[0], emb[0], atol=1e-6)
 
 
+class TestBuildFromEmbeddings:
+    """T88: `build_from_embeddings` is the seam the training pipeline slices
+    cached, whole-pool embeddings into. `build()` delegates to it, so the two
+    must produce byte-identical adapters for the same inputs."""
+
+    def test_matches_build_byte_for_byte(self, dense_env):
+        adapter, label_space, enc, texts, labels = dense_env
+        cfg = RetrievalConfig(dense_chunk=256)
+        example_emb = enc.encode_documents(texts)
+        desc_emb = enc.encode_documents(label_space.descriptions)
+        via_embeddings = DenseRetrieverAdapter.build_from_embeddings(
+            example_emb, labels, desc_emb, label_space, cfg
+        )
+        npt.assert_array_equal(adapter.state.example_emb, via_embeddings.state.example_emb)
+        npt.assert_array_equal(adapter.state.example_labels, via_embeddings.state.example_labels)
+        npt.assert_array_equal(adapter.state.description_emb, via_embeddings.state.description_emb)
+        npt.assert_array_equal(adapter.state.class_freq, via_embeddings.state.class_freq)
+        proto_a, proto_b = adapter.state.prototypes, via_embeddings.state.prototypes
+        both_nan = np.isnan(proto_a) & np.isnan(proto_b)
+        npt.assert_array_equal(np.isnan(proto_a), np.isnan(proto_b))
+        npt.assert_allclose(proto_a[~both_nan], proto_b[~both_nan], atol=1e-7)
+
+    def test_sliced_embeddings_match_re_encoding_the_subset(self, dense_env):
+        """The exact operation T88 performs: encode the whole pool once, then
+        slice for a fold, versus encoding just that fold's subset directly."""
+        _, label_space, enc, texts, labels = dense_env
+        cfg = RetrievalConfig(dense_chunk=256)
+        idx = np.array([0, 2, 3])  # a "fold"
+
+        whole_emb = enc.encode_documents(texts)
+        desc_emb = enc.encode_documents(label_space.descriptions)
+        sliced = DenseRetrieverAdapter.build_from_embeddings(
+            whole_emb[idx], labels[idx], desc_emb, label_space, cfg
+        )
+
+        direct = DenseRetrieverAdapter.build(
+            enc, [texts[i] for i in idx], labels[idx], label_space, cfg
+        )
+        npt.assert_array_equal(sliced.state.example_emb, direct.state.example_emb)
+        both_nan = np.isnan(sliced.state.prototypes) & np.isnan(direct.state.prototypes)
+        npt.assert_array_equal(np.isnan(sliced.state.prototypes), np.isnan(direct.state.prototypes))
+        npt.assert_allclose(
+            sliced.state.prototypes[~both_nan], direct.state.prototypes[~both_nan], atol=1e-7
+        )
+
+
 def test_dense_empty_class_has_nan_prototype(dense_env):
     adapter, *_ = dense_env
     proto = adapter.state.prototypes
@@ -371,6 +480,63 @@ def test_dense_class_freq_counts_correctly(dense_env):
     npt.assert_array_equal(freq[0], int((labels == 0).sum()))  # 3
     npt.assert_array_equal(freq[1], int((labels == 1).sum()))  # 2
     npt.assert_array_equal(freq[2], 0)  # empty class
+
+
+def _prototypes_and_freq_loop_reference(emb, labels, n_classes):
+    """The pre-T84 ``for c in range(n_classes)`` masked-mean loop, kept here to
+    verify the scatter-based replacement against it directly."""
+    dim = emb.shape[1]
+    proto = np.full((n_classes, dim), np.nan, dtype=np.float32)
+    freq = np.zeros(n_classes, dtype=np.int64)
+    labels = np.asarray(labels)
+    for c in range(n_classes):
+        mask = labels == c
+        freq[c] = int(mask.sum())
+        if freq[c]:
+            v = emb[mask].mean(axis=0)
+            norm = np.linalg.norm(v)
+            if norm > 0:
+                proto[c] = (v / norm).astype(np.float32)
+    return proto, freq
+
+
+class TestPrototypesAndFreqLoopFree:
+    """T84: the scatter-based ``_prototypes_and_freq`` against the loop it
+    replaced. Not asserted bit-for-bit -- IEEE754 addition is not associative,
+    so a flat scatter-sum and a per-group ``.mean(axis=0)`` (numpy's pairwise
+    summation) legitimately round differently once a class has more than a
+    couple of examples -- but must agree to float32 precision, including the
+    NaN/zero-frequency edge cases."""
+
+    def test_matches_loop_reference_including_empty_classes(self):
+        rng = np.random.default_rng(0)
+        n_classes, dim, n = 12, 6, 150
+        emb = rng.standard_normal((n, dim)).astype(np.float32)
+        # class 3 gets no examples at all (n_classes-1 possible labels used)
+        labels = rng.integers(0, n_classes - 1, n).astype(np.int64)
+
+        proto, freq = _prototypes_and_freq(emb, labels, n_classes)
+        want_proto, want_freq = _prototypes_and_freq_loop_reference(emb, labels, n_classes)
+
+        npt.assert_array_equal(freq, want_freq)
+        assert freq[n_classes - 1] == 0
+        assert np.all(np.isnan(proto[n_classes - 1]))
+        valid = freq > 0
+        npt.assert_allclose(proto[valid], want_proto[valid], rtol=1e-5, atol=1e-6)
+
+    def test_empty_pool_all_nan(self):
+        emb = np.zeros((0, 4), dtype=np.float32)
+        labels = np.zeros((0,), dtype=np.int64)
+        proto, freq = _prototypes_and_freq(emb, labels, 3)
+        npt.assert_array_equal(freq, np.zeros(3, dtype=np.int64))
+        assert np.all(np.isnan(proto))
+
+    def test_single_example_class_matches_normalized_vector(self):
+        emb = np.array([[3.0, 4.0]], dtype=np.float32)  # norm 5
+        labels = np.array([0], dtype=np.int64)
+        proto, freq = _prototypes_and_freq(emb, labels, 1)
+        assert freq[0] == 1
+        npt.assert_allclose(proto[0], [0.6, 0.8], rtol=1e-6)
 
 
 # =========================================================================== #
@@ -446,9 +612,7 @@ def test_loo_prototype_leaves_self_out():
     """LOO prototype for a 2-item class equals cosine to the *other* item; a
     1-item class yields NaN (no prototype once its only example is removed)."""
     enc = HashingEncoder(dim=64)
-    label_space = LabelSpace(
-        [ClassDefinition("pair", "pair"), ClassDefinition("solo", "solo")]
-    )
+    label_space = LabelSpace([ClassDefinition("pair", "pair"), ClassDefinition("solo", "solo")])
     texts = ["pair one", "pair two", "solo only"]
     labels = np.array([0, 0, 1])
     cfg = RetrievalConfig(dense_chunk=256)
@@ -520,3 +684,213 @@ def test_dense_topk_chunking_equivalence(dense_env):
     npt.assert_allclose(sim_a, sim_b, atol=1e-5)
     # Indices may differ on ties, but their retrieved similarities match
     # (sorting: same scores if same top-k)
+
+
+# =========================================================================== #
+#  T32 — BM25 at scale: bounded memory and throughput
+# =========================================================================== #
+
+
+class TestSparseRowTopk:
+    """`_sparse_row_topk` is the replacement for BM25 `top_k`'s dense
+    argpartition/argsort — it must never densify, but must still return the
+    same shape, padding, and descending-order contract."""
+
+    def test_basic_topk_matches_hand_computation(self):
+        # row0: cols {0: 3, 2: 1, 3: 5}; row1: cols {1: 2}
+        S = sparse.csr_matrix(([3.0, 1.0, 5.0, 2.0], ([0, 0, 0, 1], [0, 2, 3, 1])), shape=(2, 4))
+        idx, score = _sparse_row_topk(S, fetch=2)
+        assert idx.shape == (2, 2) and score.shape == (2, 2)
+        npt.assert_array_equal(idx[0], [3, 0])  # descending: 5 (col3), 3 (col0)
+        npt.assert_allclose(score[0], [5.0, 3.0])
+        assert idx[1, 0] == 1
+        npt.assert_allclose(score[1, 0], 2.0)
+        # row1 has only one nonzero: the second slot is padding.
+        assert idx[1, 1] == -1
+        assert np.isnan(score[1, 1])
+
+    def test_empty_matrix_is_all_padding(self):
+        S = sparse.csr_matrix((3, 5), dtype=np.float32)
+        idx, score = _sparse_row_topk(S, fetch=2)
+        assert np.all(idx == -1)
+        assert np.all(np.isnan(score))
+
+    def test_fetch_zero_returns_empty_width(self):
+        S = sparse.csr_matrix(([1.0], ([0], [0])), shape=(1, 1))
+        idx, score = _sparse_row_topk(S, fetch=0)
+        assert idx.shape == (1, 0) and score.shape == (1, 0)
+
+    def test_row_with_more_nonzeros_than_fetch_keeps_the_largest(self):
+        S = sparse.csr_matrix(([1.0, 5.0, 3.0, 2.0], ([0, 0, 0, 0], [0, 1, 2, 3])), shape=(1, 4))
+        idx, score = _sparse_row_topk(S, fetch=2)
+        npt.assert_array_equal(idx[0], [1, 2])  # cols with values 5, 3
+        npt.assert_allclose(score[0], [5.0, 3.0])
+
+    def test_matches_dense_argpartition_reference(self):
+        """Cross-check against a brute-force dense computation on a random
+        sparse matrix — the property that actually matters (same top-k values,
+        same descending order), not incidental tie-breaking."""
+        rng = np.random.default_rng(0)
+        dense = rng.random((6, 9)).astype(np.float32)
+        dense[dense < 0.5] = 0.0  # make it genuinely sparse
+        S = sparse.csr_matrix(dense)
+        fetch = 3
+        idx, score = _sparse_row_topk(S, fetch)
+        for r in range(dense.shape[0]):
+            expected_vals = np.sort(dense[r][dense[r] > 0])[::-1][:fetch]
+            got_vals = score[r][~np.isnan(score[r])]
+            npt.assert_allclose(np.sort(got_vals)[::-1], expected_vals, atol=1e-6)
+
+
+class TestBM25TokenizeOnceFitFromCounts:
+    """T32 A2: `fit()` == `tokenize_corpus()` + `fit_from_counts()`, and a row
+    slice of the shared counts matrix reproduces fitting a fresh index on just
+    that subset."""
+
+    CORPUS = [
+        "apple apple fruit",
+        "orange fruit",
+        "salmon fish ocean",
+        "trout ocean fish",
+        "eagle falcon sky",
+    ]
+
+    def test_fit_from_counts_matches_fit(self):
+        direct = BM25Index(1.5, 0.75).fit(self.CORPUS)
+        counts, vectorizer = BM25Index.tokenize_corpus(self.CORPUS)
+        via_counts = BM25Index(1.5, 0.75).fit_from_counts(counts, vectorizer)
+
+        queries = ["apple orange", "salmon trout", "unseen gibberish"]
+        npt.assert_allclose(direct.score_matrix(queries), via_counts.score_matrix(queries))
+
+    def test_sliced_counts_matches_fitting_the_subset_directly(self):
+        """The exact operation A2 performs: tokenize the whole corpus once,
+        then slice rows for a fold, versus tokenizing just that fold's texts."""
+        idx = [0, 2, 4]
+        counts, vectorizer = BM25Index.tokenize_corpus(self.CORPUS)
+        sliced = BM25Index(1.5, 0.75).fit_from_counts(counts[idx], vectorizer)
+
+        subset_texts = [self.CORPUS[i] for i in idx]
+        direct = BM25Index(1.5, 0.75).fit(subset_texts)
+
+        queries = ["apple fruit", "salmon eagle"]
+        npt.assert_allclose(sliced.score_matrix(queries), direct.score_matrix(queries), atol=1e-6)
+
+    def test_bm25_prunes_vocab_detects_corpus_pruning_kwargs(self):
+        assert bm25_prunes_vocab({}) is False
+        assert bm25_prunes_vocab({"stop_words": "english"}) is False
+        assert bm25_prunes_vocab({"min_df": 2}) is True
+        assert bm25_prunes_vocab({"max_df": 0.9}) is True
+        assert bm25_prunes_vocab({"max_features": 100}) is True
+
+
+class TestBM25MaxDfRatio:
+    """T32 A4: opt-in, lossy high-df pruning."""
+
+    CORPUS = ["common apple", "common banana", "common cherry", "rare apple"]
+
+    def test_none_is_byte_identical_to_no_pruning(self):
+        a = BM25Index(1.5, 0.75).fit(self.CORPUS)
+        b = BM25Index(1.5, 0.75, max_df_ratio=None).fit(self.CORPUS)
+        npt.assert_array_equal(a.score_matrix(["common"]), b.score_matrix(["common"]))
+
+    def test_pruning_a_high_df_term_zeroes_its_contribution(self):
+        # "common" appears in 3/4 docs (df ratio 0.75); pruning at 0.5 drops it.
+        pruned = BM25Index(1.5, 0.75, max_df_ratio=0.5).fit(self.CORPUS)
+        sm = pruned.score_matrix(["common"])
+        npt.assert_allclose(sm, np.zeros_like(sm), atol=1e-8)
+
+    def test_pruning_shrinks_the_weight_matrix_nnz(self):
+        full = BM25Index(1.5, 0.75).fit(self.CORPUS)
+        pruned = BM25Index(1.5, 0.75, max_df_ratio=0.5).fit(self.CORPUS)
+        assert pruned._Wt.nnz < full._Wt.nnz
+
+    def test_persisted_and_reapplied_at_load(self):
+        idx = BM25Index(1.5, 0.75, max_df_ratio=0.5).fit(self.CORPUS)
+        arrays, meta = idx.to_state()
+        assert meta["max_df_ratio"] == 0.5
+        restored = BM25Index.from_state(arrays, meta)
+        assert restored.max_df_ratio == 0.5
+        npt.assert_array_equal(idx.score_matrix(["common"]), restored.score_matrix(["common"]))
+
+    def test_legacy_state_without_the_key_loads_as_off(self):
+        """A directory saved before T32 has no `max_df_ratio` key in meta."""
+        idx = BM25Index(1.5, 0.75).fit(self.CORPUS)
+        arrays, meta = idx.to_state()
+        del meta["max_df_ratio"]
+        restored = BM25Index.from_state(arrays, meta)
+        assert restored.max_df_ratio is None
+
+
+class TestScoreMatrixBlockGuard:
+    """T32 B: score_matrix must refuse to densify past a configured cap."""
+
+    def test_none_is_unbounded(self):
+        idx = BM25Index(1.5, 0.75).fit(["ab cd", "ef gh"])
+        idx.score_matrix(["ab"], max_block_elems=None)  # must not raise
+
+    def test_under_cap_succeeds(self):
+        idx = BM25Index(1.5, 0.75).fit(["ab cd", "ef gh"])
+        idx.score_matrix(["ab"], max_block_elems=100)  # 1 * 2 = 2 elements
+
+    def test_over_cap_raises(self):
+        idx = BM25Index(1.5, 0.75).fit(["ab cd", "ef gh"])
+        with pytest.raises(ValueError, match="score_matrix"):
+            idx.score_matrix(["ab", "cd", "ef"], max_block_elems=1)  # 3 * 2 = 6 > 1
+
+
+class TestLexicalBuildFromCounts:
+    """T32 A1/A2 at the adapter level: `build_from_counts` (pre-tokenized
+    example corpus + a pre-built description index) matches `build()`."""
+
+    def test_matches_build_byte_for_byte(self, lex_env):
+        adapter, label_space, labels = lex_env
+        texts = [
+            "apple apple fruit",
+            "orange fruit",
+            "salmon fish",
+            "trout ocean fish",
+            "eagle falcon",
+        ]
+        cfg = RetrievalConfig(bm25_token_kwargs={})
+        counts, vectorizer = BM25Index.tokenize_corpus(texts)
+        desc_bm25 = BM25Index(cfg.k1, cfg.b).fit(label_space.descriptions)
+        via_counts = LexicalRetrieverAdapter.build_from_counts(
+            counts, vectorizer, labels, desc_bm25, cfg
+        )
+
+        queries = ["apple orange", "salmon trout", "eagle sky"]
+        npt.assert_array_equal(
+            adapter.description_score(queries), via_counts.description_score(queries)
+        )
+        a_labels, a_scores = adapter.knn_example_labels(queries, k=2)
+        b_labels, b_scores = via_counts.knn_example_labels(queries, k=2)
+        npt.assert_array_equal(a_labels, b_labels)
+        npt.assert_array_equal(a_scores, b_scores)
+
+    def test_sliced_counts_matches_building_the_subset_directly(self, lex_env):
+        _, label_space, _ = lex_env
+        texts = [
+            "apple apple fruit",
+            "orange fruit",
+            "salmon fish",
+            "trout ocean fish",
+            "eagle falcon",
+        ]
+        labels = np.array([0, 0, 1, 1, 2])
+        cfg = RetrievalConfig(bm25_token_kwargs={})
+        idx = np.array([0, 1, 3])
+
+        counts, vectorizer = BM25Index.tokenize_corpus(texts)
+        desc_bm25 = BM25Index(cfg.k1, cfg.b).fit(label_space.descriptions)
+        sliced = LexicalRetrieverAdapter.build_from_counts(
+            counts[idx], vectorizer, labels[idx], desc_bm25, cfg
+        )
+        direct = LexicalRetrieverAdapter.build(
+            [texts[i] for i in idx], labels[idx], label_space, cfg
+        )
+
+        queries = ["apple orange", "trout fish"]
+        npt.assert_allclose(
+            sliced.description_score(queries), direct.description_score(queries), atol=1e-6
+        )

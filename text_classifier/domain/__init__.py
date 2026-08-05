@@ -8,20 +8,30 @@ from .models import (
     Prediction,
 )
 from .ports import (
+    ArrayOps,
     ConfidenceCalibrator,
     DenseRetriever,
     FeatureContext,
     FeatureProvider,
     FusionModel,
     LexicalRetriever,
+    SignalContext,
+    SignalMatrix,
+    SignalProvider,
     TextEncoder,
 )
 from .services import (
+    ENCODER_SELECTION_METRICS,
+    FEATURE_DEPS,
     FEATURE_NAMES,
     AbstentionPolicy,
     CandidatePolicy,
+    EpochSelectionPolicy,
     ThresholdTuner,
     composed_feature_names,
+    encoder_retrieval_metrics,
+    feature_closure,
+    fusion_feature_names,
 )
 
 __all__ = [
@@ -30,6 +40,7 @@ __all__ = [
     "LabelSpace",
     "Prediction",
     "CoverageReport",
+    "ArrayOps",
     "TextEncoder",
     "DenseRetriever",
     "LexicalRetriever",
@@ -37,9 +48,18 @@ __all__ = [
     "ConfidenceCalibrator",
     "FeatureProvider",
     "FeatureContext",
+    "SignalProvider",
+    "SignalContext",
+    "SignalMatrix",
     "FEATURE_NAMES",
+    "FEATURE_DEPS",
     "composed_feature_names",
+    "fusion_feature_names",
+    "feature_closure",
     "CandidatePolicy",
     "AbstentionPolicy",
     "ThresholdTuner",
+    "ENCODER_SELECTION_METRICS",
+    "EpochSelectionPolicy",
+    "encoder_retrieval_metrics",
 ]

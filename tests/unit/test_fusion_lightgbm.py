@@ -148,3 +148,53 @@ def test_unseeded_fits_deterministic():
         m.fit(X, y)
         runs.append(m.predict_proba(X))
     np.testing.assert_array_equal(runs[0], runs[1])
+
+
+# ---------------------------------------------------------------------------
+# GPU device wiring
+# ---------------------------------------------------------------------------
+
+
+def test_device_auto_detected_when_unset(monkeypatch):
+    """No explicit device -> resolve_device's auto-detection result is used."""
+    import text_classifier.infrastructure.fusion as fusion_mod
+
+    def _fake_resolve(explicit):
+        assert explicit is None
+        return "cpu"  # this build has no GPU support; keep the fit real
+
+    monkeypatch.setattr(fusion_mod, "resolve_device", _fake_resolve)
+    X, y = _separable_xy(n=100)
+    m = LightGBMFusionModel(dict(_FAST))
+    m.fit(X, y)  # must not raise
+    assert m.predict_proba(X).shape == (len(y),)
+
+
+def test_auto_detected_gpu_falls_back_to_cpu_on_unsupported_build(monkeypatch, caplog):
+    """A GPU visible to torch but a LightGBM build without GPU support must not
+    fail the run: the auto-detected device silently degrades to CPU with a
+    warning, mirroring resolve_device's own "best-effort, never a hard
+    requirement" contract."""
+    import logging
+
+    import text_classifier.infrastructure.fusion as fusion_mod
+
+    monkeypatch.setattr(fusion_mod, "resolve_device", lambda explicit: explicit or "cuda")
+    X, y = _separable_xy(n=100)
+    m = LightGBMFusionModel(dict(_FAST))
+    with caplog.at_level(logging.WARNING):
+        m.fit(X, y)  # must not raise, despite requesting an unsupported device
+    assert m.predict_proba(X).shape == (len(y),)
+    assert any("GPU support" in rec.message for rec in caplog.records)
+
+
+def test_explicit_unsupported_device_raises(monkeypatch):
+    """An explicit device request is a deliberate user choice: it must fail
+    loudly rather than silently degrade, matching every other explicit-device
+    path in this package."""
+    from lightgbm.basic import LightGBMError
+
+    X, y = _separable_xy(n=100)
+    m = LightGBMFusionModel({**_FAST, "device": "cuda"})
+    with pytest.raises(LightGBMError):
+        m.fit(X, y)
