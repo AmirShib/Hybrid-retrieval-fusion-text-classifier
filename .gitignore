@@ -221,5 +221,4 @@ __marimo__/
 .DS_Store
 
 # Claude Code local state (per-user, not shared)
-.claude/settings.local.json
-.claude/worktrees/
+.claude/
