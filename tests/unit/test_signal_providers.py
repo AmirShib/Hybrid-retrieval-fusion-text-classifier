@@ -129,7 +129,11 @@ def test_toy_signal_provider_end_to_end(tmp_path):
 
     loaded = ArtifactRepository().load(model_dir)
     loaded_names = [type(p).__name__ for p in loaded.signal_providers]
-    assert loaded_names == ["DenseSignalProvider", "LexicalSignalProvider", "_TextLengthSignalProvider"]
+    assert loaded_names == [
+        "DenseSignalProvider",
+        "LexicalSignalProvider",
+        "_TextLengthSignalProvider",
+    ]
     after = InferencePipeline(loaded).predict(texts)
 
     assert [p.top_key for p in before] == [p.top_key for p in after]

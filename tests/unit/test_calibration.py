@@ -276,7 +276,9 @@ class TestPerClassCalibrator:
 
 
 def test_registry_builds_per_class():
-    cal = build_calibrator(CalibrationConfig(kind="per-class", params={"inner": "beta", "min_support": 10}))
+    cal = build_calibrator(
+        CalibrationConfig(kind="per-class", params={"inner": "beta", "min_support": 10})
+    )
     assert isinstance(cal, PerClassCalibrator)
 
 

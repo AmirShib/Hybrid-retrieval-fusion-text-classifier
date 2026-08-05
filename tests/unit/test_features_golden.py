@@ -47,7 +47,14 @@ def env(hashing_encoder):
     q_texts = [it.text for it in q_items]
     q_emb = hashing_encoder.encode(q_texts)
     q_labels = np.array(label_space.encode_labels([it.label for it in q_items]))
-    return dict(assembler=assembler, dense=dense, lexical=lexical, q_texts=q_texts, q_emb=q_emb, q_labels=q_labels)
+    return dict(
+        assembler=assembler,
+        dense=dense,
+        lexical=lexical,
+        q_texts=q_texts,
+        q_emb=q_emb,
+        q_labels=q_labels,
+    )
 
 
 def _assert_matches_golden(df, fixture_name):

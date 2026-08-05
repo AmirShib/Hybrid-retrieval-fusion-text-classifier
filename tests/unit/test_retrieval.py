@@ -612,9 +612,7 @@ def test_loo_prototype_leaves_self_out():
     """LOO prototype for a 2-item class equals cosine to the *other* item; a
     1-item class yields NaN (no prototype once its only example is removed)."""
     enc = HashingEncoder(dim=64)
-    label_space = LabelSpace(
-        [ClassDefinition("pair", "pair"), ClassDefinition("solo", "solo")]
-    )
+    label_space = LabelSpace([ClassDefinition("pair", "pair"), ClassDefinition("solo", "solo")])
     texts = ["pair one", "pair two", "solo only"]
     labels = np.array([0, 0, 1])
     cfg = RetrievalConfig(dense_chunk=256)
@@ -700,9 +698,7 @@ class TestSparseRowTopk:
 
     def test_basic_topk_matches_hand_computation(self):
         # row0: cols {0: 3, 2: 1, 3: 5}; row1: cols {1: 2}
-        S = sparse.csr_matrix(
-            ([3.0, 1.0, 5.0, 2.0], ([0, 0, 0, 1], [0, 2, 3, 1])), shape=(2, 4)
-        )
+        S = sparse.csr_matrix(([3.0, 1.0, 5.0, 2.0], ([0, 0, 0, 1], [0, 2, 3, 1])), shape=(2, 4))
         idx, score = _sparse_row_topk(S, fetch=2)
         assert idx.shape == (2, 2) and score.shape == (2, 2)
         npt.assert_array_equal(idx[0], [3, 0])  # descending: 5 (col3), 3 (col0)

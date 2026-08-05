@@ -392,8 +392,7 @@ def render_model_card(manifest: Dict[str, Any], evaluation: Dict[str, Any]) -> s
         skipped = sig.get("skipped_signals") or []
         if skipped:
             lines.append(
-                f"- **Skipped (columns not assembled, e.g. `drop_features`):** "
-                f"{', '.join(skipped)}"
+                f"- **Skipped (columns not assembled, e.g. `drop_features`):** {', '.join(skipped)}"
             )
     lines += [
         "",

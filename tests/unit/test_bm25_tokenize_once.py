@@ -11,7 +11,6 @@ and CI-stable.
 
 from __future__ import annotations
 
-import numpy as np
 import pytest
 
 import text_classifier.infrastructure.retrieval as retrieval_mod

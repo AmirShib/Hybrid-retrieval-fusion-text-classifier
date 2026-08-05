@@ -230,9 +230,9 @@ def test_reorder_or_remove_attempt_is_rejected(tmp_path):
     out, _, _, _, label_space = _train_model(tmp_path)
     dropped_csv = tmp_path / "dropped.csv"
     # omit the first class -- an implicit "remove" attempt
-    pd.DataFrame(
-        {"key": label_space.keys[1:], "description": label_space.descriptions[1:]}
-    ).to_csv(dropped_csv, index=False)
+    pd.DataFrame({"key": label_space.keys[1:], "description": label_space.descriptions[1:]}).to_csv(
+        dropped_csv, index=False
+    )
 
     with pytest.raises(SystemExit) as exc:
         _run(
@@ -364,7 +364,10 @@ def test_update_provenance_recorded_and_carried_forward(tmp_path):
     out2 = str(tmp_path / "model_v2")
     new_classes_csv = tmp_path / "extra_class.csv"
     pd.DataFrame(
-        {"key": label_space.keys + ["EXTRA"], "description": label_space.descriptions + ["extra class"]}
+        {
+            "key": label_space.keys + ["EXTRA"],
+            "description": label_space.descriptions + ["extra class"],
+        }
     ).to_csv(new_classes_csv, index=False)
     _run(update_cli, ["update", "--model", out1, "--out", out2, "--classes", str(new_classes_csv)])
     with open(os.path.join(out2, "meta.json")) as fh:

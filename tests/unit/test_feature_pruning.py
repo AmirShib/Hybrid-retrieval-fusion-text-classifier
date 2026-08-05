@@ -102,7 +102,10 @@ class TestPruningParity:
         """The (item_id, candidate) pairs that survive selection must not move,
         no matter what's requested — pruning narrows columns, never rows."""
         baseline = _assemble(fenv, requested=None)
-        key = lambda df: set(zip(df["item_id"].tolist(), df["candidate"].tolist()))
+
+        def key(df):
+            return set(zip(df["item_id"].tolist(), df["candidate"].tolist()))
+
         base_keys = key(baseline)
         rng = random.Random(0)
         for _ in range(8):

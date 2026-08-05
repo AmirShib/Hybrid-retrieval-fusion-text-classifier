@@ -345,9 +345,7 @@ class LexicalRetrieverAdapter(LexicalRetriever):
         only the tokenization is shared."""
         ex = BM25Index(cfg.k1, cfg.b, max_df_ratio=cfg.bm25_max_df_ratio, **cfg.bm25_token_kwargs)
         ex.fit_from_counts(example_counts, example_vectorizer)
-        return cls(
-            ex, np.asarray(labels), desc_bm25, cfg.dense_chunk, cfg.bm25_max_block_elems
-        )
+        return cls(ex, np.asarray(labels), desc_bm25, cfg.dense_chunk, cfg.bm25_max_block_elems)
 
     @classmethod
     def build_with_shared_descriptions(
@@ -420,7 +418,9 @@ class LexicalRetrieverAdapter(LexicalRetriever):
     def from_state(
         cls, arrays: Dict[str, np.ndarray], meta: Dict[str, Any]
     ) -> "LexicalRetrieverAdapter":
-        ex_arrays = {k[len("examples_") :]: v for k, v in arrays.items() if k.startswith("examples_")}
+        ex_arrays = {
+            k[len("examples_") :]: v for k, v in arrays.items() if k.startswith("examples_")
+        }
         desc_arrays = {
             k[len("descriptions_") :]: v for k, v in arrays.items() if k.startswith("descriptions_")
         }
@@ -428,9 +428,7 @@ class LexicalRetrieverAdapter(LexicalRetriever):
         desc = BM25Index.from_state(desc_arrays, meta["descriptions"])
         # `.get`: a directory saved before T32 has no `max_block_elems` key;
         # absence must mean "unbounded", the byte-identical legacy behaviour.
-        return cls(
-            ex, arrays["example_labels"], desc, meta["k_chunk"], meta.get("max_block_elems")
-        )
+        return cls(ex, arrays["example_labels"], desc, meta["k_chunk"], meta.get("max_block_elems"))
 
 
 # ------------------------------------------------------------------- dense adapter
@@ -486,8 +484,10 @@ def _prototypes_and_freq(
     dim = emb.shape[1]
     labels = np.asarray(labels)
     n = labels.shape[0]
-    freq = np.bincount(labels, minlength=n_classes).astype(np.int64) if n else np.zeros(
-        n_classes, dtype=np.int64
+    freq = (
+        np.bincount(labels, minlength=n_classes).astype(np.int64)
+        if n
+        else np.zeros(n_classes, dtype=np.int64)
     )
     rows = np.repeat(labels, dim)
     cols = np.tile(np.arange(dim), n)

@@ -146,7 +146,14 @@ class TestTrainReport:
 
 class TestPersistence:
     def test_expected_files_exist(self, saved_dir):
-        for name in ("dense.npz", "lexical.npz", "lexical.json", "fusion.json", "calibrator.npz", "meta.json"):
+        for name in (
+            "dense.npz",
+            "lexical.npz",
+            "lexical.json",
+            "fusion.json",
+            "calibrator.npz",
+            "meta.json",
+        ):
             assert os.path.exists(os.path.join(saved_dir, name)), f"Missing {name}"
         assert os.path.isdir(os.path.join(saved_dir, "encoder"))
 
@@ -167,12 +174,16 @@ class TestPersistence:
         import pickle
 
         def _forbidden(*a, **kw):
-            raise AssertionError("pickle.load was called while loading a fresh (non-legacy) model dir")
+            raise AssertionError(
+                "pickle.load was called while loading a fresh (non-legacy) model dir"
+            )
 
         monkeypatch.setattr(pickle, "load", _forbidden)
         ArtifactRepository().load(saved_dir)  # must not raise
 
-    def test_legacy_lexical_pickle_fallback_loads_with_warning(self, saved_dir, loaded_artifacts, tmp_path, caplog):
+    def test_legacy_lexical_pickle_fallback_loads_with_warning(
+        self, saved_dir, loaded_artifacts, tmp_path, caplog
+    ):
         """A pre-T67 model dir has only lexical.pkl; ArtifactRepository.load must
         still work, with a warning pointing at the legacy artifact."""
         import logging

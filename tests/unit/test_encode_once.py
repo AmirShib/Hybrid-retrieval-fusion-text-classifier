@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 from text_classifier.config import EncoderConfig, FusionConfig, PipelineConfig, TrainingConfig
-from text_classifier.domain import LabeledItem, TextEncoder
+from text_classifier.domain import TextEncoder
 from text_classifier.application.training import TrainingPipeline
 from tests._doubles import HashingEncoder, make_synthetic
 

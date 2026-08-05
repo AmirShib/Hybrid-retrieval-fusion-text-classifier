@@ -240,9 +240,7 @@ class FeatureAssembler:
             )
         if frames:
             return pd.concat(frames, ignore_index=True)
-        return pd.DataFrame(
-            columns=_effective_names(providers, requested, signal_providers or ())
-        )
+        return pd.DataFrame(columns=_effective_names(providers, requested, signal_providers or ()))
 
     def _assemble_chunk(
         self,

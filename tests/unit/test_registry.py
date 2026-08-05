@@ -14,7 +14,12 @@ import numpy as np
 import pytest
 
 from text_classifier.config import CalibrationConfig, EncoderConfig, FusionConfig, RetrievalConfig
-from text_classifier.domain import ConfidenceCalibrator, DenseRetriever, FusionModel, LexicalRetriever
+from text_classifier.domain import (
+    ConfidenceCalibrator,
+    DenseRetriever,
+    FusionModel,
+    LexicalRetriever,
+)
 from text_classifier.infrastructure import (
     DenseRetrieverSpec,
     FusionSpec,
@@ -384,7 +389,9 @@ def test_dense_and_lexical_kind_selected_persisted_and_loaded_end_to_end(tmp_pat
     label_space, items = make_synthetic(n_classes=6, per_class=15, seed=5)
     cfg = PipelineConfig()
     cfg.encoder.kind = "hashing"
-    cfg.retrieval = RetrievalConfig(k_neighbors=10, dense_kind="echo-dense", lexical_kind="echo-bm25")
+    cfg.retrieval = RetrievalConfig(
+        k_neighbors=10, dense_kind="echo-dense", lexical_kind="echo-bm25"
+    )
     cfg.training = TrainingConfig(
         n_folds=3, random_state=0, target_precision=0.5, per_class_min_support=1
     )

@@ -9,6 +9,20 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 ## [Unreleased]
 
 ### Added
+- **Per-class calibration behind the `ConfidenceCalibrator` port (T45)** — a
+  `PerClassCalibrator` fits a separate inner calibrator (isotonic, platt, or
+  beta) per class, falling back to a single global inner calibrator for
+  classes whose out-of-fold support is below `min_support`. A raw score of
+  0.8 does not mean the same thing for a common class and a rare one; a
+  global curve averages the two and is wrong for both, and thresholds
+  (`AbstentionPolicy`) already go per-class — calibration was the remaining
+  global stage. Selected via `CalibrationConfig(kind="per-class", inner=...,
+  min_support=...)`; `ConfidenceCalibrator.fit`/`transform` both gained an
+  optional `classes=None` keyword so the existing isotonic/platt/beta
+  calibrators are unaffected when it's absent. Persists as a directory (a
+  manifest plus one file per class calibrator and one for the global),
+  registered in the same registry as the other calibrator kinds. Class-blind
+  callers (`classes=None`) reproduce the prior global-only behaviour exactly.
 - **Torch-optional install via extras (T63)** — `sentence-transformers` (and the
   torch it pulls in) moves out of core `dependencies` into an opt-in
   `sentence-transformers` extra: `pip install text-classifier[sentence-transformers]`.

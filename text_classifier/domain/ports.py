@@ -383,10 +383,14 @@ class ConfidenceCalibrator(ABC):
     it did before this parameter existed."""
 
     @abstractmethod
-    def fit(self, scores: np.ndarray, correct: np.ndarray, *, classes: Optional[np.ndarray] = None) -> None: ...
+    def fit(
+        self, scores: np.ndarray, correct: np.ndarray, *, classes: Optional[np.ndarray] = None
+    ) -> None: ...
 
     @abstractmethod
-    def transform(self, scores: np.ndarray, *, classes: Optional[np.ndarray] = None) -> np.ndarray: ...
+    def transform(
+        self, scores: np.ndarray, *, classes: Optional[np.ndarray] = None
+    ) -> np.ndarray: ...
 
     @abstractmethod
     def save(self, path: str) -> None: ...

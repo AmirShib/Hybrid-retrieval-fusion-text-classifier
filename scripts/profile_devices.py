@@ -224,7 +224,10 @@ def _profile_one_config(
     n_cols = len(cfg_feature_names(cfg))
 
     def _build_df():
-        data = {f"f{i}": np.random.default_rng(i).random(n_cand).astype(np.float32) for i in range(n_cols)}
+        data = {
+            f"f{i}": np.random.default_rng(i).random(n_cand).astype(np.float32)
+            for i in range(n_cols)
+        }
         return pd.DataFrame(data)
 
     _measure("8_dataframe_construction", _build_df)
@@ -271,7 +274,11 @@ def _profile_one_config(
     # assemble() does its own encode-free retrieval calls (stages 2-8 equivalent)
     # but not stage 1 (encode) or 9/10 (fusion/calibration, which happen after
     # assemble() returns) -- compare against that subset only.
-    comparable = sum(stage_times[s] for s in STAGES if s not in ("1_encode", "9_fusion_predict", "10_calibration_thresholds"))
+    comparable = sum(
+        stage_times[s]
+        for s in STAGES
+        if s not in ("1_encode", "9_fusion_predict", "10_calibration_thresholds")
+    )
 
     return {
         "status": "ok",
@@ -325,7 +332,11 @@ def run_grid(
             label_space, items = _build_dataset(n_items, n_classes, seed)
             cfg = PipelineConfig()
             cfg.retrieval = RetrievalConfig()
-            entry: Dict[str, Any] = {"n_items_requested": n_items, "n_classes": n_classes, "configs": {}}
+            entry: Dict[str, Any] = {
+                "n_items_requested": n_items,
+                "n_classes": n_classes,
+                "configs": {},
+            }
             for device in DEVICE_CONFIGS:
                 entry["configs"][device.name] = _profile_one_config(label_space, items, cfg, device)
             if oof_folds:
@@ -336,14 +347,21 @@ def run_grid(
 
 
 def _to_markdown(report: Dict[str, Any]) -> str:
-    lines = ["# Device profile (T83)", "", f"`cuda_available()` on this host: `{report['cuda_available']}`", ""]
+    lines = [
+        "# Device profile (T83)",
+        "",
+        f"`cuda_available()` on this host: `{report['cuda_available']}`",
+        "",
+    ]
     for entry in report["grid"]:
         lines.append(f"## n_items~{entry['n_items_requested']}, n_classes={entry['n_classes']}")
         for name, res in entry["configs"].items():
             if res["status"] == "skipped":
                 lines.append(f"- **{name}**: skipped ({res['reason']})")
                 continue
-            lines.append(f"- **{name}** (n_query={res['n_query']}, n_candidates={res['n_candidates']}):")
+            lines.append(
+                f"- **{name}** (n_query={res['n_query']}, n_candidates={res['n_candidates']}):"
+            )
             lines.append("")
             lines.append("  | stage | seconds |")
             lines.append("  |---|---|")
@@ -353,7 +371,9 @@ def _to_markdown(report: Dict[str, Any]) -> str:
             ratio = res["assemble_vs_comparable_stage_sum_ratio"]
             lines.append(
                 f"  - assemble() wall = {res['assemble_wall_seconds']:.4f}s; "
-                f"comparable stage-sum / assemble() wall = {ratio:.3f}" if ratio else ""
+                f"comparable stage-sum / assemble() wall = {ratio:.3f}"
+                if ratio
+                else ""
             )
             lines.append("")
         if "oof_timing" in entry:
@@ -367,10 +387,14 @@ def _to_markdown(report: Dict[str, Any]) -> str:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("--n-items", type=str, default="1000,10000,100000")
     p.add_argument("--n-classes", type=str, default="30,500,5000")
-    p.add_argument("--quick", action="store_true", help="small smoke grid, overrides --n-items/--n-classes")
+    p.add_argument(
+        "--quick", action="store_true", help="small smoke grid, overrides --n-items/--n-classes"
+    )
     p.add_argument("--oof-folds", type=int, default=3, help="0 disables the end-to-end OOF timing")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out-json", type=str, default="docs/device-profile.json")

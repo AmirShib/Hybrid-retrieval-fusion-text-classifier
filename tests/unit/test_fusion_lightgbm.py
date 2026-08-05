@@ -179,9 +179,7 @@ def test_auto_detected_gpu_falls_back_to_cpu_on_unsupported_build(monkeypatch, c
 
     import text_classifier.infrastructure.fusion as fusion_mod
 
-    monkeypatch.setattr(
-        fusion_mod, "resolve_device", lambda explicit: explicit or "cuda"
-    )
+    monkeypatch.setattr(fusion_mod, "resolve_device", lambda explicit: explicit or "cuda")
     X, y = _separable_xy(n=100)
     m = LightGBMFusionModel(dict(_FAST))
     with caplog.at_level(logging.WARNING):

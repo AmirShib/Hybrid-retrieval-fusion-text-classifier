@@ -120,9 +120,7 @@ class TrainingPipeline:
         # composed feature schema (core + provider columns). Populated when the
         # deployment index is built; the fusion/eval steps select X by this list.
         self._providers: List[FeatureProvider] = []
-        self._feature_names: List[str] = fusion_feature_names(
-            drop=self.cfg.fusion.drop_features
-        )
+        self._feature_names: List[str] = fusion_feature_names(drop=self.cfg.fusion.drop_features)
         # T34 phase 2: the SignalProviders that ship in the deployed model,
         # built once (on all training data) by `_build_deployment_index` and
         # reused by `_featurize_external`/the returned `DeployedArtifacts`,
@@ -542,7 +540,12 @@ class TrainingPipeline:
             if shared_emb is not None:
                 assert shared_desc_emb is not None
                 dense = DenseRetrieverAdapter.build_from_embeddings(
-                    shared_emb[tr], y[tr], shared_desc_emb, label_space, self.cfg.retrieval, self._ops
+                    shared_emb[tr],
+                    y[tr],
+                    shared_desc_emb,
+                    label_space,
+                    self.cfg.retrieval,
+                    self._ops,
                 )
             else:
                 dense = build_dense_retriever(

@@ -320,7 +320,9 @@ def build_dense_retriever(
     """Build the dense retriever named by ``cfg.dense_kind``. Signature matches
     ``DenseRetrieverAdapter.build`` exactly, so this is a drop-in for any
     ordinary (non-T88-optimized) dense-retriever build site."""
-    return dense_retriever_spec(cfg.dense_kind).build(encoder, texts, labels, label_space, cfg, array_ops)
+    return dense_retriever_spec(cfg.dense_kind).build(
+        encoder, texts, labels, label_space, cfg, array_ops
+    )
 
 
 def build_lexical_retriever(

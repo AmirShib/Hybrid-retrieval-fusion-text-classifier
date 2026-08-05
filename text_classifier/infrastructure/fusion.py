@@ -48,7 +48,9 @@ def _load_npz(path: str) -> Dict[str, np.ndarray]:
         return dict(np.load(fh))
 
 
-def _isotonic_from_breakpoints(x_thresholds: np.ndarray, y_thresholds: np.ndarray) -> IsotonicRegression:
+def _isotonic_from_breakpoints(
+    x_thresholds: np.ndarray, y_thresholds: np.ndarray
+) -> IsotonicRegression:
     """Rebuild a fitted IsotonicRegression from its own breakpoints: fitting on
     the breakpoints reproduces the interpolant exactly, so this is an exact
     (not approximate) reload."""
@@ -309,7 +311,9 @@ class IsotonicCalibrator(ConfidenceCalibrator):
     def __init__(self):
         self._iso = IsotonicRegression(out_of_bounds="clip")
 
-    def fit(self, scores: np.ndarray, correct: np.ndarray, *, classes: Optional[np.ndarray] = None) -> None:
+    def fit(
+        self, scores: np.ndarray, correct: np.ndarray, *, classes: Optional[np.ndarray] = None
+    ) -> None:
         self._iso.fit(np.asarray(scores, dtype=np.float64), np.asarray(correct, dtype=np.float64))
 
     def transform(self, scores: np.ndarray, *, classes: Optional[np.ndarray] = None) -> np.ndarray:
@@ -335,7 +339,9 @@ class IsotonicCalibrator(ConfidenceCalibrator):
             with open(legacy, "rb") as fh:
                 obj._iso = pickle.load(fh)
             return obj
-        raise FileNotFoundError(f"calibrator artifact not found: {path!r} (legacy {legacy!r} also missing)")
+        raise FileNotFoundError(
+            f"calibrator artifact not found: {path!r} (legacy {legacy!r} also missing)"
+        )
 
 
 class _ParametricCalibrator(ConfidenceCalibrator):
@@ -356,7 +362,9 @@ class _ParametricCalibrator(ConfidenceCalibrator):
     def _features(self, scores: np.ndarray) -> np.ndarray:  # pragma: no cover - abstract
         raise NotImplementedError
 
-    def fit(self, scores: np.ndarray, correct: np.ndarray, *, classes: Optional[np.ndarray] = None) -> None:
+    def fit(
+        self, scores: np.ndarray, correct: np.ndarray, *, classes: Optional[np.ndarray] = None
+    ) -> None:
         y = np.asarray(correct)
         if np.unique(y).size < 2:
             # Only one class observed → no logistic fit is possible; the honest
@@ -419,7 +427,9 @@ class _ParametricCalibrator(ConfidenceCalibrator):
             obj._lr = state["lr"]
             obj._constant = state["constant"]
             return obj
-        raise FileNotFoundError(f"calibrator artifact not found: {path!r} (legacy {legacy!r} also missing)")
+        raise FileNotFoundError(
+            f"calibrator artifact not found: {path!r} (legacy {legacy!r} also missing)"
+        )
 
 
 class PlattCalibrator(_ParametricCalibrator):
@@ -482,7 +492,9 @@ class PerClassCalibrator(ConfidenceCalibrator):
         self._global: ConfidenceCalibrator = self._INNER[inner]()
         self._by_class: Dict[int, ConfidenceCalibrator] = {}
 
-    def fit(self, scores: np.ndarray, correct: np.ndarray, *, classes: Optional[np.ndarray] = None) -> None:
+    def fit(
+        self, scores: np.ndarray, correct: np.ndarray, *, classes: Optional[np.ndarray] = None
+    ) -> None:
         scores = np.asarray(scores, dtype=np.float64)
         correct = np.asarray(correct)
         self._global = self._INNER[self._inner_kind]()
