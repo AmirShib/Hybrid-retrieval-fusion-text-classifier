@@ -1,6 +1,6 @@
 # T45 — Per-class calibration behind the `ConfidenceCalibrator` port
 
-status: todo
+status: done
 tier: 4
 depends_on: T42
 

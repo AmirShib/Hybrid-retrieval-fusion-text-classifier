@@ -408,11 +408,16 @@ class TestCalibratorBackends:
     """T42 — the whole pipeline trains/saves/loads/predicts over multiple
     calibrator backends selected purely by config, fully offline."""
 
-    @pytest.mark.parametrize("calibrator_kind", ["isotonic", "platt", "beta"])
+    @pytest.mark.parametrize("calibrator_kind", ["isotonic", "platt", "beta", "per-class"])
     def test_full_pipeline_round_trip(self, calibrator_kind, tmp_path):
         label_space, items = make_synthetic(n_classes=6, per_class=15, seed=17)
         cfg = _e2e_cfg()  # encoder kind="hashing", xgboost fusion
-        cfg.calibration = CalibrationConfig(kind=calibrator_kind)
+        if calibrator_kind == "per-class":
+            cfg.calibration = CalibrationConfig(
+                kind=calibrator_kind, params={"inner": "beta", "min_support": 3}
+            )
+        else:
+            cfg.calibration = CalibrationConfig(kind=calibrator_kind)
 
         enc = HashingEncoder(dim=64)
         artifacts, report = TrainingPipeline(cfg, shared_encoder=enc).run(items, label_space)

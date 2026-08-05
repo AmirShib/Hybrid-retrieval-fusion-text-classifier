@@ -39,7 +39,7 @@ class _NoContribFusion(_SumFusion):
 
 
 class _IdentityCalibrator:
-    def transform(self, raw: np.ndarray) -> np.ndarray:
+    def transform(self, raw: np.ndarray, *, classes=None) -> np.ndarray:
         return raw
 
 

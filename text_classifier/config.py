@@ -151,7 +151,14 @@ class FusionConfig:
 
 @dataclass
 class CalibrationConfig:
-    kind: str = "isotonic"  # registry key: "isotonic" | "platt" | "beta"
+    # registry key: "isotonic" | "platt" | "beta" | "per-class"
+    kind: str = "isotonic"
+    # "per-class" reads params["inner"] (isotonic|platt|beta, default "beta" --
+    # a per-class slice of the calibration fold is small, which is where
+    # isotonic overfits worst) and params["min_support"] (default 50): classes
+    # with fewer than that many calibration rows fall back to a global curve
+    # fit over all rows, mirroring AbstentionPolicy's per-class-with-global-
+    # fallback thresholds.
     params: Dict[str, Any] = field(default_factory=dict)
 
 

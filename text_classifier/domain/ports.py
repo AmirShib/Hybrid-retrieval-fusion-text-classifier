@@ -374,13 +374,19 @@ class FusionModel(ABC):
 
 
 class ConfidenceCalibrator(ABC):
-    """Maps raw fusion scores onto calibrated P(correct)."""
+    """Maps raw fusion scores onto calibrated P(correct).
+
+    ``classes`` (optional, ``(n,)`` int, one candidate class index per score) lets
+    a class-aware backend (e.g. ``PerClassCalibrator``) fit/apply a per-class
+    curve. ``None`` (the default) is the class-blind path every existing
+    calibrator implements; a backend that ignores ``classes`` behaves exactly as
+    it did before this parameter existed."""
 
     @abstractmethod
-    def fit(self, scores: np.ndarray, correct: np.ndarray) -> None: ...
+    def fit(self, scores: np.ndarray, correct: np.ndarray, *, classes: Optional[np.ndarray] = None) -> None: ...
 
     @abstractmethod
-    def transform(self, scores: np.ndarray) -> np.ndarray: ...
+    def transform(self, scores: np.ndarray, *, classes: Optional[np.ndarray] = None) -> np.ndarray: ...
 
     @abstractmethod
     def save(self, path: str) -> None: ...

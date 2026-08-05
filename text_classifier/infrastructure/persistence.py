@@ -13,6 +13,7 @@ Layout:
     <dir>/fusion.json      XGBoost model
     <dir>/calibrator.npz   isotonic calibrator breakpoints (kind == "isotonic")
     <dir>/calibrator.json  parametric calibrator coefficients (kind in platt|beta)
+    <dir>/calibrator_per_class/  manifest + one inner calibrator per class (kind == "per-class")
     <dir>/meta.json        label space, thresholds, config, feature schema
     <dir>/corpus.jsonl.gz  optional: raw training corpus (text+label), see TrainingConfig.store_corpus
 """

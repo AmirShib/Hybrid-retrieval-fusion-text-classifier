@@ -94,7 +94,7 @@ def fit_calibration_and_abstention(
     names = list(feature_names)
     raw = fusion.predict_proba(ca[names].to_numpy(np.float32))
     calibrator = build_calibrator(calibration_cfg)
-    calibrator.fit(raw, ca["is_true"].to_numpy())
+    calibrator.fit(raw, ca["is_true"].to_numpy(), classes=ca["candidate"].to_numpy())
 
     decided = top_per_item(add_confidence(ca, fusion, calibrator, names))
     global_thr = ThresholdTuner.threshold_for_precision(

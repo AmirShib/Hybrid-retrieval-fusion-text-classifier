@@ -309,10 +309,10 @@ class IsotonicCalibrator(ConfidenceCalibrator):
     def __init__(self):
         self._iso = IsotonicRegression(out_of_bounds="clip")
 
-    def fit(self, scores: np.ndarray, correct: np.ndarray) -> None:
+    def fit(self, scores: np.ndarray, correct: np.ndarray, *, classes: Optional[np.ndarray] = None) -> None:
         self._iso.fit(np.asarray(scores, dtype=np.float64), np.asarray(correct, dtype=np.float64))
 
-    def transform(self, scores: np.ndarray) -> np.ndarray:
+    def transform(self, scores: np.ndarray, *, classes: Optional[np.ndarray] = None) -> np.ndarray:
         return self._iso.transform(np.asarray(scores, dtype=np.float64))
 
     def save(self, path: str) -> None:
@@ -356,7 +356,7 @@ class _ParametricCalibrator(ConfidenceCalibrator):
     def _features(self, scores: np.ndarray) -> np.ndarray:  # pragma: no cover - abstract
         raise NotImplementedError
 
-    def fit(self, scores: np.ndarray, correct: np.ndarray) -> None:
+    def fit(self, scores: np.ndarray, correct: np.ndarray, *, classes: Optional[np.ndarray] = None) -> None:
         y = np.asarray(correct)
         if np.unique(y).size < 2:
             # Only one class observed → no logistic fit is possible; the honest
@@ -368,7 +368,7 @@ class _ParametricCalibrator(ConfidenceCalibrator):
         self._lr.fit(self._features(scores), y)
         self._constant = None
 
-    def transform(self, scores: np.ndarray) -> np.ndarray:
+    def transform(self, scores: np.ndarray, *, classes: Optional[np.ndarray] = None) -> np.ndarray:
         scores = np.asarray(scores, dtype=np.float64)
         if self._constant is not None:
             return np.full(scores.shape, self._constant, dtype=np.float64)
@@ -450,3 +450,88 @@ class BetaCalibrator(_ParametricCalibrator):
         x = np.clip(np.asarray(scores, dtype=np.float64), self._EPS, 1.0 - self._EPS)
         # -log1p(-x) == -ln(1 - x), evaluated stably near x = 0.
         return np.column_stack([np.log(x), -np.log1p(-x)])
+
+
+class PerClassCalibrator(ConfidenceCalibrator):
+    """A dedicated inner calibrator (isotonic/platt/beta) per class, with a
+    global fallback for classes whose calibration support is too small to
+    trust — the calibration-layer analogue of ``AbstentionPolicy``'s
+    per-class-with-global-fallback thresholds.
+
+    ``classes=None`` (fit or transform) is the class-blind path: fit trains
+    only the global inner calibrator, and transform returns the global curve
+    for every row, so this backend is a drop-in for any class-blind caller.
+    """
+
+    _INNER: Dict[str, Any] = {
+        "isotonic": IsotonicCalibrator,
+        "platt": PlattCalibrator,
+        "beta": BetaCalibrator,
+    }
+
+    _MANIFEST = "manifest.json"
+    _GLOBAL = "global"
+
+    def __init__(self, inner: str = "beta", min_support: int = 50) -> None:
+        if inner not in self._INNER:
+            raise ValueError(
+                f"unknown inner calibrator kind {inner!r}; expected one of {sorted(self._INNER)}"
+            )
+        self._inner_kind = inner
+        self._min_support = min_support
+        self._global: ConfidenceCalibrator = self._INNER[inner]()
+        self._by_class: Dict[int, ConfidenceCalibrator] = {}
+
+    def fit(self, scores: np.ndarray, correct: np.ndarray, *, classes: Optional[np.ndarray] = None) -> None:
+        scores = np.asarray(scores, dtype=np.float64)
+        correct = np.asarray(correct)
+        self._global = self._INNER[self._inner_kind]()
+        self._global.fit(scores, correct)
+        self._by_class = {}
+        if classes is None:
+            return
+        classes = np.asarray(classes)
+        for cls in np.unique(classes):
+            mask = classes == cls
+            if int(mask.sum()) < self._min_support:
+                continue
+            inner = self._INNER[self._inner_kind]()
+            inner.fit(scores[mask], correct[mask])
+            self._by_class[int(cls)] = inner
+
+    def transform(self, scores: np.ndarray, *, classes: Optional[np.ndarray] = None) -> np.ndarray:
+        scores = np.asarray(scores, dtype=np.float64)
+        out = np.array(self._global.transform(scores), dtype=np.float64, copy=True)
+        if classes is None or not self._by_class:
+            return out
+        classes = np.asarray(classes)
+        for cls, inner in self._by_class.items():
+            mask = classes == cls
+            if mask.any():
+                out[mask] = inner.transform(scores[mask])
+        return out
+
+    def save(self, path: str) -> None:
+        os.makedirs(path, exist_ok=True)
+        manifest = {
+            "inner": self._inner_kind,
+            "min_support": self._min_support,
+            "classes": sorted(self._by_class),
+        }
+        with open(os.path.join(path, self._MANIFEST), "w") as fh:
+            json.dump(manifest, fh)
+        self._global.save(os.path.join(path, self._GLOBAL))
+        for cls, inner in self._by_class.items():
+            inner.save(os.path.join(path, f"class_{cls}"))
+
+    @classmethod
+    def load(cls, path: str) -> "PerClassCalibrator":
+        with open(os.path.join(path, cls._MANIFEST)) as fh:
+            manifest = json.load(fh)
+        obj = cls(inner=manifest["inner"], min_support=manifest["min_support"])
+        inner_cls = cls._INNER[obj._inner_kind]
+        obj._global = inner_cls.load(os.path.join(path, cls._GLOBAL))
+        obj._by_class = {
+            int(c): inner_cls.load(os.path.join(path, f"class_{c}")) for c in manifest["classes"]
+        }
+        return obj

@@ -61,6 +61,7 @@ from .fusion import (
     BetaCalibrator,
     IsotonicCalibrator,
     LightGBMFusionModel,
+    PerClassCalibrator,
     PlattCalibrator,
     XGBoostFusionModel,
     XGBRankerFusionModel,
@@ -481,6 +482,22 @@ register_calibrator(
         build=lambda cfg: BetaCalibrator(),
         filename="calibrator.json",
         load=BetaCalibrator.load,
+    ),
+)
+
+register_calibrator(
+    "per-class",
+    CalibratorSpec(
+        # `params` (see CalibrationConfig): "inner" (isotonic|platt|beta,
+        # default "beta") selects the per-class inner calibrator kind;
+        # "min_support" (default 50) is the minimum row count a class needs
+        # before it gets its own curve rather than falling back to global.
+        build=lambda cfg: PerClassCalibrator(
+            inner=cfg.params.get("inner", "beta"),
+            min_support=cfg.params.get("min_support", 50),
+        ),
+        filename="calibrator_per_class",  # a directory: manifest + one inner calibrator per class
+        load=PerClassCalibrator.load,
     ),
 )
 
