@@ -19,7 +19,7 @@ already shipped, and — if you need it — zero internet access at deploy time.
 ## Quickstart
 
 ```bash
-pip install .
+pip install .[sentence-transformers]   # or plain `pip install .` + --encoder-kind tfidf below
 text-classifier-train --items items.csv --classes classes.csv --out model_dir/
 text-classifier-infer --model model_dir/ --input new_items.csv --output preds.csv
 ```
@@ -103,10 +103,20 @@ to support one.
 ## Install
 
 ```bash
-pip install .                 # core (includes sentence-transformers)
-pip install .[lightgbm]       # + optional LightGBM fusion backend
-pip install .[test]           # + pytest for the test suite
+pip install .                              # core: torch-free (numpy/pandas/scipy/sklearn/xgboost)
+pip install .[sentence-transformers]       # + the semantic bi-encoder (pulls in torch)
+pip install .[lightgbm]                    # + optional LightGBM fusion backend
+pip install .[test]                        # + pytest for the test suite
 ```
+
+Core `pip install .` is deliberately torch-free: it trains and infers with the
+`tfidf` or `hashing` encoder backends (`--encoder-kind tfidf` /
+`--encoder-kind hashing`), which is what an air-gapped or lightweight host
+gets without sourcing a single torch wheel it may never use.
+`PipelineConfig`'s default encoder kind is still `sentence-transformers` (the
+best out-of-the-box quality), so training with the CLI's default settings needs
+the extra — selecting it without the extra installed raises a clear error
+pointing back at this section rather than a raw `ImportError`.
 
 Installing exposes three console commands — `text-classifier-train`,
 `text-classifier-infer`, and `text-classifier-eval`. From a source checkout you
@@ -157,8 +167,14 @@ pip install --no-index --find-links wheelhouse/ --no-deps text-classifier
 **Refresh policy.** The lock is refreshed deliberately, never implicitly:
 
 ```bash
-uv pip compile pyproject.toml --generate-hashes --python-version 3.11 -o requirements.lock
+uv pip compile pyproject.toml --extra sentence-transformers --generate-hashes \
+    --python-version 3.11 --python-platform x86_64-unknown-linux-gnu -o requirements.lock
 ```
+
+(`--extra sentence-transformers` pulls the semantic encoder's torch/sentence-transformers
+stack into the lock even though it's no longer a core dependency — see below.
+`--python-platform` pins the target to the reference platform regardless of which
+OS you run the refresh from.)
 
 then re-run the test suite and the quality benchmark before committing the
 diff. Heavy ML wheels (torch, xgboost) therefore only change versions when

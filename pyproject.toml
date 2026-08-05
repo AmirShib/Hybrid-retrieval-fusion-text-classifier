@@ -31,7 +31,6 @@ dependencies = [
     "scipy>=1.9",
     "scikit-learn>=1.1",
     "xgboost>=1.7",
-    "sentence-transformers>=2.2",
 ]
 
 [project.optional-dependencies]
@@ -42,6 +41,10 @@ dev = ["ruff==0.15.8", "mypy==1.19.1", "pre-commit"]
 # dependency: air-gapped hosts may not have it, and the suite skips its tests when
 # it is absent.
 lightgbm = ["lightgbm"]
+# The semantic (bi-encoder) TextEncoder backend, encoder_kind="sentence-transformers"
+# (the pipeline default). Pulls in torch. Core installs stay torch-free and can
+# still train/infer with --encoder-kind tfidf or --encoder-kind hashing (T63).
+sentence-transformers = ["sentence-transformers>=2.2"]
 
 [project.urls]
 Repository = "https://github.com/amirshib/hybrid-retrieval-fusion-text-classifier"

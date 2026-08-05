@@ -1,6 +1,6 @@
 # T63 — Torch-optional install via extras
 
-status: todo
+status: done
 tier: 6
 depends_on: T24, T60
 
@@ -37,3 +37,16 @@ lightweight user is still forced to source torch wheels they will never use.
 ## Note
 This deliberately changes the default install footprint, so it was kept separate
 from T60 rather than bundled into the packaging pass.
+
+## Resolution (2026-08-05)
+Kept `sentence-transformers` as the default encoder *kind* (best out-of-the-box
+quality) but moved the package to an opt-in extra. `EncoderConfig.kind` still
+defaults to `"sentence-transformers"`; selecting it without the extra now raises
+a clear `ImportError` via `encoder.py::_require_sentence_transformers`, used at
+`SentenceTransformerEncoder.load` and `train_encoder` (the two public entry
+points sentence_transformers imports are reachable from). `requirements.lock`
+regenerated with `--extra sentence-transformers --python-platform
+x86_64-unknown-linux-gnu` (the platform flag now pinned explicitly so a refresh
+from a non-Linux dev machine can't silently drift the reference platform — see
+README). CI: added `core-install-torch-free` and `sentence-transformers-extra`
+jobs. Tests: `tests/unit/test_encoder_missing_extra.py`.

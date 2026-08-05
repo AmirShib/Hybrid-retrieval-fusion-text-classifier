@@ -44,6 +44,27 @@ if TYPE_CHECKING:  # torch-free at runtime; the type is only for checkers
 logger = logging.getLogger(__name__)
 
 
+def _require_sentence_transformers() -> Any:
+    """Import ``sentence_transformers``, or raise a clear, actionable error.
+
+    ``sentence-transformers`` (and the torch it pulls in) lives behind the
+    ``sentence-transformers`` extra, not core ``dependencies`` (T63) — an
+    air-gapped or lightweight install may not have it. A bare ``ImportError``
+    deep in a training run is unhelpful; this points at the fix.
+    """
+    try:
+        import sentence_transformers
+    except ImportError as exc:
+        raise ImportError(
+            "encoder kind 'sentence-transformers' requires the 'sentence-transformers' "
+            "extra, which is not installed. Install it with:\n"
+            "    pip install text-classifier[sentence-transformers]\n"
+            "Or use a torch-free encoder instead: --encoder-kind tfidf (corpus-fitted) "
+            "or --encoder-kind hashing (dependency-free, non-semantic)."
+        ) from exc
+    return sentence_transformers
+
+
 def _encode_options(config: Optional[EncoderConfig]) -> Dict[str, Any]:
     """Extract the encode-time settings an ``EncoderConfig`` carries, as the
     keyword arguments ``SentenceTransformerEncoder`` accepts."""
@@ -119,7 +140,7 @@ class SentenceTransformerEncoder(TextEncoder):
         config: Optional[EncoderConfig] = None,
         **kwargs,
     ) -> "SentenceTransformerEncoder":
-        from sentence_transformers import SentenceTransformer
+        SentenceTransformer = _require_sentence_transformers().SentenceTransformer
 
         # device=None lets SentenceTransformer do its own auto-detection (which,
         # in current sentence-transformers, checks MPS too); resolve_device here
@@ -544,7 +565,8 @@ def train_encoder(
     gradient is still in-fold, so epoch selection never sees data the encoder was
     not entitled to, and the rows the fusion model trains on are untouched.
     """
-    from sentence_transformers import InputExample, SentenceTransformer, losses  # type: ignore[attr-defined]
+    st = _require_sentence_transformers()
+    InputExample, SentenceTransformer, losses = st.InputExample, st.SentenceTransformer, st.losses
     from sentence_transformers.datasets import NoDuplicatesDataLoader
 
     items = list(items)

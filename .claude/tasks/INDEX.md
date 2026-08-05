@@ -23,11 +23,11 @@ Tier 2's remaining item is T29 (plugin discovery), which unblocks cross-host
 custom backends.** Tier 3 (T30–T35) is the active feature tier; T30 and T35 are done,
 T31–T34 remain. Tier 4 remains stubs
 except T41/T42/T44 (done). **Tier 6 is the packaging / production-readiness
-tier**: T60–T62, T64 (release process + project hygiene), and T65 (top-k
-suggestions) and T67 (pickle-free artifacts) are done; T63, T69 remain and T66/T68 are in-review — T63
-(torch-optional install) is the priority item, it closes the gap between the
-README's air-gapped/torch-free claim and what `pip install .` actually
-delivers.
+tier**: T60–T62, T63 (torch-optional install), T64 (release process + project
+hygiene), and T65 (top-k suggestions) and T67 (pickle-free artifacts) are done;
+T69 remains and T66/T68 are in-review. T63 closed the gap between the README's
+air-gapped/torch-free claim and what `pip install .` actually delivers, and
+was promoted to a hard T85 prerequisite (Tier 8) — done 2026-08-05.
 Tier 7's T74 (`--config`) is done — the cheapest unlock in the backlog; T75
 (DataFrame API + streaming) remains.
 
@@ -136,7 +136,7 @@ loading a shipped model dir must not execute code).
 | T60 | Installable distribution + CLI ergonomics (console scripts, packaged offline encoder/datasets, friendly IO, py.typed, wheel-smoke CI) | done | T23–T25 |
 | T61 | Evaluation metrics + persisted evaluation.json/model_card + `eval` CLI          | done   | T07          |
 | T62 | Package version provenance (`__version__`, recorded in meta.json)               | done   | T07          |
-| T63 | Torch-optional install via extras (core torch-free) — **now blocks T85**         | todo   | T24, T60     |
+| T63 | Torch-optional install via extras (core torch-free) — **unblocks T85**           | done   | T24, T60     |
 | T64 | Release process + project hygiene (CHANGELOG/CONTRIBUTING/SECURITY, versioning) | done   | T60          |
 | T65 | Top-k suggestions: populate `runner_up_key` + `--top-k` in the infer CLI        | done   | T30          |
 | T66 | Re-tune calibration + abstention thresholds on a trained model (tune CLI)       | in-review | T61       |

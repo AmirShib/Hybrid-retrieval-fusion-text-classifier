@@ -9,6 +9,20 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 ## [Unreleased]
 
 ### Added
+- **Torch-optional install via extras (T63)** — `sentence-transformers` (and the
+  torch it pulls in) moves out of core `dependencies` into an opt-in
+  `sentence-transformers` extra: `pip install text-classifier[sentence-transformers]`.
+  Plain `pip install text-classifier` stays torch-free and trains/infers with
+  `--encoder-kind tfidf` or `--encoder-kind hashing`. The default encoder kind
+  stays `sentence-transformers` for out-of-the-box quality; selecting it
+  without the extra installed now raises a clear, actionable `ImportError`
+  (pointing at the extra and the torch-free alternatives) instead of failing
+  deep in the pipeline. `requirements.lock` is regenerated with
+  `--extra sentence-transformers --python-platform x86_64-unknown-linux-gnu` so
+  the air-gapped bundle is unaffected. CI gained two jobs: one asserting the
+  core install has no torch and fails clearly on the sentence-transformers
+  kind, one asserting the extra actually installs torch and the suite stays
+  green with it present.
 - **BM25 at scale: bounded memory and throughput (T32)** — four independent
   fixes to the lexical retrieval path:
   - **Tokenize/build once per training run, not once per fold.** The example
