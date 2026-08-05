@@ -59,7 +59,7 @@ def _train_model(tmp_path, target_precision="0.5"):
     """Train a model on one half of a synthetic generation; return
     (model_dir, train_items_csv, tune_items_csv) where the tune set is the
     disjoint other half (same classes/vocabulary, different concrete items)."""
-    label_space, items = make_synthetic(n_classes=4, per_class=24, seed=23)
+    label_space, items = make_synthetic(n_classes=4, per_class=24, seed=3)
     train_items, tune_items = _split_items(items)
 
     items_csv = _write_items_csv(tmp_path / "items.csv", train_items)
