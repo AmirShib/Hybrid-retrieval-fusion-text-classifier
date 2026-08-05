@@ -21,8 +21,12 @@ anything about it.
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Mapping, Optional, Sequence, TypeVar
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, TypeVar
+
+import numpy as np
 
 from ..config import (
     CalibrationConfig,
@@ -30,15 +34,20 @@ from ..config import (
     FeatureProviderConfig,
     FeaturesConfig,
     FusionConfig,
+    RetrievalConfig,
 )
 from ..domain import (
+    ArrayOps,
     ConfidenceCalibrator,
+    DenseRetriever,
     FeatureProvider,
     FusionModel,
     LabeledItem,
     LabelSpace,
+    LexicalRetriever,
     TextEncoder,
 )
+from .array_ops import NumpyArrayOps
 from .encoder import (
     HashingEncoder,
     SentenceTransformerEncoder,
@@ -55,6 +64,7 @@ from .fusion import (
     XGBoostFusionModel,
     XGBRankerFusionModel,
 )
+from .retrieval import DenseRetrieverAdapter, LexicalRetrieverAdapter
 
 
 # --------------------------------------------------------------------------- specs
@@ -103,11 +113,53 @@ class FeatureProviderSpec:
     load: Callable[[str, FeatureProviderConfig], FeatureProvider]
 
 
+@dataclass(frozen=True)
+class DenseRetrieverSpec:
+    """How to build/persist a ``DenseRetriever`` (T34 phase 1). ``build``'s
+    signature matches ``DenseRetrieverAdapter.build`` exactly (encoder, texts,
+    labels, label_space, cfg, array_ops); ``load`` receives the *model
+    directory* plus the ``RetrievalConfig`` (for e.g. the persisted chunk size),
+    mirroring ``EncoderSpec``'s directory-based load so a future backend that
+    needs several files has somewhere to put them."""
+
+    build: Callable[
+        [TextEncoder, Sequence[str], np.ndarray, LabelSpace, RetrievalConfig, Optional[ArrayOps]],
+        DenseRetriever,
+    ]
+    filename: str
+    load: Callable[[str, RetrievalConfig], DenseRetriever]
+
+
+@dataclass(frozen=True)
+class LexicalRetrieverSpec:
+    """How to build/persist a ``LexicalRetriever``. ``build``'s signature matches
+    ``LexicalRetrieverAdapter.build`` (texts, labels, label_space, cfg). ``load``
+    receives the *model directory* (not a single file path) since the built-in
+    BM25 backend already manages two files (``lexical.npz`` + ``lexical.json``);
+    a directory-based load keeps that multi-file layout un-special-cased."""
+
+    build: Callable[[Sequence[str], np.ndarray, LabelSpace, RetrievalConfig], LexicalRetriever]
+    filename: str
+    load: Callable[[str], LexicalRetriever]
+
+
+@dataclass(frozen=True)
+class ArrayOpsSpec:
+    """How to build an ``ArrayOps`` backend. Unlike the other specs there is
+    nothing to persist: the backend is a pure execution choice (T84), never a
+    property of a saved model directory, so there is no ``filename``/``load``."""
+
+    build: Callable[[], ArrayOps]
+
+
 # --------------------------------------------------------------------------- maps
 _ENCODERS: Dict[str, EncoderSpec] = {}
 _FUSIONS: Dict[str, FusionSpec] = {}
 _CALIBRATORS: Dict[str, CalibratorSpec] = {}
 _FEATURE_PROVIDERS: Dict[str, FeatureProviderSpec] = {}
+_ARRAY_OPS: Dict[str, ArrayOpsSpec] = {}
+_DENSE_RETRIEVERS: Dict[str, DenseRetrieverSpec] = {}
+_LEXICAL_RETRIEVERS: Dict[str, LexicalRetrieverSpec] = {}
 
 _T = TypeVar("_T")
 
@@ -126,6 +178,18 @@ def register_calibrator(name: str, spec: CalibratorSpec) -> None:
 
 def register_feature_provider(name: str, spec: FeatureProviderSpec) -> None:
     _FEATURE_PROVIDERS[name] = spec
+
+
+def register_array_ops(name: str, spec: ArrayOpsSpec) -> None:
+    _ARRAY_OPS[name] = spec
+
+
+def register_dense_retriever(name: str, spec: DenseRetrieverSpec) -> None:
+    _DENSE_RETRIEVERS[name] = spec
+
+
+def register_lexical_retriever(name: str, spec: LexicalRetrieverSpec) -> None:
+    _LEXICAL_RETRIEVERS[name] = spec
 
 
 def _lookup(registry: Mapping[str, _T], name: str, what: str) -> _T:
@@ -152,6 +216,22 @@ def calibrator_spec(kind: str) -> CalibratorSpec:
 
 def feature_provider_spec(kind: str) -> FeatureProviderSpec:
     return _lookup(_FEATURE_PROVIDERS, kind, "feature provider")
+
+
+def array_ops_spec(kind: str) -> ArrayOpsSpec:
+    return _lookup(_ARRAY_OPS, kind, "array ops")
+
+
+def registered_array_ops_kinds() -> List[str]:
+    return sorted(_ARRAY_OPS)
+
+
+def dense_retriever_spec(kind: str) -> DenseRetrieverSpec:
+    return _lookup(_DENSE_RETRIEVERS, kind, "dense retriever")
+
+
+def lexical_retriever_spec(kind: str) -> LexicalRetrieverSpec:
+    return _lookup(_LEXICAL_RETRIEVERS, kind, "lexical retriever")
 
 
 # ------------------------------------------------------------------- factories
@@ -189,6 +269,35 @@ def build_feature_providers(config: FeaturesConfig) -> List[FeatureProvider]:
     The caller fits each provider (per fold for the OOF loop; on all data for the
     deployment index)."""
     return [feature_provider_spec(pc.kind).build(pc) for pc in config.providers]
+
+
+def build_array_ops(kind: str) -> ArrayOps:
+    return array_ops_spec(kind).build()
+
+
+def build_dense_retriever(
+    cfg: RetrievalConfig,
+    encoder: TextEncoder,
+    texts: Sequence[str],
+    labels: np.ndarray,
+    label_space: LabelSpace,
+    array_ops: Optional[ArrayOps] = None,
+) -> DenseRetriever:
+    """Build the dense retriever named by ``cfg.dense_kind``. Signature matches
+    ``DenseRetrieverAdapter.build`` exactly, so this is a drop-in for any
+    ordinary (non-T88-optimized) dense-retriever build site."""
+    return dense_retriever_spec(cfg.dense_kind).build(encoder, texts, labels, label_space, cfg, array_ops)
+
+
+def build_lexical_retriever(
+    cfg: RetrievalConfig,
+    texts: Sequence[str],
+    labels: np.ndarray,
+    label_space: LabelSpace,
+) -> LexicalRetriever:
+    """Build the lexical retriever named by ``cfg.lexical_kind``. Signature
+    matches ``LexicalRetrieverAdapter.build`` exactly."""
+    return lexical_retriever_spec(cfg.lexical_kind).build(texts, labels, label_space, cfg)
 
 
 # ----------------------------------------------------------------- built-ins
@@ -282,6 +391,39 @@ register_calibrator(
         build=lambda cfg: BetaCalibrator(),
         filename="calibrator.json",
         load=BetaCalibrator.load,
+    ),
+)
+
+register_array_ops("numpy", ArrayOpsSpec(build=lambda: NumpyArrayOps()))
+
+
+def _load_dense_exact(directory: str, cfg: RetrievalConfig) -> DenseRetriever:
+    arrays: Dict[str, Any] = dict(np.load(os.path.join(directory, "dense.npz")))
+    return DenseRetrieverAdapter.from_state(arrays, chunk=cfg.dense_chunk)
+
+
+def _load_lexical_bm25(directory: str) -> LexicalRetriever:
+    arrays = dict(np.load(os.path.join(directory, "lexical.npz")))
+    with open(os.path.join(directory, "lexical.json")) as fh:
+        meta = json.load(fh)
+    return LexicalRetrieverAdapter.from_state(arrays, meta)
+
+
+register_dense_retriever(
+    "exact",
+    DenseRetrieverSpec(
+        build=DenseRetrieverAdapter.build,
+        filename="dense.npz",
+        load=_load_dense_exact,
+    ),
+)
+
+register_lexical_retriever(
+    "bm25",
+    LexicalRetrieverSpec(
+        build=LexicalRetrieverAdapter.build,
+        filename="lexical.npz",
+        load=_load_lexical_bm25,
     ),
 )
 

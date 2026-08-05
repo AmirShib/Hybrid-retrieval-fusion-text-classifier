@@ -27,9 +27,35 @@ def cuda_available() -> bool:
         return False
 
 
-def resolve_device(explicit: Optional[str] = None) -> str:
+def mps_available() -> bool:
+    """Whether torch can see an Apple Silicon (Metal/MPS) GPU. ``False`` (not
+    raise) if torch is absent, this isn't an Apple Silicon host, or the check
+    itself fails for any reason -- same best-effort contract as
+    ``cuda_available``."""
+    try:
+        import torch
+
+        return bool(torch.backends.mps.is_available())
+    except Exception:
+        return False
+
+
+def resolve_device(explicit: Optional[str] = None, *, mps_ok: bool = False) -> str:
     """Return ``explicit`` if given (an explicit user choice always wins),
-    otherwise ``"cuda"`` if a GPU is visible, else ``"cpu"``."""
+    otherwise ``"cuda"`` if a CUDA GPU is visible, else ``"mps"`` if
+    ``mps_ok`` and an Apple Silicon GPU is visible, else ``"cpu"``.
+
+    ``mps_ok`` defaults to ``False``: most of this package's GPU-consuming
+    device params (XGBoost's and LightGBM's ``device=`` -- see
+    ``infrastructure/fusion.py``) only understand ``"cuda"``/``"cpu"`` and
+    would error on ``"mps"`` rather than fall back, so those call sites must
+    keep the pre-MPS-aware CUDA-or-CPU behaviour unchanged. Pass
+    ``mps_ok=True`` only from a consumer that actually accepts ``"mps"``
+    (torch/``SentenceTransformer``)."""
     if explicit is not None:
         return explicit
-    return "cuda" if cuda_available() else "cpu"
+    if cuda_available():
+        return "cuda"
+    if mps_ok and mps_available():
+        return "mps"
+    return "cpu"

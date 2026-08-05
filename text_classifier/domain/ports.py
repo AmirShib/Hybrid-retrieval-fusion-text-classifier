@@ -9,11 +9,90 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
 from .models import LabeledItem, LabelSpace
+
+
+class ArrayOps(ABC):
+    """Narrow array-backend seam (T84) for the numeric kernels in feature
+    assembly and dense retrieval. A numpy backend is the only one registered
+    today; a torch backend (T85) implements the same surface so those kernels
+    run device-resident without a second, drifting implementation.
+
+    Deliberately narrow: only the primitives the existing kernels actually
+    call, not an array-API reimplementation. ``to_host`` is the *only*
+    sanctioned exit to a plain ``numpy.ndarray`` — every other method may
+    return a backend-native array — so every transfer off-device is one
+    greppable call."""
+
+    name: str  # "numpy" | "torch"
+
+    @abstractmethod
+    def asarray(self, x: Any, dtype: Optional[Any] = None) -> Any: ...
+
+    @abstractmethod
+    def to_host(self, x: Any) -> np.ndarray:
+        """Materialize ``x`` as a plain ``numpy.ndarray`` on the host. The only
+        sanctioned exit from backend-native arrays."""
+
+    @abstractmethod
+    def zeros(self, shape: Any, dtype: Any) -> Any: ...
+
+    @abstractmethod
+    def full(self, shape: Any, value: Any, dtype: Any) -> Any: ...
+
+    @abstractmethod
+    def where(self, cond: Any, a: Any, b: Any) -> Any: ...
+
+    @abstractmethod
+    def isnan(self, x: Any) -> Any: ...
+
+    @abstractmethod
+    def isfinite(self, x: Any) -> Any: ...
+
+    @abstractmethod
+    def maximum(self, a: Any, b: Any) -> Any: ...
+
+    @abstractmethod
+    def log1p(self, x: Any) -> Any: ...
+
+    @abstractmethod
+    def matmul(self, a: Any, b: Any) -> Any: ...
+
+    @abstractmethod
+    def topk(self, x: Any, k: int, axis: int = -1) -> Tuple[Any, Any]:
+        """Top-``k`` values and indices along ``axis``, best-first."""
+
+    @abstractmethod
+    def argsort(self, x: Any, axis: int = -1) -> Any: ...
+
+    @abstractmethod
+    def argpartition(self, x: Any, k: int, axis: int = -1) -> Any: ...
+
+    @abstractmethod
+    def nanmin(self, x: Any, axis: Optional[int] = None) -> Any: ...
+
+    @abstractmethod
+    def nanmax(self, x: Any, axis: Optional[int] = None) -> Any: ...
+
+    @abstractmethod
+    def scatter_add(self, target: Any, rows: Any, cols: Any, values: Any) -> Any:
+        """``target[rows[i], cols[i]] += values[i]`` for every ``i``, summing
+        duplicates. Returns the updated array (backends need not mutate
+        in place); ``target`` is 2-D, ``rows``/``cols``/``values`` are 1-D and
+        the same length."""
+
+    @abstractmethod
+    def scatter_max(self, target: Any, rows: Any, cols: Any, values: Any) -> Any:
+        """``target[rows[i], cols[i]] = max(target[rows[i], cols[i]], values[i])``
+        for every ``i``. Same shape contract as ``scatter_add``."""
+
+    @abstractmethod
+    def gather(self, M: Any, rows: Any, cols: Any) -> Any:
+        """``(n,)``: ``M[rows[i], cols[i]]`` for every ``i``."""
 
 
 class TextEncoder(ABC):

@@ -43,8 +43,15 @@ from ..domain import (
     TextEncoder,
     fusion_feature_names,
 )
-from .registry import calibrator_spec, encoder_spec, feature_provider_spec, fusion_spec
-from .retrieval import DenseRetrieverAdapter, DenseState, LexicalRetrieverAdapter
+from .registry import (
+    calibrator_spec,
+    dense_retriever_spec,
+    encoder_spec,
+    feature_provider_spec,
+    fusion_spec,
+    lexical_retriever_spec,
+)
+from .retrieval import DenseRetrieverAdapter, LexicalRetrieverAdapter
 
 log = logging.getLogger(__name__)
 
@@ -54,11 +61,23 @@ _LEGACY_COMPONENTS = {
     "encoder": "sentence-transformers",
     "fusion": "xgboost",
     "calibrator": "isotonic",
+    "dense": "exact",
+    "lexical": "bm25",
 }
 
 
 # A new class may be given as a ClassDefinition or a plain (key, description) pair.
 NewClass = Union[ClassDefinition, Sequence[str]]
+
+
+def _lexical_json_path(npz_filename: str) -> str:
+    """The JSON sidecar path that pairs with a lexical retriever's ``.npz``
+    filename (e.g. ``lexical.npz`` -> ``lexical.json``) -- the built-in BM25
+    backend manages two files, so its ``LexicalRetrieverSpec.filename`` names
+    only the array half and this derives the other, deterministically, rather
+    than the spec needing a second field only one backend uses today."""
+    root, _ = os.path.splitext(npz_filename)
+    return root + ".json"
 
 
 @dataclass
@@ -147,21 +166,17 @@ class ArtifactRepository:
         enc_spec = encoder_spec(cfg.encoder.kind)
         fus_spec = fusion_spec(cfg.fusion.kind)
         cal_spec = calibrator_spec(cfg.calibration.kind)
+        dense_spec = dense_retriever_spec(cfg.retrieval.dense_kind)
+        lex_spec = lexical_retriever_spec(cfg.retrieval.lexical_kind)
 
         artifacts.encoder.save(os.path.join(directory, enc_spec.dirname))
 
-        s = artifacts.dense.state
-        np.savez_compressed(
-            os.path.join(directory, "dense.npz"),
-            example_emb=s.example_emb,
-            example_labels=s.example_labels,
-            prototypes=s.prototypes,
-            description_emb=s.description_emb,
-            class_freq=s.class_freq,
-        )
+        dense_arrays = artifacts.dense.to_state()
+        np.savez_compressed(os.path.join(directory, dense_spec.filename), **dense_arrays)
+
         arrays, lex_meta = artifacts.lexical.to_state()
-        np.savez_compressed(os.path.join(directory, "lexical.npz"), **arrays)
-        with open(os.path.join(directory, "lexical.json"), "w") as fh:
+        np.savez_compressed(os.path.join(directory, lex_spec.filename), **arrays)
+        with open(os.path.join(directory, _lexical_json_path(lex_spec.filename)), "w") as fh:
             json.dump(lex_meta, fh)
 
         artifacts.fusion.save(os.path.join(directory, fus_spec.filename))
@@ -182,6 +197,8 @@ class ArtifactRepository:
                 "encoder": cfg.encoder.kind,
                 "fusion": cfg.fusion.kind,
                 "calibrator": cfg.calibration.kind,
+                "dense": cfg.retrieval.dense_kind,
+                "lexical": cfg.retrieval.lexical_kind,
             },
             "feature_providers": provider_manifest,
             "classes": [
@@ -302,16 +319,19 @@ class ArtifactRepository:
             json.dump(meta, fh, indent=2)
 
     @staticmethod
-    def _load_lexical(directory: str) -> LexicalRetrieverAdapter:
-        """Load ``lexical.npz``/``.json``, falling back to a legacy ``lexical.pkl``
-        (with a warning) for a model directory saved before this format existed."""
-        npz_path = os.path.join(directory, "lexical.npz")
-        json_path = os.path.join(directory, "lexical.json")
+    def _load_lexical(directory: str, kind: str = "bm25"):
+        """Load the lexical retriever named by ``kind`` (the registry key
+        recorded in ``meta.json``'s ``components`` block), falling back to a
+        legacy ``lexical.pkl`` (with a warning) for a model directory saved
+        before the npz+json format existed. The legacy fallback only applies to
+        the built-in ``"bm25"`` kind -- a directory that predates ``kind`` being
+        recorded always defaults to ``"bm25"`` (see ``_components_from_meta``),
+        so this is exactly the pre-T34 lookup path, unchanged."""
+        spec = lexical_retriever_spec(kind)
+        npz_path = os.path.join(directory, spec.filename)
+        json_path = os.path.join(directory, _lexical_json_path(spec.filename))
         if os.path.isfile(npz_path) and os.path.isfile(json_path):
-            arrays = dict(np.load(npz_path))
-            with open(json_path) as fh:
-                meta = json.load(fh)
-            return LexicalRetrieverAdapter.from_state(arrays, meta)
+            return spec.load(directory)
         pkl_path = os.path.join(directory, "lexical.pkl")
         if os.path.isfile(pkl_path):
             log.warning(
@@ -323,7 +343,7 @@ class ArtifactRepository:
                 return pickle.load(fh)
         raise FileNotFoundError(
             f"no lexical index found in {directory!r} "
-            f"(expected lexical.npz+.json, or legacy lexical.pkl)"
+            f"(expected {spec.filename}+{_lexical_json_path(spec.filename)}, or legacy lexical.pkl)"
         )
 
     @staticmethod
@@ -414,21 +434,12 @@ class ArtifactRepository:
         enc_spec = encoder_spec(components["encoder"])
         fus_spec = fusion_spec(components["fusion"])
         cal_spec = calibrator_spec(components["calibrator"])
+        dense_spec = dense_retriever_spec(components["dense"])
 
         encoder = enc_spec.load(os.path.join(directory, enc_spec.dirname), config.encoder)
 
-        npz = np.load(os.path.join(directory, "dense.npz"))
-        dense = DenseRetrieverAdapter(
-            DenseState(
-                npz["example_emb"],
-                npz["example_labels"],
-                npz["prototypes"],
-                npz["description_emb"],
-                npz["class_freq"],
-            ),
-            chunk=config.retrieval.dense_chunk,
-        )
-        lexical = self._load_lexical(directory)
+        dense = dense_spec.load(directory, config.retrieval)
+        lexical = self._load_lexical(directory, components["lexical"])
 
         fusion = fus_spec.load(os.path.join(directory, fus_spec.filename))
         fusion.set_device(device)
@@ -470,6 +481,12 @@ class ArtifactRepository:
             "calibrator": comp.get("calibrator")
             or cfg.get("calibration", {}).get("kind")
             or _LEGACY_COMPONENTS["calibrator"],
+            "dense": comp.get("dense")
+            or cfg.get("retrieval", {}).get("dense_kind")
+            or _LEGACY_COMPONENTS["dense"],
+            "lexical": comp.get("lexical")
+            or cfg.get("retrieval", {}).get("lexical_kind")
+            or _LEGACY_COMPONENTS["lexical"],
         }
 
     @staticmethod

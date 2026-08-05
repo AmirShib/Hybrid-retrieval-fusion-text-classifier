@@ -101,7 +101,7 @@ signal once T34 phase 2 lands.
 | T31 | 3    | Optional FAISS/ANN backend behind the `DenseRetriever` port (needs T23)        | todo |
 | T32 | ~~3~~ 8 | BM25 memory profile for large corpora — **re-scoped to memory + throughput, moved to Tier 8** | in-review |
 | T33 | 3    | Optional cross-encoder reranker as 6th retrieval signal (needs T03, optional)  | todo |
-| T34 | 3    | Pluggable retrieval signals + retrievers behind the registry (needs T23, T03)  | todo |
+| T34 | 3    | Pluggable retrieval signals + retrievers behind the registry (needs T23, T03)  | in-review (phase 1 landed 2026-08-05; phase 2 open) |
 | T35 | 3    | Language-neutral BM25 defaults (drop hidden English stopwords)                | done |
 | T81 | 3    | Competition features: per-candidate margins + per-query top1−top2 gap (needs T03) | in-review |
 
@@ -222,7 +222,7 @@ Decisions taken 2026-08-04, recorded in the tickets:
 | T32 | BM25 at scale: bounded memory + throughput (re-scoped from Tier 3)           | in-review | T04                  |
 | T87 | Feature dependency graph + demand-driven computation                         | done   | T70                     |
 | T83 | Device execution profile + device policy (measure-first gate; run after T88) | in-progress | T88                |
-| T84 | Array-backend seam: `ArrayOps` port, `auto` selection, CPU byte-identical    | todo   | T83 (thresholds)        |
+| T84 | Array-backend seam: `ArrayOps` port, `auto` selection, CPU byte-identical    | in-review | T83 (thresholds)        |
 | T85 | Device-resident dense retrieval + encoder handoff (no D2H mid-pipeline)      | todo   | T63, T34-p1, T83, T84, T88 |
 | T86 | Zero-copy feature matrix into fusion; drop pandas from the hot path          | todo   | T84, T85                |
 

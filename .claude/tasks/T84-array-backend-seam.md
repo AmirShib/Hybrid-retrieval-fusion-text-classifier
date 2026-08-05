@@ -1,8 +1,81 @@
 # T84 — Array-backend seam: an `ArrayOps` port behind feature assembly + retrieval
 
-status: todo
+status: in-review
 tier: 8
 depends_on: —
+
+## Progress (2026-08-05)
+Implemented: `ArrayOps` port (`domain/ports.py`), `NumpyArrayOps` backend
+(`infrastructure/array_ops.py`), registry wiring (`register_array_ops` /
+`build_array_ops`, "numpy" registered as the only backend today), and
+`PipelineConfig.array_backend: str = "auto"` with `resolve_array_backend`
+implementing T83's crossover rule (`CROSSOVER_MIN_ITEMS=100_000`,
+`CROSSOVER_MIN_CLASSES=500`). `FeatureAssembler` and `DenseRetrieverAdapter`
+take an injected `ArrayOps` (default `NumpyArrayOps()`); `TrainingPipeline.run`
+resolves the backend once per run and threads the same instance through every
+assembler/index it builds. `InferencePipeline`/`ArtifactRepository.load` are
+untouched — they always default to numpy, which is what makes the backend
+non-load-bearing (a torch-trained model still loads on a numpy-only host, since
+no torch backend exists yet regardless).
+
+`_scatter_knn` (features.py) and `_prototypes_and_freq` / `loo_prototype_similarity`
+(retrieval.py) route through `scatter_add`/`scatter_max` instead of
+`np.add.at`/`np.maximum.at`, per the ticket's named "CPU-side wins". Also routed
+through the port: `matmul`, `where`, `isnan`, `isfinite`, `argsort`,
+`argpartition`, `nanmin`, `nanmax`, `log1p`, `gather` everywhere `features.py`'s
+kernels and the dense adapter's scoring paths call them — these are 1:1
+delegations in `NumpyArrayOps` (literally `np.X(...)`), so they carry no
+numerical-drift risk. Left as plain numpy (a scoping call, not literal 100%
+port coverage): index/shape bookkeeping (`arange`, `repeat`, `tile`,
+`concatenate`, `np.partition`'s value-partition, `argmax`, `linalg.norm`,
+`einsum`) — structural rather than device-mappable compute, consistent with
+"not an array-API reimplementation."
+
+**Byte-identity, checked empirically rather than assumed.** `_scatter_knn`'s
+scatter conversion *is* bit-for-bit identical to `np.add.at`/`np.maximum.at`:
+both process the same (row, col, value) triples in the same order at the same
+float64 precision (verified directly, see `tests/unit/test_array_ops.py`).
+`_prototypes_and_freq`'s conversion is **not** bit-identical to the loop it
+replaces: `np.bincount`'s accumulator and numpy's pairwise-summation `.mean()`
+round differently once a class has more than a couple of examples (IEEE754
+addition is not associative) — confirmed by direct comparison before locking
+in the design (~2% of classes matched exactly at n=50 in a scratch check; the
+rest differed by ≤1 float32 ULP). The full pytest suite (726 tests, including
+T06 leakage and the T52 benchmark floors) stays green with this change, and
+`tests/unit/test_retrieval.py::TestPrototypesAndFreqLoopFree` pins the
+loop-vs-scatter agreement to `rtol=1e-5`. Read "byte-for-bit equal" in the
+Tests section below with that caveat — a literal golden-frame snapshot test
+(store an old-code expected DataFrame, diff exactly) was not added; the
+existing regression suite plus these targeted comparisons is the safety net
+that actually shipped.
+
+**A real bug this refactor caught before it shipped:** the first version of
+`resolve_array_backend`'s "auto" path probed `cuda_available()` (which
+`import torch`s) before checking whether a torch backend was even registered.
+Since torch is installed in this dev environment but no torch `ArrayOps`
+backend exists yet, this imported torch during every ordinary numpy-backend
+training run — reintroducing exactly the T63 boundary violation the ticket's
+own test list calls out, and (on this host) colliding with xgboost's OpenMP
+runtime badly enough to segfault (`tests/integration/test_added_classes.py`
+crashed reliably). Fixed by checking the registry first — `resolve_array_backend`
+now never imports torch while numpy is the only registered backend. Covered by
+`test_no_torch_import_reachable_from_a_numpy_backend_run`, which blocks `torch`
+in `sys.modules` and runs assembly end-to-end. Note this test is scoped to the
+array-ops seam specifically: `infrastructure/fusion.py` already has a separate,
+pre-existing torch import via `resolve_device(None)` for XGBoost's own device
+resolution, unrelated to and out of scope for this ticket.
+
+**Lint/type check.** `ruff check` on every touched file: one real finding
+(`ArrayOps` imported into `domain/__init__.py` but missing from `__all__`),
+fixed. `mypy` on every touched file: clean, aside from a pre-existing,
+repo-wide `numpy` stub / `python_version` mismatch unrelated to this change
+(reproduces identically on an untouched file with `git stash`) — this
+environment's interpreter is 3.14 but `pyproject.toml`'s mypy config targets
+3.10, which the installed numpy stub doesn't parse under. Not caused by, or
+fixable within, this ticket.
+
+**Not done:** a literal stored-expected-values golden-frame snapshot test
+(vs. the regression-suite + targeted-comparison approach above) was not added.
 
 ## Goal
 Make every numeric kernel in feature assembly and dense retrieval run against a

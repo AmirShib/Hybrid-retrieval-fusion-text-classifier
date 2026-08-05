@@ -25,6 +25,7 @@ from text_classifier.infrastructure.retrieval import (
     DenseRetrieverAdapter,
     LexicalRetrieverAdapter,
     _dense_topk,
+    _prototypes_and_freq,
     _sparse_row_topk,
     bm25_prunes_vocab,
 )
@@ -479,6 +480,63 @@ def test_dense_class_freq_counts_correctly(dense_env):
     npt.assert_array_equal(freq[0], int((labels == 0).sum()))  # 3
     npt.assert_array_equal(freq[1], int((labels == 1).sum()))  # 2
     npt.assert_array_equal(freq[2], 0)  # empty class
+
+
+def _prototypes_and_freq_loop_reference(emb, labels, n_classes):
+    """The pre-T84 ``for c in range(n_classes)`` masked-mean loop, kept here to
+    verify the scatter-based replacement against it directly."""
+    dim = emb.shape[1]
+    proto = np.full((n_classes, dim), np.nan, dtype=np.float32)
+    freq = np.zeros(n_classes, dtype=np.int64)
+    labels = np.asarray(labels)
+    for c in range(n_classes):
+        mask = labels == c
+        freq[c] = int(mask.sum())
+        if freq[c]:
+            v = emb[mask].mean(axis=0)
+            norm = np.linalg.norm(v)
+            if norm > 0:
+                proto[c] = (v / norm).astype(np.float32)
+    return proto, freq
+
+
+class TestPrototypesAndFreqLoopFree:
+    """T84: the scatter-based ``_prototypes_and_freq`` against the loop it
+    replaced. Not asserted bit-for-bit -- IEEE754 addition is not associative,
+    so a flat scatter-sum and a per-group ``.mean(axis=0)`` (numpy's pairwise
+    summation) legitimately round differently once a class has more than a
+    couple of examples -- but must agree to float32 precision, including the
+    NaN/zero-frequency edge cases."""
+
+    def test_matches_loop_reference_including_empty_classes(self):
+        rng = np.random.default_rng(0)
+        n_classes, dim, n = 12, 6, 150
+        emb = rng.standard_normal((n, dim)).astype(np.float32)
+        # class 3 gets no examples at all (n_classes-1 possible labels used)
+        labels = rng.integers(0, n_classes - 1, n).astype(np.int64)
+
+        proto, freq = _prototypes_and_freq(emb, labels, n_classes)
+        want_proto, want_freq = _prototypes_and_freq_loop_reference(emb, labels, n_classes)
+
+        npt.assert_array_equal(freq, want_freq)
+        assert freq[n_classes - 1] == 0
+        assert np.all(np.isnan(proto[n_classes - 1]))
+        valid = freq > 0
+        npt.assert_allclose(proto[valid], want_proto[valid], rtol=1e-5, atol=1e-6)
+
+    def test_empty_pool_all_nan(self):
+        emb = np.zeros((0, 4), dtype=np.float32)
+        labels = np.zeros((0,), dtype=np.int64)
+        proto, freq = _prototypes_and_freq(emb, labels, 3)
+        npt.assert_array_equal(freq, np.zeros(3, dtype=np.int64))
+        assert np.all(np.isnan(proto))
+
+    def test_single_example_class_matches_normalized_vector(self):
+        emb = np.array([[3.0, 4.0]], dtype=np.float32)  # norm 5
+        labels = np.array([0], dtype=np.int64)
+        proto, freq = _prototypes_and_freq(emb, labels, 1)
+        assert freq[0] == 1
+        npt.assert_allclose(proto[0], [0.6, 0.8], rtol=1e-6)
 
 
 # =========================================================================== #

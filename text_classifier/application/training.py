@@ -30,6 +30,7 @@ from sklearn.model_selection import StratifiedKFold
 from ..config import CalibrationConfig, PipelineConfig
 from ..domain import (
     AbstentionPolicy,
+    ArrayOps,
     CandidatePolicy,
     ConfidenceCalibrator,
     CoverageReport,
@@ -48,13 +49,18 @@ from ..infrastructure import (
     DeployedArtifacts,
     LexicalRetrieverAdapter,
     bm25_prunes_vocab,
+    build_array_ops,
     build_calibrator,
+    build_dense_retriever,
     build_encoder,
     build_feature_providers,
     build_fusion,
+    build_lexical_retriever,
     encoder_is_corpus_dependent,
     fit_encoder,
+    resolve_array_backend,
 )
+from ..infrastructure.array_ops import NumpyArrayOps
 from .evaluation import build_manifest, evaluate_decisions, write_evaluation_artifacts
 from .features import FeatureAssembler
 from .scoring import add_confidence, top_per_item
@@ -105,6 +111,7 @@ class TrainingPipeline:
     def __init__(self, config: PipelineConfig, shared_encoder: Optional[TextEncoder] = None):
         self.cfg = config
         self.assembler: Optional[FeatureAssembler] = None
+        self._ops: ArrayOps = NumpyArrayOps()  # replaced in run() with this run's resolved backend
         # Optional injected encoder for the shared-encoder path (DI / offline tests).
         self._shared_override = shared_encoder
         # Custom feature providers fitted on all training data, and the
@@ -235,7 +242,20 @@ class TrainingPipeline:
         val_items = None if val_items is None else list(val_items)
         test_items = None if test_items is None else list(test_items)
         self._validate_inputs(items, label_space, val_items, test_items)
-        self.assembler = FeatureAssembler(label_space, CandidatePolicy(self.cfg.candidate_top_n))
+        # T84: resolved once per run from this run's scale (auto picks numpy vs.
+        # a device-resident backend from T83's crossover; explicit always wins).
+        # The same instance is threaded through every FeatureAssembler/
+        # DenseRetrieverAdapter this run builds, so a run never mixes backends.
+        backend = resolve_array_backend(
+            None if self.cfg.array_backend == "auto" else self.cfg.array_backend,
+            n_items=len(items),
+            n_classes=label_space.size,
+            k_neighbors=self.cfg.retrieval.k_neighbors,
+        )
+        self._ops = build_array_ops(backend)
+        self.assembler = FeatureAssembler(
+            label_space, CandidatePolicy(self.cfg.candidate_top_n), self._ops
+        )
         texts = [it.text for it in items]
         y = np.array(label_space.encode_labels([it.label for it in items]), dtype=np.int64)
 
@@ -470,25 +490,40 @@ class TrainingPipeline:
         shared = None
         shared_emb: Optional[np.ndarray] = None
         shared_desc_emb: Optional[np.ndarray] = None
+        # T34 phase 1: the T88/T32 sharing optimizations below (`build_from_embeddings`,
+        # `build_from_counts`/`build_with_shared_descriptions`) are specific to the
+        # built-in adapters' internals, not part of the generic retriever-port
+        # contract a third-party `dense_kind`/`lexical_kind` must implement. They stay
+        # gated on the built-in kinds so default-config behaviour is untouched byte
+        # for byte; a non-default kind falls back to the plain per-fold
+        # `build_dense_retriever`/`build_lexical_retriever` call and loses the
+        # cross-fold sharing (an accepted phase-1 tradeoff, not a TODO — a backend
+        # that wants it back must earn it with its own per-fold-reuse hook).
+        use_shared_dense = self.cfg.retrieval.dense_kind == "exact"
+        use_shared_lexical = self.cfg.retrieval.lexical_kind == "bm25"
         if not self._use_per_fold_encoder():
             shared = self._load_shared_encoder()
-            # T88: a frozen shared encoder's `encode_documents` is a pure
-            # function of the text, so encode the whole pool + every class
-            # description once (cached on `self`, shared with
-            # `_build_deployment_index`) and slice per fold here, instead of
-            # paying the encode again per fold (~5x the encoder work at
-            # n_folds=5). The per-fold and corpus-dependent (e.g. TF-IDF) paths
-            # are untouched — they stay inside `_encoder_for_split`/
-            # `DenseRetrieverAdapter.build` below, guarded by the same
-            # `_use_per_fold_encoder()` predicate.
-            shared_emb, shared_desc_emb = self._shared_document_embeddings(
-                texts, label_space, shared
-            )
+            if use_shared_dense:
+                # T88: a frozen shared encoder's `encode_documents` is a pure
+                # function of the text, so encode the whole pool + every class
+                # description once (cached on `self`, shared with
+                # `_build_deployment_index`) and slice per fold here, instead of
+                # paying the encode again per fold (~5x the encoder work at
+                # n_folds=5). The per-fold and corpus-dependent (e.g. TF-IDF) paths
+                # are untouched — they stay inside `_encoder_for_split`/
+                # `DenseRetrieverAdapter.build` below, guarded by the same
+                # `_use_per_fold_encoder()` predicate.
+                shared_emb, shared_desc_emb = self._shared_document_embeddings(
+                    texts, label_space, shared
+                )
         # T32 A1/A2: BM25 tokenization is unconditional (it doesn't depend on
         # the encoder), so this cache always attempts to populate — tokenize
         # the whole example corpus + build the description index once here,
-        # cached on `self` and reused by `_build_deployment_index` below.
-        example_state, desc_bm25 = self._shared_lexical_state(texts, label_space)
+        # cached on `self` and reused by `_build_deployment_index` below. Only
+        # done for the built-in "bm25" lexical_kind (see comment above).
+        example_state, desc_bm25 = (
+            self._shared_lexical_state(texts, label_space) if use_shared_lexical else (None, None)
+        )
         skf = StratifiedKFold(
             self.cfg.training.n_folds, shuffle=True, random_state=self.cfg.training.random_state
         )
@@ -499,18 +534,18 @@ class TrainingPipeline:
             if shared_emb is not None:
                 assert shared_desc_emb is not None
                 dense = DenseRetrieverAdapter.build_from_embeddings(
-                    shared_emb[tr], y[tr], shared_desc_emb, label_space, self.cfg.retrieval
+                    shared_emb[tr], y[tr], shared_desc_emb, label_space, self.cfg.retrieval, self._ops
                 )
             else:
-                dense = DenseRetrieverAdapter.build(
-                    enc, tr_texts, y[tr], label_space, self.cfg.retrieval
+                dense = build_dense_retriever(
+                    self.cfg.retrieval, enc, tr_texts, y[tr], label_space, self._ops
                 )
             if example_state is not None:
                 counts, vectorizer = example_state
                 lexical = LexicalRetrieverAdapter.build_from_counts(
                     counts[tr], vectorizer, y[tr], desc_bm25, self.cfg.retrieval
                 )
-            else:
+            elif use_shared_lexical:
                 # A2's guard fell back (vocab-pruning kwargs) — the example
                 # side must refit per fold, but the description index (A1) is
                 # still shared: it is never row-sliced, so nothing about A2's
@@ -518,6 +553,8 @@ class TrainingPipeline:
                 lexical = LexicalRetrieverAdapter.build_with_shared_descriptions(
                     tr_texts, y[tr], desc_bm25, self.cfg.retrieval
                 )
+            else:
+                lexical = build_lexical_retriever(self.cfg.retrieval, tr_texts, y[tr], label_space)
             # Providers are fit on this fold's training rows only (leakage-free).
             providers = self._fit_providers(tr, texts, y, label_space)
             # T87: request only the columns the fusion model will actually be
@@ -768,34 +805,50 @@ class TrainingPipeline:
         of deployment assembly is what lets the external sets be scored against the
         exact index the model will use in production.
         """
+        # T34 phase 1: same gating as `_build_oof` — the T88/T32 sharing
+        # optimizations are built-in-adapter-specific, so a non-default
+        # dense_kind/lexical_kind goes through the plain registry build instead
+        # (losing the sharing, an accepted phase-1 tradeoff).
+        use_shared_dense = self.cfg.retrieval.dense_kind == "exact"
+        use_shared_lexical = self.cfg.retrieval.lexical_kind == "bm25"
         if self._use_per_fold_encoder():
             items = [
                 LabeledItem(texts[i], label_space.key_at(int(y[i]))) for i in range(len(texts))
             ]
             encoder = fit_encoder(self.cfg.encoder, items, label_space)
-            dense = DenseRetrieverAdapter.build(encoder, texts, y, label_space, self.cfg.retrieval)
+            dense = build_dense_retriever(
+                self.cfg.retrieval, encoder, texts, y, label_space, self._ops
+            )
         else:
             encoder = self._load_shared_encoder()
-            # T88: reuse the whole-pool embeddings `_build_oof` already computed
-            # (or compute them now, on the n_folds=1 path where this runs first)
-            # instead of a second `encode_documents` pass over every text.
-            emb, desc_emb = self._shared_document_embeddings(texts, label_space, encoder)
-            dense = DenseRetrieverAdapter.build_from_embeddings(
-                emb, y, desc_emb, label_space, self.cfg.retrieval
-            )
-        # T32 A1/A2: reuse the corpus tokenization + description index
-        # `_build_oof` already built (or build them now, on the n_folds=1 path
-        # where this runs first) instead of a second tokenize pass.
-        example_state, desc_bm25 = self._shared_lexical_state(texts, label_space)
-        if example_state is not None:
-            counts, vectorizer = example_state
-            lexical = LexicalRetrieverAdapter.build_from_counts(
-                counts, vectorizer, y, desc_bm25, self.cfg.retrieval
-            )
+            if use_shared_dense:
+                # T88: reuse the whole-pool embeddings `_build_oof` already computed
+                # (or compute them now, on the n_folds=1 path where this runs first)
+                # instead of a second `encode_documents` pass over every text.
+                emb, desc_emb = self._shared_document_embeddings(texts, label_space, encoder)
+                dense = DenseRetrieverAdapter.build_from_embeddings(
+                    emb, y, desc_emb, label_space, self.cfg.retrieval, self._ops
+                )
+            else:
+                dense = build_dense_retriever(
+                    self.cfg.retrieval, encoder, texts, y, label_space, self._ops
+                )
+        if use_shared_lexical:
+            # T32 A1/A2: reuse the corpus tokenization + description index
+            # `_build_oof` already built (or build them now, on the n_folds=1 path
+            # where this runs first) instead of a second tokenize pass.
+            example_state, desc_bm25 = self._shared_lexical_state(texts, label_space)
+            if example_state is not None:
+                counts, vectorizer = example_state
+                lexical = LexicalRetrieverAdapter.build_from_counts(
+                    counts, vectorizer, y, desc_bm25, self.cfg.retrieval
+                )
+            else:
+                lexical = LexicalRetrieverAdapter.build_with_shared_descriptions(
+                    texts, y, desc_bm25, self.cfg.retrieval
+                )
         else:
-            lexical = LexicalRetrieverAdapter.build_with_shared_descriptions(
-                texts, y, desc_bm25, self.cfg.retrieval
-            )
+            lexical = build_lexical_retriever(self.cfg.retrieval, texts, y, label_space)
         # Custom feature providers fit on *all* training rows — the version
         # that ships in the model and scores external val/test sets. The composed
         # schema (core + provider columns) is what the fusion/eval steps select by.

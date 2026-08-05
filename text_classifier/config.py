@@ -75,6 +75,14 @@ class RetrievalConfig:
     k_neighbors: int = 20
     k1: float = 1.5
     b: float = 0.75
+    # T34 phase 1: which retriever *builder* backs each signal. Registry keys
+    # (see infrastructure/registry.py's register_dense_retriever/
+    # register_lexical_retriever); the built-ins ("exact" wraps
+    # DenseRetrieverAdapter, "bm25" wraps LexicalRetrieverAdapter) are the
+    # byte-for-byte-identical defaults. This is what T31 (FAISS) and other
+    # retriever backends plug into instead of forking the concrete adapter.
+    dense_kind: str = "exact"
+    lexical_kind: str = "bm25"
     # No stopword removal by default: a language-specific filter is an opt-in
     # (train CLI: --bm25-stop-words english), not a hidden assumption that
     # degrades BM25 on non-English corpora. Any sklearn CountVectorizer kwarg
@@ -223,6 +231,15 @@ class PipelineConfig:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     features: FeaturesConfig = field(default_factory=FeaturesConfig)
     candidate_top_n: int = 10
+    # T84: which ArrayOps backend runs the numeric kernels in feature assembly
+    # and dense retrieval. Registry key (see infrastructure/registry.py),
+    # "auto" (the default) picks numpy vs. torch from T83's measured crossover
+    # thresholds using quantities known before assembly runs, and always falls
+    # back to numpy when torch is absent, no device is visible, or the corpus
+    # is below the crossover. An explicit "numpy"/"torch" always wins. This is
+    # an execution choice recorded here for provenance, never load-bearing: a
+    # model trained under any backend loads and scores on a numpy-only host.
+    array_backend: str = "auto"
 
     def validate(self, *, external_val: bool = False, external_test: bool = False) -> None:
         """Reject config values that produce silently broken runs or deep
@@ -418,6 +435,7 @@ class PipelineConfig:
             training=_build_section(TrainingConfig, data, "training"),
             features=_build_features_section(data),
             candidate_top_n=data.get("candidate_top_n", cls().candidate_top_n),
+            array_backend=data.get("array_backend", cls().array_backend),
         )
 
 

@@ -1,5 +1,11 @@
 """Infrastructure layer: concrete adapters implementing the domain ports."""
 
+from .array_ops import (
+    CROSSOVER_MIN_CLASSES,
+    CROSSOVER_MIN_ITEMS,
+    NumpyArrayOps,
+    resolve_array_backend,
+)
 from .encoder import (
     HashingEncoder,
     SentenceTransformerEncoder,
@@ -18,20 +24,33 @@ from .fusion import (
 )
 from .persistence import ArtifactRepository, DeployedArtifacts
 from .registry import (
+    ArrayOpsSpec,
     CalibratorSpec,
+    DenseRetrieverSpec,
     EncoderSpec,
     FeatureProviderSpec,
     FusionSpec,
+    LexicalRetrieverSpec,
+    array_ops_spec,
+    build_array_ops,
     build_calibrator,
+    build_dense_retriever,
     build_encoder,
     build_feature_providers,
     build_fusion,
+    build_lexical_retriever,
+    dense_retriever_spec,
     encoder_is_corpus_dependent,
     fit_encoder,
+    lexical_retriever_spec,
+    register_array_ops,
     register_calibrator,
+    register_dense_retriever,
     register_encoder,
     register_feature_provider,
     register_fusion,
+    register_lexical_retriever,
+    registered_array_ops_kinds,
 )
 from .retrieval import (
     BM25Index,
@@ -75,4 +94,21 @@ __all__ = [
     "register_fusion",
     "register_calibrator",
     "register_feature_provider",
+    "NumpyArrayOps",
+    "resolve_array_backend",
+    "CROSSOVER_MIN_ITEMS",
+    "CROSSOVER_MIN_CLASSES",
+    "ArrayOpsSpec",
+    "array_ops_spec",
+    "build_array_ops",
+    "register_array_ops",
+    "registered_array_ops_kinds",
+    "DenseRetrieverSpec",
+    "LexicalRetrieverSpec",
+    "build_dense_retriever",
+    "build_lexical_retriever",
+    "dense_retriever_spec",
+    "lexical_retriever_spec",
+    "register_dense_retriever",
+    "register_lexical_retriever",
 ]

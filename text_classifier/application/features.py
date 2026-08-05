@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from ..domain import (
+    ArrayOps,
     CandidatePolicy,
     DenseRetriever,
     FEATURE_NAMES,
@@ -26,6 +27,7 @@ from ..domain import (
     composed_feature_names,
     feature_closure,
 )
+from ..infrastructure.array_ops import NumpyArrayOps
 
 # Re-exported for callers that reach for it via the assembly module; the
 # canonical definition lives in the domain schema (``domain/services.py``).
@@ -50,24 +52,33 @@ def _effective_names(
     return [n for n in names if n in core_needed or n in kept_providers]
 
 
-def _scatter_knn(labels: np.ndarray, scores: np.ndarray, n_classes: int):
+def _scatter_knn(
+    labels: np.ndarray, scores: np.ndarray, n_classes: int, ops: Optional[ArrayOps] = None
+):
     """Aggregate (b, k) neighbor labels/scores into per-class (b, C) sum/max/count.
     Missing entries (label < 0 or NaN score) are ignored; sum/max are NaN where
-    count == 0 so that 'not retrieved' stays distinct from a true zero."""
+    count == 0 so that 'not retrieved' stays distinct from a true zero.
+
+    Sum/max are scattered via ``ArrayOps.scatter_add``/``scatter_max`` (T84)
+    rather than ``np.add.at``/``np.maximum.at`` -- the latter is numpy's
+    unbuffered, slowest scatter. Both process the same (row, col, value)
+    triples in the same order at the same float64 precision the ``.at`` calls
+    used, so the numpy backend's result is bit-for-bit identical."""
+    ops = ops or NumpyArrayOps()
     b = labels.shape[0]
-    ksum = np.zeros((b, n_classes), dtype=np.float64)
-    kcnt = np.zeros((b, n_classes), dtype=np.float64)
-    kmax = np.full((b, n_classes), -np.inf, dtype=np.float64)
+    ksum = ops.zeros((b, n_classes), dtype=np.float64)
+    kcnt = ops.zeros((b, n_classes), dtype=np.float64)
+    kmax = ops.full((b, n_classes), -np.inf, dtype=np.float64)
 
     rows = np.repeat(np.arange(b), labels.shape[1])
     L = labels.ravel()
     S = scores.ravel().astype(np.float64)
-    valid = (L >= 0) & ~np.isnan(S)
+    valid = (L >= 0) & ~ops.isnan(S)
     r, c, sv = rows[valid], L[valid], S[valid]
 
-    np.add.at(ksum, (r, c), sv)
-    np.add.at(kcnt, (r, c), 1.0)
-    np.maximum.at(kmax, (r, c), sv)
+    ksum = ops.to_host(ops.scatter_add(ksum, r, c, sv))
+    kcnt = ops.to_host(ops.scatter_add(kcnt, r, c, np.ones_like(sv)))
+    kmax = ops.to_host(ops.scatter_max(kmax, r, c, sv))
 
     empty = kcnt == 0
     ksum[empty] = np.nan
@@ -75,41 +86,48 @@ def _scatter_knn(labels: np.ndarray, scores: np.ndarray, n_classes: int):
     return ksum, kmax, kcnt
 
 
-def _topn_mask(M: np.ndarray, n: int, positive_only: bool = False) -> np.ndarray:
+def _topn_mask(
+    M: np.ndarray, n: int, positive_only: bool = False, ops: Optional[ArrayOps] = None
+) -> np.ndarray:
     """Boolean (b, C) mask of each row's top-n columns. NaN ranks last; -inf
     selections (all-missing) are dropped. Ties may admit slightly more than n."""
+    ops = ops or NumpyArrayOps()
     b, C = M.shape
     n = min(n, C)
-    Mf = np.where(np.isnan(M), -np.inf, M.astype(np.float64))
+    Mf = ops.where(ops.isnan(M), -np.inf, M.astype(np.float64))
     if positive_only:
-        Mf = np.where(Mf > 0, Mf, -np.inf)
+        Mf = ops.where(Mf > 0, Mf, -np.inf)
     kth = np.partition(Mf, C - n, axis=1)[:, C - n][:, None]
-    return (Mf >= kth) & np.isfinite(Mf)
+    return (Mf >= kth) & ops.isfinite(Mf)
 
 
-def _row_rank(M: np.ndarray, cand_mask: np.ndarray) -> np.ndarray:
+def _row_rank(M: np.ndarray, cand_mask: np.ndarray, ops: Optional[ArrayOps] = None) -> np.ndarray:
     """Dense descending rank (1 = best) within each row's candidate set."""
-    Mf = np.where(cand_mask, M, np.nan)
-    Mf = np.where(np.isnan(Mf), -np.inf, Mf)
-    order = np.argsort(-Mf, axis=1)
+    ops = ops or NumpyArrayOps()
+    Mf = ops.where(cand_mask, M, np.nan)
+    Mf = ops.where(ops.isnan(Mf), -np.inf, Mf)
+    order = ops.argsort(-Mf, axis=1)
     ranks = np.empty(M.shape, dtype=np.float64)
     rows = np.arange(M.shape[0])[:, None]
     ranks[rows, order] = np.arange(1, M.shape[1] + 1)[None, :]
     return ranks
 
 
-def _row_minmax(M: np.ndarray, cand_mask: np.ndarray) -> np.ndarray:
+def _row_minmax(M: np.ndarray, cand_mask: np.ndarray, ops: Optional[ArrayOps] = None) -> np.ndarray:
     """Per-row min-max of M over candidates (NaN preserved for all-missing rows)."""
-    Mc = np.where(cand_mask, M, np.nan)
+    ops = ops or NumpyArrayOps()
+    Mc = ops.where(cand_mask, M, np.nan)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)  # all-NaN rows -> NaN (intended)
-        lo = np.nanmin(Mc, axis=1)
-        hi = np.nanmax(Mc, axis=1)
-    rng = np.where(hi > lo, hi - lo, 1.0)
+        lo = ops.nanmin(Mc, axis=1)
+        hi = ops.nanmax(Mc, axis=1)
+    rng = ops.where(hi > lo, hi - lo, 1.0)
     return (M - lo[:, None]) / rng[:, None]
 
 
-def _row_margin(M: np.ndarray, cand_mask: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+def _row_margin(
+    M: np.ndarray, cand_mask: np.ndarray, ops: Optional[ArrayOps] = None
+) -> Tuple[np.ndarray, np.ndarray]:
     """Competition features for one signal: per-candidate margins and the per-row
     top1-top2 gap.
 
@@ -134,8 +152,9 @@ def _row_margin(M: np.ndarray, cand_mask: np.ndarray) -> Tuple[np.ndarray, np.nd
     Ties are handled the obvious way: two candidates tied at the top both get
     margin 0.0, and the row's gap is 0.0.
     """
+    ops = ops or NumpyArrayOps()
     b, C = M.shape
-    Mc = np.where(cand_mask & ~np.isnan(M), M, -np.inf)
+    Mc = ops.where(cand_mask & ~ops.isnan(M), M, -np.inf)
     if C == 1:
         # A single class: it is its own row's leader and has no competitor ever.
         top1 = Mc[:, 0]
@@ -144,20 +163,20 @@ def _row_margin(M: np.ndarray, cand_mask: np.ndarray) -> Tuple[np.ndarray, np.nd
     else:
         # Top-2 by partition (O(C)) rather than a full sort — only the two best
         # values in each row matter here.
-        part = np.argpartition(-Mc, 1, axis=1)[:, :2]
+        part = ops.argpartition(-Mc, 1, axis=1)[:, :2]
         rows = np.arange(b)[:, None]
         vals = Mc[rows, part]
         swap = vals[:, 0] < vals[:, 1]
-        leader = np.where(swap, part[:, 1], part[:, 0])
-        top1 = np.where(swap, vals[:, 1], vals[:, 0])
-        top2 = np.where(swap, vals[:, 0], vals[:, 1])
+        leader = ops.where(swap, part[:, 1], part[:, 0])
+        top1 = ops.where(swap, vals[:, 1], vals[:, 0])
+        top2 = ops.where(swap, vals[:, 0], vals[:, 1])
         # The leader competes against #2; everyone else competes against #1.
         is_leader = np.arange(C)[None, :] == leader[:, None]
-        best_other = np.where(is_leader, top2[:, None], top1[:, None])
+        best_other = ops.where(is_leader, top2[:, None], top1[:, None])
 
     with np.errstate(invalid="ignore"):  # -inf - -inf on all-missing rows -> NaN
-        margin = np.where(np.isfinite(best_other) & ~np.isnan(M), M - best_other, np.nan)
-        gap = np.where(np.isfinite(top1) & np.isfinite(top2), top1 - top2, np.nan)
+        margin = ops.where(ops.isfinite(best_other) & ~ops.isnan(M), M - best_other, np.nan)
+        gap = ops.where(ops.isfinite(top1) & ops.isfinite(top2), top1 - top2, np.nan)
     return margin, gap
 
 
@@ -172,9 +191,15 @@ def _argmax_or_missing(M: np.ndarray, require_positive: bool = False) -> np.ndar
 class FeatureAssembler:
     """Builds the (item, candidate) feature table for a batch of queries."""
 
-    def __init__(self, label_space: LabelSpace, candidate_policy: CandidatePolicy):
+    def __init__(
+        self,
+        label_space: LabelSpace,
+        candidate_policy: CandidatePolicy,
+        array_ops: Optional[ArrayOps] = None,
+    ):
         self._space = label_space
         self._policy = candidate_policy
+        self._ops = array_ops or NumpyArrayOps()
 
     def assemble(
         self,
@@ -275,19 +300,19 @@ class FeatureAssembler:
             proto = np.asarray(dense.loo_prototype_similarity(q_emb, self_ids), dtype=np.float64)
             dn_lab, dn_sim = dense.knn_example_labels(q_emb, k, self_ids)
             bn_lab, bn_sco = lexical.knn_example_labels(texts, k, self_ids)
-        d_sum, d_max, d_cnt = _scatter_knn(dn_lab, dn_sim, C)
+        d_sum, d_max, d_cnt = _scatter_knn(dn_lab, dn_sim, C, self._ops)
 
         bdesc_raw = np.asarray(lexical.description_score(texts), dtype=np.float64)
         bdesc = np.where(bdesc_raw > 0, bdesc_raw, np.nan)  # 0 overlap == missing
-        b_sum, b_max, b_cnt = _scatter_knn(bn_lab, bn_sco, C)
+        b_sum, b_max, b_cnt = _scatter_knn(bn_lab, bn_sco, C, self._ops)
 
         # ---- candidate set = union of each signal's top-n ----
         mask = (
-            _topn_mask(desc_d, n)
-            | _topn_mask(proto, n)
-            | _topn_mask(bdesc, n, positive_only=True)
-            | _topn_mask(d_sum, n)
-            | _topn_mask(b_sum, n)
+            _topn_mask(desc_d, n, ops=self._ops)
+            | _topn_mask(proto, n, ops=self._ops)
+            | _topn_mask(bdesc, n, positive_only=True, ops=self._ops)
+            | _topn_mask(d_sum, n, ops=self._ops)
+            | _topn_mask(b_sum, n, ops=self._ops)
         )
         rows, cols = np.nonzero(mask)
         if rows.size == 0:
@@ -325,18 +350,18 @@ class FeatureAssembler:
         want_margin_b_desc = _want("margin_b_desc") or _want("q_gap_b_desc")
         want_margin_b_knn = _want("margin_b_knn")
 
-        rk_dd = _row_rank(desc_d, mask) if want_rank_d_desc else None
-        rk_bd = _row_rank(bdesc, mask) if want_rank_b_desc else None
-        rk_dk = _row_rank(d_sum, mask) if want_rank_d_knn else None
-        rk_bk = _row_rank(b_sum, mask) if want_rank_b_knn else None
-        nm_dd = _row_minmax(desc_d, mask) if want_norm_d_desc else None
-        nm_bd = _row_minmax(bdesc, mask) if want_norm_b_desc else None
+        rk_dd = _row_rank(desc_d, mask, self._ops) if want_rank_d_desc else None
+        rk_bd = _row_rank(bdesc, mask, self._ops) if want_rank_b_desc else None
+        rk_dk = _row_rank(d_sum, mask, self._ops) if want_rank_d_knn else None
+        rk_bk = _row_rank(b_sum, mask, self._ops) if want_rank_b_knn else None
+        nm_dd = _row_minmax(desc_d, mask, self._ops) if want_norm_d_desc else None
+        nm_bd = _row_minmax(bdesc, mask, self._ops) if want_norm_b_desc else None
 
-        mg_dd, gap_dd = _row_margin(desc_d, mask) if want_margin_d_desc else (None, None)
-        mg_dp = _row_margin(proto, mask)[0] if want_margin_d_proto else None
-        mg_dk, gap_dk = _row_margin(d_sum, mask) if want_margin_d_knn else (None, None)
-        mg_bd, gap_bd = _row_margin(bdesc, mask) if want_margin_b_desc else (None, None)
-        mg_bk = _row_margin(b_sum, mask)[0] if want_margin_b_knn else None
+        mg_dd, gap_dd = _row_margin(desc_d, mask, self._ops) if want_margin_d_desc else (None, None)
+        mg_dp = _row_margin(proto, mask, self._ops)[0] if want_margin_d_proto else None
+        mg_dk, gap_dk = _row_margin(d_sum, mask, self._ops) if want_margin_d_knn else (None, None)
+        mg_bd, gap_bd = _row_margin(bdesc, mask, self._ops) if want_margin_b_desc else (None, None)
+        mg_bk = _row_margin(b_sum, mask, self._ops)[0] if want_margin_b_knn else None
 
         if want_agreement:
             argstack = np.stack([a_desc, a_proto, a_bdesc, a_dknn, a_bknn], axis=1)
@@ -350,7 +375,7 @@ class FeatureAssembler:
 
         # ---- gather one value per (row, col) ----
         def g(M):  # gather helper
-            return M[rows, cols]
+            return self._ops.gather(M, rows, cols)
 
         data: Dict[str, np.ndarray] = {}
         if _want("d_desc_sim"):
@@ -374,7 +399,7 @@ class FeatureAssembler:
         if _want("desc_proto_gap"):
             data["desc_proto_gap"] = g(desc_d) - g(proto)
         if _want("class_log_freq"):
-            data["class_log_freq"] = np.log1p(class_freq[cols].astype(np.float64))
+            data["class_log_freq"] = self._ops.log1p(class_freq[cols].astype(np.float64))
         if _want("abs_top_dense_sim"):
             data["abs_top_dense_sim"] = abs_top_dense[rows]
         if _want("abs_top_bm25"):

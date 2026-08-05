@@ -8,6 +8,7 @@ from .models import (
     Prediction,
 )
 from .ports import (
+    ArrayOps,
     ConfidenceCalibrator,
     DenseRetriever,
     FeatureContext,
@@ -36,6 +37,7 @@ __all__ = [
     "LabelSpace",
     "Prediction",
     "CoverageReport",
+    "ArrayOps",
     "TextEncoder",
     "DenseRetriever",
     "LexicalRetriever",

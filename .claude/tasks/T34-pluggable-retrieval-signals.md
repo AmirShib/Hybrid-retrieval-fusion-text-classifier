@@ -1,8 +1,52 @@
 # T34 — Pluggable retrieval signals (and retrievers) behind the registry
 
-status: todo
+status: in-review (partial, phase 1 landed 2026-08-05; phase 2 still open)
 tier: 3
 depends_on: T23, T03
+
+## Progress (2026-08-05) — Phase 1 landed
+`RetrievalConfig` gained `dense_kind: str = "exact"` / `lexical_kind: str =
+"bm25"`. `infrastructure/registry.py` gained `DenseRetrieverSpec`/
+`LexicalRetrieverSpec` (build/filename/load, same shape as `FusionSpec`) plus
+`register_dense_retriever`/`register_lexical_retriever`,
+`dense_retriever_spec`/`lexical_retriever_spec` lookups, and
+`build_dense_retriever`/`build_lexical_retriever` factories. Built-ins register
+the current adapters under `"exact"`/`"bm25"` with the current filenames
+(`dense.npz`, `lexical.npz`+`.json`) — old model dirs load unchanged, and
+`_components_from_meta` defaults `dense`/`lexical` to `"exact"`/`"bm25"` for
+dirs written before this change (mirroring `encoder`/`fusion`/`calibrator`).
+
+`DenseRetrieverAdapter` gained `to_state()`/`from_state()` (byte-identical
+`dense.npz` layout) so its spec's load/save is generic, symmetric with
+`LexicalRetrieverAdapter`'s pre-existing `to_state()`/`from_state()`.
+`persistence.py` now saves/loads dense and lexical through their specs
+(filenames come from the spec, not a hardcoded string), and records
+`components.dense`/`components.lexical` in `meta.json`. The legacy
+`lexical.pkl` pickle fallback is preserved.
+
+In `application/training.py`, the whole-corpus deployment-index build
+(`_build_deployment_index`) and the per-fold OOF loop (`_build_oof`) now go
+through `build_dense_retriever`/`build_lexical_retriever` for any non-default
+kind. The T88/T32 sharing optimizations (`build_from_embeddings`,
+`build_from_counts`/`build_with_shared_descriptions`) are built-in-adapter
+internals, not part of the generic retriever-port contract, so they stay
+gated behind `dense_kind == "exact"` / `lexical_kind == "bm25"` — a non-default
+kind loses the cross-fold sharing (an accepted phase-1 tradeoff, documented
+inline, not a TODO) but is otherwise fully pluggable. Default-config behavior
+is unchanged: the full test suite is green except the one pre-existing flaky
+failure (`test_meta_and_calibrator_change_other_artifacts_untouched`,
+unrelated to this ticket), and `python -m scripts.demo` runs unchanged.
+
+Added `tests/unit/test_registry.py::test_register_and_build_custom_dense_retriever`,
+`test_register_and_build_custom_lexical_retriever`,
+`test_dense_and_lexical_kind_selected_persisted_and_loaded_end_to_end` (train +
+persist + reload with a custom dense/lexical kind, own filenames, own
+`components` entry) and the unknown-kind error-contract tests, mirroring the
+existing fusion/calibrator registry tests.
+
+**Not done (phase 2, still open):** the `SignalProvider` port, the
+`FeatureAssembler` refactor to consume an ordered provider list, and
+`FEATURE_NAMES` becoming derived — see the design below, unchanged.
 
 ## Re-prioritized 2026-08-04 (Tier 8)
 Both phases are now on the critical path and the two halves have **different**

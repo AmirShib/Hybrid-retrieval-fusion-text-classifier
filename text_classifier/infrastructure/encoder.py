@@ -121,9 +121,14 @@ class SentenceTransformerEncoder(TextEncoder):
     ) -> "SentenceTransformerEncoder":
         from sentence_transformers import SentenceTransformer
 
-        # device=None lets SentenceTransformer do its own torch.cuda.is_available()
-        # check; resolve_device here is only to log what that resolves to.
-        logger.info("loading SentenceTransformer encoder on device=%s", resolve_device(device))
+        # device=None lets SentenceTransformer do its own auto-detection (which,
+        # in current sentence-transformers, checks MPS too); resolve_device here
+        # is only to log what that resolves to, so mps_ok=True keeps the log
+        # line accurate on Apple Silicon rather than always claiming "cpu".
+        logger.info(
+            "loading SentenceTransformer encoder on device=%s",
+            resolve_device(device, mps_ok=True),
+        )
         return cls(
             SentenceTransformer(model_name_or_path, device=device, **kwargs),
             batch_size,
@@ -564,7 +569,8 @@ def train_encoder(
         holdout_idx = np.empty(0, dtype=np.intp)
 
     logger.info(
-        "fine-tuning SentenceTransformer encoder on device=%s", resolve_device(config.device)
+        "fine-tuning SentenceTransformer encoder on device=%s",
+        resolve_device(config.device, mps_ok=True),
     )
     model = SentenceTransformer(config.model_name_or_path, device=config.device, **config.params)
     encode_options = _encode_options(config)

@@ -21,7 +21,8 @@ from scipy import sparse
 from sklearn.feature_extraction.text import CountVectorizer
 
 from ..config import RetrievalConfig
-from ..domain import DenseRetriever, LabelSpace, LexicalRetriever, TextEncoder
+from ..domain import ArrayOps, DenseRetriever, LabelSpace, LexicalRetriever, TextEncoder
+from .array_ops import NumpyArrayOps
 
 
 def _exclude_self(
@@ -434,7 +435,7 @@ class LexicalRetrieverAdapter(LexicalRetriever):
 
 # ------------------------------------------------------------------- dense adapter
 def _dense_topk(
-    Q: np.ndarray, X: np.ndarray, k: int, chunk: int = 256
+    Q: np.ndarray, X: np.ndarray, k: int, chunk: int = 256, ops: Optional[ArrayOps] = None
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Top-k nearest examples by dot product, always shaped ``(n_queries, k)``.
 
@@ -443,6 +444,7 @@ def _dense_topk(
     descending-similarity order and the remainder are ``-1`` / ``NaN`` padding,
     mirroring ``BM25Index.top_k``. An empty query batch returns ``(0, k)`` arrays.
     """
+    ops = ops or NumpyArrayOps()
     n = X.shape[0]
     k_eff = min(k, n)
     out_idx = np.full((Q.shape[0], k), -1, dtype=np.int64)
@@ -451,37 +453,56 @@ def _dense_topk(
         return out_idx, out_sim
     Xt = np.ascontiguousarray(X.T)
     for s in range(0, Q.shape[0], chunk):
-        sims = Q[s : s + chunk] @ Xt
-        part = np.argpartition(sims, -k_eff, axis=1)[:, -k_eff:]
+        sims = ops.matmul(Q[s : s + chunk], Xt)
+        part = ops.argpartition(sims, -k_eff, axis=1)[:, -k_eff:]
         rows = np.arange(part.shape[0])[:, None]
-        part_sims = sims[rows, part]
-        order = np.argsort(-part_sims, axis=1)
+        part_sims = ops.gather(sims, rows, part)
+        order = ops.argsort(-part_sims, axis=1)
         out_idx[s : s + chunk, :k_eff] = np.take_along_axis(part, order, axis=1)
         out_sim[s : s + chunk, :k_eff] = np.take_along_axis(part_sims, order, axis=1)
     return out_idx, out_sim
 
 
 def _prototypes_and_freq(
-    emb: np.ndarray, labels: np.ndarray, n_classes: int
+    emb: np.ndarray, labels: np.ndarray, n_classes: int, ops: Optional[ArrayOps] = None
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Per-class prototype (L2-normalized mean example embedding) and example
     count, over ``n_classes`` classes. A class with no examples gets an
     all-``NaN`` prototype row (XGBoost reads NaN as "missing"). Shared by
     ``DenseRetrieverAdapter.build`` (fresh) and ``with_added_examples`` (merged
-    pool) so both compute prototypes identically."""
+    pool) so both compute prototypes identically.
+
+    Replaces the ``for c in range(n_classes)`` masked-mean loop with a single
+    ``scatter_add`` (class-sum) + norm: on a large label space that loop is
+    thousands of masked reductions over the full embedding matrix, which is
+    both the "no per-row Python loop" convention and, per T83, one of the
+    largest CPU stages at high class count. The per-class sum is accumulated
+    in float64 regardless of ``emb``'s dtype (matching ``scatter_add``'s
+    contract), so results are numerically equal to the loop version to
+    float32 precision, not bit-for-bit identical -- IEEE754 addition is not
+    associative, and the loop's ``.mean(axis=0)`` sums each group in a
+    different order (numpy's pairwise summation) than a flat scatter does."""
+    ops = ops or NumpyArrayOps()
     dim = emb.shape[1]
-    proto = np.full((n_classes, dim), np.nan, dtype=np.float32)
-    freq = np.zeros(n_classes, dtype=np.int64)
     labels = np.asarray(labels)
-    for c in range(n_classes):
-        mask = labels == c
-        freq[c] = int(mask.sum())
-        if freq[c]:
-            v = emb[mask].mean(axis=0)
-            norm = np.linalg.norm(v)
-            if norm > 0:
-                proto[c] = (v / norm).astype(np.float32)
-    return proto, freq
+    n = labels.shape[0]
+    freq = np.bincount(labels, minlength=n_classes).astype(np.int64) if n else np.zeros(
+        n_classes, dtype=np.int64
+    )
+    rows = np.repeat(labels, dim)
+    cols = np.tile(np.arange(dim), n)
+    values = np.asarray(emb, dtype=np.float64).ravel()
+    class_sum = ops.to_host(
+        ops.scatter_add(ops.zeros((n_classes, dim), dtype=np.float64), rows, cols, values)
+    )
+    counts = freq.astype(np.float64)[:, None]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean = class_sum / counts
+    norm = np.linalg.norm(mean, axis=1)
+    has_proto = (freq > 0) & (norm > 0)
+    safe_norm = np.where(norm > 0, norm, 1.0)
+    proto = np.where(has_proto[:, None], (mean / safe_norm[:, None]).astype(np.float32), np.nan)
+    return proto.astype(np.float32), freq
 
 
 @dataclass
@@ -496,9 +517,10 @@ class DenseState:
 
 
 class DenseRetrieverAdapter(DenseRetriever):
-    def __init__(self, state: DenseState, chunk: int = 256):
+    def __init__(self, state: DenseState, chunk: int = 256, array_ops: Optional[ArrayOps] = None):
         self._s = state
         self._chunk = chunk
+        self._ops = array_ops or NumpyArrayOps()
 
     @classmethod
     def build(
@@ -508,6 +530,7 @@ class DenseRetrieverAdapter(DenseRetriever):
         labels: np.ndarray,
         label_space: LabelSpace,
         cfg: RetrievalConfig,
+        array_ops: Optional[ArrayOps] = None,
     ) -> "DenseRetrieverAdapter":
         # The example pool and class descriptions are the *document* side of
         # retrieval; asymmetric encoders (E5/BGE prompts) encode them with the
@@ -515,7 +538,7 @@ class DenseRetrieverAdapter(DenseRetriever):
         emb = encoder.encode_documents(texts)
         labels = np.asarray(labels)
         desc = encoder.encode_documents(label_space.descriptions)
-        return cls.build_from_embeddings(emb, labels, desc, label_space, cfg)
+        return cls.build_from_embeddings(emb, labels, desc, label_space, cfg, array_ops)
 
     @classmethod
     def build_from_embeddings(
@@ -525,6 +548,7 @@ class DenseRetrieverAdapter(DenseRetriever):
         description_emb: np.ndarray,
         label_space: LabelSpace,
         cfg: RetrievalConfig,
+        array_ops: Optional[ArrayOps] = None,
     ) -> "DenseRetrieverAdapter":
         """Build from already-encoded document embeddings (T88): the encode step
         is a pure function of the text for a frozen shared encoder, so a caller
@@ -534,10 +558,12 @@ class DenseRetrieverAdapter(DenseRetriever):
         encodes internally and delegates here, so every existing caller and test
         double is untouched."""
         labels = np.asarray(labels)
-        proto, freq = _prototypes_and_freq(example_emb, labels, label_space.size)
+        ops = array_ops or NumpyArrayOps()
+        proto, freq = _prototypes_and_freq(example_emb, labels, label_space.size, ops)
         return cls(
             DenseState(example_emb, labels.astype(np.int64), proto, description_emb, freq),
             cfg.dense_chunk,
+            ops,
         )
 
     @property
@@ -548,12 +574,46 @@ class DenseRetrieverAdapter(DenseRetriever):
     def class_freq(self) -> np.ndarray:
         return self._s.class_freq
 
+    def to_state(self) -> Dict[str, np.ndarray]:
+        """Split this adapter into npz-able arrays (T34 phase 1: symmetric with
+        ``LexicalRetrieverAdapter.to_state``, so a registered dense-retriever
+        spec's save/load can be generic). Keys/layout match ``dense.npz`` as
+        written by ``persistence.py`` before this method existed, byte-for-byte —
+        existing model dirs load unchanged."""
+        s = self._s
+        return {
+            "example_emb": s.example_emb,
+            "example_labels": s.example_labels,
+            "prototypes": s.prototypes,
+            "description_emb": s.description_emb,
+            "class_freq": s.class_freq,
+        }
+
+    @classmethod
+    def from_state(
+        cls,
+        arrays: Dict[str, np.ndarray],
+        chunk: int = 256,
+        array_ops: Optional[ArrayOps] = None,
+    ) -> "DenseRetrieverAdapter":
+        return cls(
+            DenseState(
+                arrays["example_emb"],
+                arrays["example_labels"],
+                arrays["prototypes"],
+                arrays["description_emb"],
+                arrays["class_freq"],
+            ),
+            chunk,
+            array_ops,
+        )
+
     def knn_example_labels(
         self, query_emb: np.ndarray, k: int, exclude_idx: Any = None
     ) -> Tuple[np.ndarray, np.ndarray]:
         # Fetch one extra when self-masking so k real neighbours survive the drop.
         fetch = k + 1 if exclude_idx is not None else k
-        idx, sim = _dense_topk(query_emb, self._s.example_emb, fetch, self._chunk)
+        idx, sim = _dense_topk(query_emb, self._s.example_emb, fetch, self._chunk, self._ops)
         if exclude_idx is not None:
             idx, sim = _exclude_self(idx, sim, exclude_idx, k)
         # idx == -1 marks padding (k > n_examples); keep it as -1 rather than
@@ -562,7 +622,7 @@ class DenseRetrieverAdapter(DenseRetriever):
         return labels.astype(np.int64), sim
 
     def prototype_similarity(self, query_emb: np.ndarray) -> np.ndarray:
-        return query_emb @ self._s.prototypes.T
+        return self._ops.matmul(query_emb, self._s.prototypes.T)
 
     def loo_prototype_similarity(self, query_emb: np.ndarray, self_idx: np.ndarray) -> np.ndarray:
         """Prototype similarity with each query's own example left out of its own
@@ -584,10 +644,16 @@ class DenseRetrieverAdapter(DenseRetriever):
         E = self._s.example_emb.astype(np.float64)
         y = self._s.example_labels
         C = base.shape[1]
-        class_sum = np.zeros((C, E.shape[1]), dtype=np.float64)
-        class_cnt = np.zeros(C, dtype=np.float64)
-        np.add.at(class_sum, y, E)
-        np.add.at(class_cnt, y, 1.0)
+        dim = E.shape[1]
+        n = y.shape[0]
+        scatter_rows = np.repeat(y, dim)
+        scatter_cols = np.tile(np.arange(dim), n)
+        class_sum = self._ops.to_host(
+            self._ops.scatter_add(
+                self._ops.zeros((C, dim), dtype=np.float64), scatter_rows, scatter_cols, E.ravel()
+            )
+        )
+        class_cnt = np.bincount(y, minlength=C).astype(np.float64)
 
         s = self_idx[rows]
         c = y[s]  # own class of each in-pool query
@@ -603,7 +669,7 @@ class DenseRetrieverAdapter(DenseRetriever):
         return out
 
     def description_similarity(self, query_emb: np.ndarray) -> np.ndarray:
-        return query_emb @ self._s.description_emb.T
+        return self._ops.matmul(query_emb, self._s.description_emb.T)
 
     def with_added_classes(
         self, encoder: TextEncoder, new_descriptions: Sequence[str]
@@ -620,7 +686,7 @@ class DenseRetrieverAdapter(DenseRetriever):
         new_descriptions = list(new_descriptions)
         s = self._s
         if not new_descriptions:
-            return DenseRetrieverAdapter(s, self._chunk)
+            return DenseRetrieverAdapter(s, self._chunk, self._ops)
         new_desc = np.asarray(encoder.encode_documents(new_descriptions), dtype=np.float32)
         dim = s.description_emb.shape[1]
         if new_desc.shape[1] != dim:
@@ -637,7 +703,7 @@ class DenseRetrieverAdapter(DenseRetriever):
         extended = DenseState(
             s.example_emb, s.example_labels, prototypes, description_emb, class_freq
         )
-        return DenseRetrieverAdapter(extended, self._chunk)
+        return DenseRetrieverAdapter(extended, self._chunk, self._ops)
 
     def with_updated_descriptions(
         self, encoder: TextEncoder, edits: dict
@@ -648,7 +714,7 @@ class DenseRetrieverAdapter(DenseRetriever):
         description is added via ``with_added_classes``, not this method. Every
         row not named in ``edits`` is untouched."""
         if not edits:
-            return DenseRetrieverAdapter(self._s, self._chunk)
+            return DenseRetrieverAdapter(self._s, self._chunk, self._ops)
         s = self._s
         idxs = list(edits.keys())
         new_rows = np.asarray(encoder.encode_documents([edits[i] for i in idxs]), dtype=np.float32)
@@ -657,7 +723,7 @@ class DenseRetrieverAdapter(DenseRetriever):
         updated = DenseState(
             s.example_emb, s.example_labels, s.prototypes, description_emb, s.class_freq
         )
-        return DenseRetrieverAdapter(updated, self._chunk)
+        return DenseRetrieverAdapter(updated, self._chunk, self._ops)
 
     def with_added_examples(
         self,
@@ -686,6 +752,6 @@ class DenseRetrieverAdapter(DenseRetriever):
             new_emb = np.zeros((0, s.example_emb.shape[1]), dtype=s.example_emb.dtype)
         merged_emb = np.concatenate([s.example_emb, new_emb], axis=0)
         merged_labels = np.concatenate([s.example_labels, np.asarray(new_labels, dtype=np.int64)])
-        proto, freq = _prototypes_and_freq(merged_emb, merged_labels, n_classes)
+        proto, freq = _prototypes_and_freq(merged_emb, merged_labels, n_classes, self._ops)
         updated = DenseState(merged_emb, merged_labels, proto, s.description_emb, freq)
-        return DenseRetrieverAdapter(updated, self._chunk)
+        return DenseRetrieverAdapter(updated, self._chunk, self._ops)
