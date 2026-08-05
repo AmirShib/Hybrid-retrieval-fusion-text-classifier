@@ -66,6 +66,9 @@ include = ["text_classifier*"]
 [tool.setuptools.package-data]
 # Ship the PEP 561 marker so downstream consumers get the package's type hints.
 text_classifier = ["py.typed"]
+# Bundled BM25 stopword lists (e.g. stopwords-he.json), so they're available
+# after `pip install .`, not just from a source checkout.
+"text_classifier.infrastructure.resources" = ["*.json"]
 
 [tool.setuptools.dynamic]
 # Single-sourced from text_classifier/_version.py -- see RELEASING.md.
