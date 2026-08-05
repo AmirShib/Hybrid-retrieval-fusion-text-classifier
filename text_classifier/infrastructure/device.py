@@ -9,10 +9,25 @@ to succeed.
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+def torch_installed() -> bool:
+    """Whether ``torch`` is importable, **without importing it**.
+
+    ``importlib.util.find_spec`` only locates the module, so a caller can gate
+    on torch's presence without paying its import (seconds, plus an OpenMP
+    runtime that clashes with xgboost's when both land in one process). The
+    array-backend resolver uses this before the CUDA probe, which does import
+    torch. Returns ``False`` rather than raising if the lookup itself fails."""
+    try:
+        return importlib.util.find_spec("torch") is not None
+    except Exception:
+        return False
 
 
 def cuda_available() -> bool:

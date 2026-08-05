@@ -20,6 +20,7 @@ from ..domain import (
     fusion_feature_names,
 )
 from ..infrastructure import ArtifactRepository, DeployedArtifacts
+from ..infrastructure.array_ops import NumpyArrayOps
 from ..infrastructure.persistence import NewClass
 from .evaluation import _json_safe
 from .features import FeatureAssembler
@@ -35,8 +36,13 @@ _TOP1_FLAG_TO_SIGNAL: Dict[str, str] = {cols["top1"]: name for name, cols in SIG
 class InferencePipeline:
     def __init__(self, artifacts: DeployedArtifacts):
         self._a = artifacts
+        # The assembler runs on the same array backend the artifacts were
+        # loaded onto (T85) — a numpy assembler over a device-resident index
+        # would move every matrix back and forth. `None` means numpy, which is
+        # what direct construction (tests, in-process training handoff) gets.
+        self._ops = artifacts.array_ops or NumpyArrayOps()
         self._assembler = FeatureAssembler(
-            artifacts.label_space, CandidatePolicy(artifacts.config.candidate_top_n)
+            artifacts.label_space, CandidatePolicy(artifacts.config.candidate_top_n), self._ops
         )
         # Custom feature providers shipped with the model, plus the composed
         # schema (core + provider columns) the fusion model was trained on. Empty /
@@ -467,8 +473,11 @@ class InferencePipeline:
         require a persisted corpus (a later capability), so ``texts_available`` is
         ``False`` here — only class keys and scores are available."""
         a = self._a
+        ops = self._ops
         k = a.config.retrieval.k_neighbors
-        d_lab, d_sim = a.dense.knn_example_labels(q_emb, k)
+        # The dense retriever answers in its backend's array type (T85); this is
+        # a human-readable report, so lower it to the host once, here.
+        d_lab, d_sim = (ops.to_host(x) for x in a.dense.knn_example_labels(ops.asarray(q_emb), k))
         b_lab, b_sco = a.lexical.knn_example_labels(list(texts), k)
 
         def rows(labels: np.ndarray, scores: np.ndarray) -> List[Dict[str, Any]]:

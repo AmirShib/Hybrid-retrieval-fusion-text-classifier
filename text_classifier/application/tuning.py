@@ -30,6 +30,7 @@ from ..domain import (
     fusion_feature_names,
 )
 from ..infrastructure import DeployedArtifacts
+from ..infrastructure.array_ops import NumpyArrayOps
 from .evaluation import evaluate_decisions
 from .features import FeatureAssembler
 from .scoring import add_confidence, top_per_item
@@ -55,7 +56,10 @@ def count_likely_overlap(artifacts: DeployedArtifacts, q_emb: np.ndarray) -> int
     if artifacts.dense.state.example_emb.shape[0] == 0:
         return 0
     _, sim = artifacts.dense.knn_example_labels(q_emb, k=1)
-    best = np.nan_to_num(sim[:, 0], nan=-1.0)
+    # The retriever answers in its own backend's array type (T85); lower it
+    # before the numpy arithmetic below.
+    ops = artifacts.array_ops or NumpyArrayOps()
+    best = np.nan_to_num(ops.to_host(sim)[:, 0], nan=-1.0)
     return int(np.sum(best >= _OVERLAP_SIMILARITY_THRESHOLD))
 
 
@@ -96,7 +100,11 @@ def retune(
     feature_names = fusion_feature_names(
         artifacts.feature_providers, artifacts.config.fusion.drop_features
     )
-    assembler = FeatureAssembler(label_space, CandidatePolicy(artifacts.config.candidate_top_n))
+    # Same array backend the artifacts were loaded onto (T85) -- a numpy
+    # assembler over a device-resident index would transfer every matrix.
+    assembler = FeatureAssembler(
+        label_space, CandidatePolicy(artifacts.config.candidate_top_n), artifacts.array_ops
+    )
     texts = [it.text for it in items]
     y = np.array(label_space.encode_labels([it.label for it in items]), dtype=np.int64)
 

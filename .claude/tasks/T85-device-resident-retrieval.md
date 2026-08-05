@@ -1,6 +1,6 @@
 # T85 — Device-resident dense retrieval + encoder handoff (no D2H mid-pipeline)
 
-status: todo
+status: in-review
 tier: 8
 depends_on: T63, T34 (phase 1), T83, T84, T88
 
@@ -105,28 +105,92 @@ not merely a value. Consequences, all of which this ticket must deliver:
 `tests/integration/test_device_parity.py` (new).
 
 ## Tests
-- [ ] Numpy backend: byte-identical to pre-T85 output (the default path is untouched).
-- [ ] Torch-CPU backend vs numpy: parity within tolerance — gives the parity test
-      real coverage in CI, which is GPU-free.
-- [ ] Persistence round-trip: train on torch backend → save → load on a host with
-      the torch backend unavailable → identical predictions (within tolerance).
-- [ ] `to_host` call count per chunk is asserted to be exactly the lexical block
-      (a regression test against a re-introduced ping-pong).
-- [ ] Encoder returns tensors on the torch backend and numpy on the numpy backend;
-      both L2-normalized to within float32 tolerance.
-- [ ] Leakage regression (T06) green on both backends.
+- [x] Numpy backend: byte-identical to pre-T85 output (the default path is untouched).
+      Verified two ways: the checked-in T34 golden fixtures, and a 466-array
+      before/after capture of `assemble()` (labels / no-labels / `requested=` /
+      leave-one-out paths, prototypes, and a full `TrainingPipeline.run`'s
+      headline metrics) taken on this host before the refactor and re-checked
+      after every step — byte-identical, `rtol=0`/`atol=0`, throughout.
+- [x] Torch-CPU backend vs numpy: parity within tolerance
+      (`tests/integration/test_device_parity.py`), with the ordinal exemption
+      spelled out and checked rather than assumed.
+- [x] Persistence round-trip: train on the torch backend → save → load with
+      `torch_installed()` patched False → identical predicted keys, confidences
+      within 1e-4.
+- [x] Transfer counts per chunk asserted: 3 uploads (the BM25 block: `(b, k)`
+      labels, `(b, k)` scores, `(b, C)` description scores) and 2 `to_host`
+      calls, both at the fusion handoff; one extra upload per chunk when the
+      encoder is host-side.
+- [x] Encoder returns tensors on the torch backend and numpy on the numpy
+      backend; both L2-normalized to float32 tolerance.
+- [x] Leakage regression (T06) green on both backends
+      (`TestLeakageOnTheTorchBackend`: fold disjointness + the singleton
+      prototype canary).
+- [x] OOM chunk-halving retry.
 
 ## Acceptance criteria
-- [ ] With encoder + fusion both on GPU, exactly one H2D per chunk, and no D2H
-      between encode and the fusion handoff.
-- [ ] `dense_kind="torch"` is selected by config alone; no pipeline edits.
-- [ ] Model dirs stay portable and pickle-free; GPU-trained loads CPU-only.
-- [ ] Measured against T83's baseline (post-T88), with the improvement recorded in
-      the ticket, reported for the OOF loop specifically as well as end to end.
-- [ ] CPU-only and torch-free installs are entirely unaffected; the torch backend
-      lives behind the `gpu` extra established by T63.
-- [ ] With T88 landed, the example-pool embeddings are uploaded to the device
-      **once per run**, not once per fold.
+- [x] With encoder + fusion both on GPU, exactly one H2D per chunk, and no D2H
+      between encode and the fusion handoff. **Asserted structurally** (transfer
+      counting with a device-resident encoder stub and a device-resident index),
+      not measured on a GPU — see the measurement gap below.
+- [x] `dense_kind="torch"` is selected by config alone; no pipeline edits.
+      `PipelineConfig.validate` rejects the contradictory
+      `dense_kind="torch"` + `array_backend="numpy"` pairing, and `"auto"`
+      resolves *to* torch when the dense kind asks for it.
+- [x] Model dirs stay portable and pickle-free; GPU-trained loads CPU-only.
+- [ ] **Measured against T83's baseline (post-T88) — PARTIAL, and the one
+      criterion this ticket does not close.** This host has no CUDA device
+      (`torch.cuda.is_available()` is False), the same limitation T83 recorded,
+      so the GPU speedup is unmeasured. What *was* measured, and written into
+      `docs/device-policy.md`: numpy vs torch-**CPU** through the same seam, at
+      10k items / 5k classes (`assemble()` 32.5s → 14.7s) and as an interleaved
+      same-process A/B at 10.8k items / 2k classes (1.27s → 0.54s median, 2.34x).
+      That establishes the seam costs nothing and the hot stages are the ones
+      T83 predicted; it says nothing about device residency. The GPU-host re-run
+      (`scripts/profile_devices.py --array-backend torch`, which this ticket
+      added) still owes the OOF-loop and end-to-end numbers.
+- [x] CPU-only and torch-free installs are entirely unaffected; the torch backend
+      lives behind the `gpu` extra established by T63. The "no torch import
+      reachable from a numpy-backend run" guard still holds with the torch
+      backend registered — registration stores a factory, and every import-free
+      check in `resolve_array_backend` runs before the CUDA probe.
+- [x] With T88 landed, the example-pool embeddings are uploaded to the device
+      **once per run**, not once per fold: `_shared_document_embeddings` adopts
+      into the backend once and each fold takes an on-device slice
+      (`ArrayOps.take`), and the T88 sharing path was widened to cover
+      `dense_kind="torch"` (same adapter, different backend).
+
+## What landed (files)
+`domain/ports.py` (ArrayOps grew from 18 to 33 methods — every addition is a
+call the kernels were already making *around* the port; `TextEncoder
+.set_array_ops`; `ArrayOps.free_memory`), `infrastructure/array_ops.py`
+(`TorchArrayOps`, `available_array_backend`, `dense_kind` in the resolver),
+`infrastructure/device.py` (`torch_installed`, via `find_spec` — no import),
+`infrastructure/retrieval.py` (backend-resident `DenseState`, `with_array_ops`,
+hoisted contiguous transpose, kernels through the port),
+`infrastructure/signals.py` (no more `to_host` mid-chunk; the BM25 lift),
+`infrastructure/registry.py` (`torch` array-ops + dense-retriever kinds),
+`infrastructure/persistence.py` (backend resolution + re-adoption at load;
+`DeployedArtifacts.array_ops`), `application/features.py` (kernels through the
+port, vectorized `n_signal_agreement`, single-block handoff, OOM retry),
+`application/training.py` / `application/inference.py` (thread the backend),
+`application/evaluation.py` (manifest `execution` block), `config.py`,
+`CLAUDE.md`, `README.md`, `CHANGELOG.md`, `docs/device-policy.md`,
+`pyproject.toml` (`gpu` extra), `scripts/profile_devices.py`
+(`--array-backend`), `tests/unit/test_array_ops.py`,
+`tests/integration/test_leakage.py`, `tests/integration/test_device_parity.py`
+(new).
+
+## Follow-ups this surfaced
+- **The GPU measurement** (above) — the only open acceptance criterion.
+- `rank_*` on a candidate a signal did not retrieve was never a reproducible
+  value on *any* backend (all such candidates tie at `-inf` and the numpy path
+  breaks the tie with an unstable sort). T85 only made it visible. If that
+  column is worth anything to the model, it should be defined deliberately
+  (e.g. NaN for unretrieved) rather than left to the sort — a separate ticket.
+- A custom `FeatureProvider` still receives host numpy (`FeatureContext`'s
+  documented contract), so a configured provider costs one extra D2H per chunk.
+  Giving providers a backend-aware context is T79/T86 territory, not this one.
 
 ## Out of scope
 BM25 on device (permanently host-side per T83's policy). The fusion handoff (T86).

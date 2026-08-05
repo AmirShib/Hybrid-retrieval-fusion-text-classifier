@@ -105,6 +105,7 @@ to support one.
 ```bash
 pip install .                              # core: torch-free (numpy/pandas/scipy/sklearn/xgboost)
 pip install .[sentence-transformers]       # + the semantic bi-encoder (pulls in torch)
+pip install .[gpu]                         # + the device-resident array backend (torch)
 pip install .[lightgbm]                    # + optional LightGBM fusion backend
 pip install .[test]                        # + pytest for the test suite
 ```
@@ -117,6 +118,18 @@ gets without sourcing a single torch wheel it may never use.
 best out-of-the-box quality), so training with the CLI's default settings needs
 the extra — selecting it without the extra installed raises a clear error
 pointing back at this section rather than a raw `ImportError`.
+
+The `gpu` extra adds the device-resident array backend: with
+`array_backend="torch"` (or `retrieval.dense_kind="torch"`) the example
+embeddings, prototypes and description matrix stay on the GPU, and dense
+retrieval plus the whole feature-assembly kernel set run there — the encoder's
+output never round-trips through the host. It is worth it at scale
+(≳100k items or ≳500 classes; `array_backend="auto"`, the default, applies that
+rule for you and always falls back to numpy). Results then agree with the CPU
+reference within float tolerance rather than bit for bit — see
+[`docs/device-policy.md`](docs/device-policy.md). Which torch wheel (CUDA
+version, or CPU-only) is your choice; a model trained this way still loads and
+scores on a torch-free host, because what it persists is numpy either way.
 
 Installing exposes three console commands — `text-classifier-train`,
 `text-classifier-infer`, and `text-classifier-eval`. From a source checkout you

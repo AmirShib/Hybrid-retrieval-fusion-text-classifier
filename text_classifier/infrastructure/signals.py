@@ -44,41 +44,52 @@ def _scatter_knn(
     rather than ``np.add.at``/``np.maximum.at`` -- the latter is numpy's
     unbuffered, slowest scatter. Both process the same (row, col, value)
     triples in the same order at the same float64 precision the ``.at`` calls
-    used, so the numpy backend's result is bit-for-bit identical."""
+    used, so the numpy backend's result is bit-for-bit identical.
+
+    T85: the three ``to_host`` calls this used to end with are gone. They were
+    the ping-pong the ticket exists to remove -- a device-resident scatter
+    whose result was copied straight back to the host, per signal, per chunk.
+    The empty-cell NaN fill that needed a mutable host array is an
+    ``ArrayOps.where`` now, which is the same values either way."""
     ops = ops or NumpyArrayOps()
     b = labels.shape[0]
+    k = labels.shape[1]
     ksum = ops.zeros((b, n_classes), dtype=np.float64)
     kcnt = ops.zeros((b, n_classes), dtype=np.float64)
     kmax = ops.full((b, n_classes), -np.inf, dtype=np.float64)
 
-    rows = np.repeat(np.arange(b), labels.shape[1])
-    L = labels.ravel()
-    S = scores.ravel().astype(np.float64)
+    rows = ops.repeat(ops.arange(b), k)
+    L = ops.reshape(labels, -1)
+    S = ops.astype(ops.reshape(scores, -1), np.float64)
     valid = (L >= 0) & ~ops.isnan(S)
     r, c, sv = rows[valid], L[valid], S[valid]
 
-    ksum = ops.to_host(ops.scatter_add(ksum, r, c, sv))
-    kcnt = ops.to_host(ops.scatter_add(kcnt, r, c, np.ones_like(sv)))
-    kmax = ops.to_host(ops.scatter_max(kmax, r, c, sv))
+    ksum = ops.scatter_add(ksum, r, c, sv)
+    kcnt = ops.scatter_add(kcnt, r, c, ops.full(sv.shape, 1.0, dtype=np.float64))
+    kmax = ops.scatter_max(kmax, r, c, sv)
 
     empty = kcnt == 0
-    ksum[empty] = np.nan
-    kmax[empty] = np.nan
+    ksum = ops.where(empty, np.nan, ksum)
+    kmax = ops.where(empty, np.nan, kmax)
     return ksum, kmax, kcnt
 
 
-def _argmax_or_missing(M: np.ndarray, require_positive: bool = False) -> np.ndarray:
-    Mf = np.where(np.isnan(M), -np.inf, M)
-    a = np.argmax(Mf, axis=1)
-    best = Mf[np.arange(M.shape[0]), a]
-    invalid = ~np.isfinite(best) | (require_positive & (best <= 0))
-    return np.where(invalid, -1, a)
+def _argmax_or_missing(
+    M: np.ndarray, require_positive: bool = False, ops: Optional[ArrayOps] = None
+) -> np.ndarray:
+    ops = ops or NumpyArrayOps()
+    Mf = ops.where(ops.isnan(M), -np.inf, M)
+    a = ops.argmax(Mf, axis=1)
+    best = ops.gather(Mf, ops.arange(M.shape[0]), a)
+    invalid = ~ops.isfinite(best) | (require_positive & (best <= 0))
+    return ops.where(invalid, -1, a)
 
 
 def rewrap_signal_providers(
     providers: Sequence[SignalProvider],
     dense: DenseRetriever,
     lexical: LexicalRetriever,
+    ops: Optional[ArrayOps] = None,
 ) -> List[SignalProvider]:
     """Rebuild ``providers`` onto a new ``dense``/``lexical`` pair, in order.
 
@@ -89,13 +100,16 @@ def rewrap_signal_providers(
     the new instances, or a later ``assemble()`` call would keep scoring
     against the stale, pre-extension retriever and silently miss the new
     classes/examples. Any other (non-wrapping, e.g. a stateless custom) provider
-    is returned unchanged -- it holds no dense/lexical reference to go stale."""
+    is returned unchanged -- it holds no dense/lexical reference to go stale.
+
+    ``ops`` overrides the backend the rewrapped built-ins run on; ``None``
+    (the default) keeps each provider's existing one."""
     out: List[SignalProvider] = []
     for provider in providers:
         if isinstance(provider, DenseSignalProvider):
-            out.append(DenseSignalProvider(dense, provider._ops))
+            out.append(DenseSignalProvider(dense, ops or provider._ops))
         elif isinstance(provider, LexicalSignalProvider):
-            out.append(LexicalSignalProvider(lexical, provider._ops))
+            out.append(LexicalSignalProvider(lexical, ops or provider._ops))
         else:
             out.append(provider)
     return out
@@ -142,23 +156,22 @@ class DenseSignalProvider(SignalProvider):
         ]
 
     def build(self, ctx: SignalContext) -> List[SignalMatrix]:
+        ops = self._ops
         dense = self._retriever
         q_emb = ctx.q_emb
-        desc_d = np.asarray(dense.description_similarity(q_emb), dtype=np.float64)
+        desc_d = ops.astype(dense.description_similarity(q_emb), np.float64)
         if ctx.self_ids is None:
-            proto = np.asarray(dense.prototype_similarity(q_emb), dtype=np.float64)
+            proto = ops.astype(dense.prototype_similarity(q_emb), np.float64)
             dn_lab, dn_sim = dense.knn_example_labels(q_emb, ctx.k)
         else:
-            proto = np.asarray(
-                dense.loo_prototype_similarity(q_emb, ctx.self_ids), dtype=np.float64
-            )
+            proto = ops.astype(dense.loo_prototype_similarity(q_emb, ctx.self_ids), np.float64)
             dn_lab, dn_sim = dense.knn_example_labels(q_emb, ctx.k, ctx.self_ids)
-        d_sum, d_max, d_cnt = _scatter_knn(dn_lab, dn_sim, ctx.n_classes, self._ops)
+        d_sum, d_max, d_cnt = _scatter_knn(dn_lab, dn_sim, ctx.n_classes, ops)
 
-        a_desc = np.argmax(np.where(np.isnan(desc_d), -np.inf, desc_d), axis=1)
-        a_proto = _argmax_or_missing(proto)
+        a_desc = ops.argmax(ops.where(ops.isnan(desc_d), -np.inf, desc_d), axis=1)
+        a_proto = _argmax_or_missing(proto, ops=ops)
         a_dknn = dn_lab[:, 0]
-        abs_top_dense = dn_sim[:, 0].astype(np.float64)
+        abs_top_dense = ops.astype(dn_sim[:, 0], np.float64)
 
         return [
             SignalMatrix(
@@ -255,21 +268,30 @@ class LexicalSignalProvider(SignalProvider):
         ]
 
     def build(self, ctx: SignalContext) -> List[SignalMatrix]:
+        ops = self._ops
         lexical = self._retriever
         texts = ctx.texts
         if ctx.self_ids is None:
             bn_lab, bn_sco = lexical.knn_example_labels(texts, ctx.k)
         else:
             bn_lab, bn_sco = lexical.knn_example_labels(texts, ctx.k, ctx.self_ids)
-        bdesc_raw = np.asarray(lexical.description_score(texts), dtype=np.float64)
-        bdesc = np.where(bdesc_raw > 0, bdesc_raw, np.nan)  # 0 overlap == missing
-        b_sum, b_max, b_cnt = _scatter_knn(bn_lab, bn_sco, ctx.n_classes, self._ops)
+        # **The one host->device crossing per chunk** (T85). BM25 is permanently
+        # host-side (T83's device policy: sparse products and a Python/C
+        # tokenizer), so its block -- the (b, C) description scores and the
+        # (b, k) neighbour labels/scores -- is lifted here, once, and everything
+        # downstream of this point stays on the backend. Under the numpy backend
+        # every `asarray` below is a no-op.
+        bn_lab = ops.asarray(bn_lab, np.int64)
+        bn_sco = ops.asarray(bn_sco)
+        bdesc_raw = ops.astype(ops.asarray(lexical.description_score(texts)), np.float64)
+        bdesc = ops.where(bdesc_raw > 0, bdesc_raw, np.nan)  # 0 overlap == missing
+        b_sum, b_max, b_cnt = _scatter_knn(bn_lab, bn_sco, ctx.n_classes, ops)
 
-        a_bdesc = _argmax_or_missing(bdesc, require_positive=True)
+        a_bdesc = _argmax_or_missing(bdesc, require_positive=True, ops=ops)
         a_bknn = bn_lab[:, 0]
         with np.errstate(invalid="ignore"):
-            abs_top_bm25 = np.nanmax(np.where(np.isnan(bn_sco), -np.inf, bn_sco), axis=1)
-        abs_top_bm25 = np.where(np.isfinite(abs_top_bm25), abs_top_bm25, 0.0)
+            abs_top_bm25 = ops.nanmax(ops.where(ops.isnan(bn_sco), -np.inf, bn_sco), axis=1)
+        abs_top_bm25 = ops.where(ops.isfinite(abs_top_bm25), abs_top_bm25, 0.0)
 
         return [
             SignalMatrix(

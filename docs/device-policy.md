@@ -1,4 +1,16 @@
-# Device policy (T83)
+# Device policy (T83, T85)
+
+> **T85 status (2026-08-05).** The device-resident path described below is
+> implemented: `array_backend="torch"` runs every dense-side kernel on the
+> configured device, `dense_kind="torch"` keeps the example embeddings,
+> prototypes and description matrix resident there, and a device encoder hands
+> its tensors straight to retrieval. What is **not** done is the GPU
+> measurement: this host still has no CUDA device, so the speedup numbers the
+> T85 acceptance criterion asks for are still owed, and the crossover
+> thresholds below are still inferred from CPU cost distribution rather than
+> measured device speedups. `scripts/profile_devices.py --array-backend torch`
+> is the harness for that re-run. See "Determinism across backends" below for
+> what changes about reproducibility once a device is in play.
 
 Written from `scripts/profile_devices.py`'s measured run, committed alongside this
 doc as `docs/device-profile.json` / `docs/device-profile.md`. Run after T88 (the
@@ -127,6 +139,109 @@ this document already flags as required follow-up.
   `predict_proba`-and-`fit` timing pass on the fusion side, and the VRAM curve)
   before either lands — the crossover thresholds above are inferred from CPU
   cost distribution, not measured device speedups.
+
+## Determinism across backends (T85)
+
+The decision, taken 2026-08-04 and implemented here: **CPU is the reference
+implementation and the benchmark/CI baseline; a device backend is an
+accelerator whose results agree within float tolerance, not bit for bit.**
+Concretely, on a run with `array_backend="torch"`:
+
+- **Continuous features move in the last ulps.** float32 reductions (the kNN
+  matmul, the prototype and description similarity products) are summed in a
+  different order, so `d_desc_sim` and friends differ by ~1e-7 on the values
+  we measured. Nothing downstream cares about that magnitude *directly*.
+- **Ordinal features can flip on a near-tie, and the candidate set with them.**
+  This is the part that matters: `rank_*`, `is_*_top1` and the top-n candidate
+  mask are comparisons, so two candidates within ~1e-7 can swap, and a
+  candidate sitting exactly at the top-n cut can move in or out. The frame is
+  then not merely a different number — it is a different *row*. Feature values
+  of the rows that stay are unchanged within tolerance.
+- **`rank_*` on a candidate a signal did not retrieve is arbitrary on either
+  backend.** All such candidates tie at `-inf`, and the numpy path breaks that
+  tie with an unstable sort. It was never a reproducible value; it just never
+  had a second implementation to disagree with before.
+- **Same host + same device + same seed is reproducible.** Cross-device is
+  not — do not compare a GPU run's metrics against a CPU run's at more than
+  tolerance. One caveat inside that promise: the two scatter kernels use
+  `index_put_(accumulate=True)` / `scatter_reduce_`, whose CUDA implementations
+  accumulate with atomics and so do not fix a summation order. For *bitwise*
+  repeatability on CUDA, set `torch.use_deterministic_algorithms(True)`, which
+  selects torch's deterministic implementations of exactly those ops.
+- **Every run records what produced it.** `evaluation.json`'s manifest carries
+  an `execution` block (`array_backend`, `device`, `dense_kind`), so a metric
+  can always be traced back to the arithmetic that produced it.
+
+This qualifies T26's determinism invariant rather than repealing it: identical
+runs on identical hardware remain identical, and the numpy backend — the
+default, and what the quality benchmark and golden fixtures use — is unchanged
+bit for bit by T85.
+
+`tests/integration/test_device_parity.py` is where these claims are checked:
+continuous columns with `allclose`, ordinal columns exactly *except* on rows
+that are unretrieved or within tolerance of a tie, with the exemption itself
+verified against the frame's own values rather than assumed.
+
+## What T85 actually moved
+
+| Stage | Before | After |
+|---|---|---|
+| Encoder output | forced to numpy on the host | stays a device tensor under the torch backend (`convert_to_tensor`), handed straight to retrieval |
+| `example_emb` / `prototypes` / `description_emb` | numpy, rebuilt per fold | uploaded once per run, sliced per fold on the device |
+| `_dense_topk` | `argpartition` + gather + `argsort` | one `ArrayOps.topk` |
+| `_scatter_knn` | scattered on the backend, then **three `to_host` calls per signal per chunk** | stays resident |
+| `_prototypes_and_freq` | scatter on the backend, `to_host`, finish on the host | stays resident |
+| `n_signal_agreement` | per-row Python `set` loop on host arrays | vectorized sort/count on the backend |
+| Frame construction | one `np.asarray` per column | one `to_host` of the stacked block + one of the candidate grid |
+
+Per chunk, that leaves exactly one host→device crossing — the BM25 block: the
+`(b, k)` neighbour labels, the `(b, k)` neighbour scores and the `(b, C)`
+description scores, BM25 being permanently host-side per the table above — and
+two device→host crossings, both at the fusion handoff at the end of the chunk.
+A host-side encoder (TF-IDF/hashing) adds one more upload per chunk for the
+query block; a device encoder adds none. This is asserted, not asserted-ish:
+see `test_transfers_per_chunk_are_the_bm25_block_and_the_handoff`.
+
+## Measured effect (CPU-only host — the GPU number is still owed)
+
+Same harness, same shapes, `--array-backend numpy` vs `--array-backend torch`
+on this CPU-only host. **This is not the measurement the T85 acceptance
+criterion asks for** — it compares numpy's kernels with torch's *CPU* kernels,
+with no device residency involved — but it does show that the seam itself does
+not cost anything, and where the work is concentrated:
+
+| Stage (10k items, 5000 classes) | numpy | torch-CPU |
+|---|---|---|
+| `_dense_topk` | 5.75s | 0.32s |
+| `_scatter_knn` | 7.42s | 2.37s |
+| leaf ops (ranks/margins/minmax/topn) | 12.72s | 6.80s |
+| BM25 (host-side in both) | 2.21s | 1.46s |
+| **`assemble()` wall** | **32.5s** | **14.7s** |
+
+The BM25 row is the caution: that stage is byte-identical host work in both
+runs, so its 1.5x "improvement" is measurement noise (thread contention on a
+shared host), and the same noise is inside every other row. Read the table as
+"the same order of magnitude or better, concentrated in the stages T83
+predicted", not as a precise speedup.
+
+Cross-process noise is why the headline number below comes from an
+**interleaved, same-process A/B** instead (4 alternating runs per backend,
+10,858 items / 2,000 classes / 1,000 queries, `assemble()` wall):
+
+```
+numpy  1.68  1.30  1.19  1.24   median 1.27s
+torch  1.01  0.57  0.51  0.48   median 0.54s   -> 2.34x
+```
+
+**What this does and does not license.** It licenses "the T85 seam does not
+tax the pipeline, and torch's kernels are at least competitive on the stages
+T83 flagged." It does **not** license any claim about the GPU configuration
+the ticket is actually about — device residency, one H2D per chunk, and the
+encoder→retrieval handoff are *implemented and asserted structurally* (transfer
+counts, parity), but their speedup is unmeasured. Since `assemble()` runs once
+per fold in the OOF loop, whatever the device factor turns out to be, it
+compounds `n_folds` times against the per-fold column of the table above —
+that is the number the GPU-host re-run should report, alongside end-to-end.
 
 ## Reproducing / extending this profile
 

@@ -34,6 +34,7 @@ from .._version import __version__
 from ..config import FeatureProviderConfig, PipelineConfig
 from ..domain import (
     AbstentionPolicy,
+    ArrayOps,
     ClassDefinition,
     ConfidenceCalibrator,
     FeatureProvider,
@@ -44,7 +45,9 @@ from ..domain import (
     TextEncoder,
     fusion_feature_names,
 )
+from .array_ops import available_array_backend, resolve_array_backend
 from .registry import (
+    build_array_ops,
     build_signal_providers,
     calibrator_spec,
     dense_retriever_spec,
@@ -111,6 +114,13 @@ class DeployedArtifacts:
     # this in, defaulting to the two built-ins) — the default kept as an empty
     # list here only so direct construction (e.g. in tests) stays valid.
     signal_providers: List[SignalProvider] = field(default_factory=list)
+    # T85: the array backend these components were built against — the dense
+    # retriever's state lives in its arrays, and the feature assembler must use
+    # the same one or every kernel would transfer its inputs. Resolved by the
+    # loading host (never read from disk as fact: an unavailable backend
+    # downgrades to numpy), and ``None`` means "numpy", so direct construction
+    # in tests stays valid.
+    array_ops: Optional[ArrayOps] = None
 
     def with_added_classes(self, new_classes: Sequence[NewClass]) -> "DeployedArtifacts":
         """Widen this model's label space with new classes, **without retraining**.
@@ -499,9 +509,32 @@ class ArtifactRepository:
 
         dense = dense_spec.load(directory, config.retrieval)
         lexical = self._load_lexical(directory, components["lexical"])
+
+        # T85: which backend *runs* this model is the loading host's decision,
+        # not the file's. What was persisted is numpy either way; here we
+        # re-resolve from the recorded preference, downgrading to numpy when
+        # this host has no torch, and re-adopt the dense index onto the result
+        # (its arrays are exactly what a device backend wants resident). The
+        # encoder is told too, so a device run gets device-side embeddings.
+        ops = build_array_ops(
+            available_array_backend(
+                resolve_array_backend(
+                    None if config.array_backend == "auto" else config.array_backend,
+                    n_items=int(np.asarray(dense.state.example_emb).shape[0])
+                    if hasattr(dense, "state")
+                    else 0,
+                    n_classes=len(meta["classes"]),
+                    k_neighbors=config.retrieval.k_neighbors,
+                    dense_kind=components["dense"],
+                )
+            )
+        )
+        if ops.name != "numpy" and hasattr(dense, "with_array_ops"):
+            dense = dense.with_array_ops(ops)
+        encoder.set_array_ops(ops)
         # The real SignalProviders, wrapping the now-loaded dense/lexical.
         signal_providers = load_signal_providers(
-            directory, config.retrieval, components["signals"], dense, lexical
+            directory, config.retrieval, components["signals"], dense, lexical, ops
         )
 
         fusion = fus_spec.load(os.path.join(directory, fus_spec.filename))
@@ -523,6 +556,7 @@ class ArtifactRepository:
             abstention,
             feature_providers=feature_providers,
             signal_providers=signal_providers,
+            array_ops=ops,
         )
 
     @staticmethod

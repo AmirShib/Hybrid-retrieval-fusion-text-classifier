@@ -48,7 +48,7 @@ from ..domain import (
     SignalProvider,
     TextEncoder,
 )
-from .array_ops import NumpyArrayOps
+from .array_ops import NumpyArrayOps, TorchArrayOps
 from .encoder import (
     HashingEncoder,
     SentenceTransformerEncoder,
@@ -122,7 +122,12 @@ class DenseRetrieverSpec:
     labels, label_space, cfg, array_ops); ``load`` receives the *model
     directory* plus the ``RetrievalConfig`` (for e.g. the persisted chunk size),
     mirroring ``EncoderSpec``'s directory-based load so a future backend that
-    needs several files has somewhere to put them."""
+    needs several files has somewhere to put them.
+
+    ``load`` deliberately takes no ``ArrayOps``: what a model directory holds is
+    numpy (the portability invariant), and which backend *runs* it is decided
+    by the loading host, not the file — see ``ArtifactRepository.load``, which
+    re-adopts the loaded retriever onto the run's backend."""
 
     build: Callable[
         [TextEncoder, Sequence[str], np.ndarray, LabelSpace, RetrievalConfig, Optional[ArrayOps]],
@@ -485,11 +490,43 @@ register_calibrator(
 )
 
 register_array_ops("numpy", ArrayOpsSpec(build=lambda: NumpyArrayOps()))
+# T85. Registered unconditionally — the spec holds a factory, not an import, so
+# naming it here costs nothing on a torch-free host; `TorchArrayOps.__init__`
+# is where torch is imported (with an actionable error if the `gpu` extra is
+# missing), and `resolve_array_backend` never selects this kind unless torch is
+# present and a device is visible.
+register_array_ops("torch", ArrayOpsSpec(build=lambda: TorchArrayOps()))
 
 
 def _load_dense_exact(directory: str, cfg: RetrievalConfig) -> DenseRetriever:
     arrays: Dict[str, Any] = dict(np.load(os.path.join(directory, "dense.npz")))
     return DenseRetrieverAdapter.from_state(arrays, chunk=cfg.dense_chunk)
+
+
+def _build_dense_torch(
+    encoder: TextEncoder,
+    texts: Sequence[str],
+    labels: np.ndarray,
+    label_space: LabelSpace,
+    cfg: RetrievalConfig,
+    array_ops: Optional[ArrayOps] = None,
+) -> DenseRetriever:
+    """Device-resident dense retrieval (T85, ``dense_kind="torch"``).
+
+    The same ``DenseRetrieverAdapter`` as ``"exact"`` — there is one
+    implementation of the arithmetic — handed the torch backend, which is what
+    makes ``example_emb``/``prototypes``/``description_emb`` upload once at
+    build time and stay resident for every query batch and every fold.
+
+    Choosing this kind is an explicit request for a device backend, so it
+    supplies one when the run resolved to numpy (a mixed run would upload and
+    download around every kernel, which is the pathology the ticket exists to
+    remove). ``PipelineConfig.validate`` rejects the contradictory explicit
+    combination up front; this is the belt-and-braces for a directly
+    constructed retriever."""
+    if array_ops is None or array_ops.name == "numpy":
+        array_ops = TorchArrayOps()
+    return DenseRetrieverAdapter.build(encoder, texts, labels, label_space, cfg, array_ops)
 
 
 def _load_lexical_bm25(directory: str) -> LexicalRetriever:
@@ -503,6 +540,19 @@ register_dense_retriever(
     "exact",
     DenseRetrieverSpec(
         build=DenseRetrieverAdapter.build,
+        filename="dense.npz",
+        load=_load_dense_exact,
+    ),
+)
+
+register_dense_retriever(
+    "torch",
+    DenseRetrieverSpec(
+        build=_build_dense_torch,
+        # Same file, same contents: a torch-trained index persists as numpy
+        # (`DenseRetrieverAdapter.to_state` lowers it), so `dense.npz` from a
+        # GPU run and from a CPU run are the same artifact and either loads
+        # anywhere.
         filename="dense.npz",
         load=_load_dense_exact,
     ),

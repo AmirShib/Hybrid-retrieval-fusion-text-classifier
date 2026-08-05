@@ -81,6 +81,13 @@ class RetrievalConfig:
     # DenseRetrieverAdapter, "bm25" wraps LexicalRetrieverAdapter) are the
     # byte-for-byte-identical defaults. This is what T31 (FAISS) and other
     # retriever backends plug into instead of forking the concrete adapter.
+    #
+    # T85 adds "torch": the same exact-search adapter, but with its embeddings,
+    # prototypes and description matrix resident on the device and the kNN
+    # matmul + top-k running there. It requires the torch array backend (the
+    # `gpu` extra) and is validated against `array_backend="numpy"`; what it
+    # *persists* is identical (numpy in dense.npz), so a model trained with it
+    # still loads on an air-gapped CPU-only host.
     dense_kind: str = "exact"
     lexical_kind: str = "bm25"
     # No stopword removal by default: a language-specific filter is an opt-in
@@ -410,6 +417,24 @@ class PipelineConfig:
                 self.signals,
                 len(set(self.signals)) == len(self.signals),
                 "free of duplicates",
+            ),
+            (
+                "array_backend",
+                self.array_backend,
+                isinstance(self.array_backend, str) and bool(self.array_backend.strip()),
+                "a non-empty registry-key string (or 'auto')",
+            ),
+            # A device-resident retriever feeding host-resident feature assembly
+            # is the worst of both: every kernel would download its inputs and
+            # upload its outputs. The two must agree, and only the explicitly
+            # contradictory pair is rejected -- "auto" resolves *to* torch when
+            # dense_kind asks for it (see resolve_array_backend).
+            (
+                "retrieval.dense_kind",
+                self.retrieval.dense_kind,
+                not (self.retrieval.dense_kind == "torch" and self.array_backend == "numpy"),
+                "not 'torch' while array_backend='numpy' (the torch dense retriever needs "
+                "the torch array backend; use array_backend='torch' or 'auto')",
             ),
         ]
         problems = [
