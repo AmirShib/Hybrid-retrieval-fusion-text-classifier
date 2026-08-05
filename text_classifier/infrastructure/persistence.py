@@ -27,7 +27,7 @@ import logging
 import os
 import pickle
 from dataclasses import dataclass, field, replace
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
 import numpy as np
 
@@ -76,6 +76,55 @@ _LEGACY_SIGNALS = ["dense", "lexical"]
 
 # A new class may be given as a ClassDefinition or a plain (key, description) pair.
 NewClass = Union[ClassDefinition, Sequence[str]]
+
+# Optional structured taxonomy fields, and how each serializes into meta.json.
+# Scalars round-trip as strings, multi-value fields as JSON arrays (meta.json is
+# real JSON, so no in-cell separator convention is needed here — that is only a
+# CSV concern).
+_CLASS_SCALAR_FIELDS = ("title", "definition")
+_CLASS_TUPLE_FIELDS = (
+    "examples",
+    "inclusions",
+    "exclusions",
+    "parent_path",
+    "sibling_distinctions",
+)
+
+
+def _class_to_meta(definition: ClassDefinition) -> Dict[str, Any]:
+    """Serialize one class for ``meta.json``.
+
+    Empty optional fields are *omitted* rather than written as ""/[]. A taxonomy
+    with no structured fields therefore produces exactly the ``{"key", "description"}``
+    entries it produces today — an existing model dir re-saved by this version is
+    unchanged, and a diff of meta.json shows only classes that actually gained
+    structure."""
+    out: Dict[str, Any] = {"key": definition.key, "description": definition.description}
+    for name in _CLASS_SCALAR_FIELDS:
+        value = getattr(definition, name)
+        if value:
+            out[name] = value
+    for name in _CLASS_TUPLE_FIELDS:
+        value = getattr(definition, name)
+        if value:
+            out[name] = list(value)
+    return out
+
+
+def _class_from_meta(entry: Mapping[str, Any]) -> ClassDefinition:
+    """Rebuild one class from ``meta.json``.
+
+    Missing optional keys are the norm, not an error: every model dir written
+    before the structured fields existed carries only ``key``/``description``, and
+    must keep loading."""
+    kwargs: Dict[str, Any] = {}
+    for name in _CLASS_SCALAR_FIELDS:
+        if entry.get(name):
+            kwargs[name] = entry[name]
+    for name in _CLASS_TUPLE_FIELDS:
+        if entry.get(name):
+            kwargs[name] = tuple(entry[name])
+    return ClassDefinition(entry["key"], entry["description"], **kwargs)
 
 
 def _lexical_json_path(npz_filename: str) -> str:
@@ -169,10 +218,10 @@ class DeployedArtifacts:
                 "To change an existing class's description, retrain the model."
             )
 
-        current = [
-            ClassDefinition(k, d)
-            for k, d in zip(self.label_space.keys, self.label_space.descriptions)
-        ]
+        # Carry the existing definitions through whole — rebuilding them from
+        # keys+descriptions would silently strip any structured taxonomy fields
+        # off every incumbent class.
+        current = list(self.label_space.definitions)
         # LabelSpace raises on new-vs-new duplicate keys; existing collisions are
         # already reported above with a clearer, more actionable message.
         extended_space = LabelSpace(current + defs)
@@ -263,10 +312,7 @@ class ArtifactRepository:
                 "signals": list(cfg.signals),
             },
             "feature_providers": provider_manifest,
-            "classes": [
-                {"key": k, "description": d}
-                for k, d in zip(artifacts.label_space.keys, artifacts.label_space.descriptions)
-            ],
+            "classes": [_class_to_meta(d) for d in artifacts.label_space.definitions],
             "abstention": {
                 "global_threshold": artifacts.abstention.global_threshold,
                 "per_class": {str(k): v for k, v in artifacts.abstention.per_class.items()},
@@ -491,7 +537,6 @@ class ArtifactRepository:
         config = PipelineConfig.from_dict(meta["config"])
         if device is not None:
             config.encoder.device = device
-
         # Dispatch each swappable component through the registry by its recorded
         # kind (defaulting for legacy dirs that predate the `components` block).
         components = self._components_from_meta(meta)
@@ -521,9 +566,7 @@ class ArtifactRepository:
             ),
         )
 
-        label_space = LabelSpace(
-            [ClassDefinition(c["key"], c["description"]) for c in meta["classes"]]
-        )
+        label_space = LabelSpace([_class_from_meta(c) for c in meta["classes"]])
 
         encoder = enc_spec.load(os.path.join(directory, enc_spec.dirname), config.encoder)
 

@@ -115,9 +115,9 @@ def update(
 
     if new_defs:
         dense = dense.with_added_classes(encoder, [d.description for d in new_defs])
-        current_defs = [
-            ClassDefinition(k, d) for k, d in zip(label_space.keys, label_space.descriptions)
-        ]
+        # Incumbent definitions carry through whole; rebuilding them from
+        # keys+descriptions would strip their structured taxonomy fields.
+        current_defs = list(label_space.definitions)
         label_space = LabelSpace(current_defs + new_defs)
     if edited:
         dense = dense.with_updated_descriptions(encoder, edited)
