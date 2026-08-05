@@ -101,7 +101,7 @@ signal once T34 phase 2 lands.
 | T31 | 3    | Optional FAISS/ANN backend behind the `DenseRetriever` port (needs T23)        | todo |
 | T32 | ~~3~~ 8 | BM25 memory profile for large corpora — **re-scoped to memory + throughput, moved to Tier 8** | in-review |
 | T33 | 3    | Optional cross-encoder reranker as 6th retrieval signal (needs T03, optional)  | todo |
-| T34 | 3    | Pluggable retrieval signals + retrievers behind the registry (needs T23, T03)  | in-review (phase 1 landed 2026-08-05; phase 2 open) |
+| T34 | 3    | Pluggable retrieval signals + retrievers behind the registry (needs T23, T03)  | in-review (phase 1 + phase 2 landed 2026-08-05) |
 | T35 | 3    | Language-neutral BM25 defaults (drop hidden English stopwords)                | done |
 | T81 | 3    | Competition features: per-candidate margins + per-query top1−top2 gap (needs T03) | in-review |
 

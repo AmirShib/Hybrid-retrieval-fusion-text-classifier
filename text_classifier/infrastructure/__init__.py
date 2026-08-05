@@ -31,6 +31,7 @@ from .registry import (
     FeatureProviderSpec,
     FusionSpec,
     LexicalRetrieverSpec,
+    SignalProviderSpec,
     array_ops_spec,
     build_array_ops,
     build_calibrator,
@@ -39,10 +40,12 @@ from .registry import (
     build_feature_providers,
     build_fusion,
     build_lexical_retriever,
+    build_signal_providers,
     dense_retriever_spec,
     encoder_is_corpus_dependent,
     fit_encoder,
     lexical_retriever_spec,
+    load_signal_providers,
     register_array_ops,
     register_calibrator,
     register_dense_retriever,
@@ -50,7 +53,9 @@ from .registry import (
     register_feature_provider,
     register_fusion,
     register_lexical_retriever,
+    register_signal_provider,
     registered_array_ops_kinds,
+    signal_provider_spec,
 )
 from .retrieval import (
     BM25Index,
@@ -59,6 +64,7 @@ from .retrieval import (
     LexicalRetrieverAdapter,
     bm25_prunes_vocab,
 )
+from .signals import DenseSignalProvider, LexicalSignalProvider
 
 __all__ = [
     "SentenceTransformerEncoder",
@@ -111,4 +117,11 @@ __all__ = [
     "lexical_retriever_spec",
     "register_dense_retriever",
     "register_lexical_retriever",
+    "SignalProviderSpec",
+    "DenseSignalProvider",
+    "LexicalSignalProvider",
+    "build_signal_providers",
+    "load_signal_providers",
+    "register_signal_provider",
+    "signal_provider_spec",
 ]

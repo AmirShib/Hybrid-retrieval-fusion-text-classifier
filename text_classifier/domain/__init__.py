@@ -15,6 +15,9 @@ from .ports import (
     FeatureProvider,
     FusionModel,
     LexicalRetriever,
+    SignalContext,
+    SignalMatrix,
+    SignalProvider,
     TextEncoder,
 )
 from .services import (
@@ -45,6 +48,9 @@ __all__ = [
     "ConfidenceCalibrator",
     "FeatureProvider",
     "FeatureContext",
+    "SignalProvider",
+    "SignalContext",
+    "SignalMatrix",
     "FEATURE_NAMES",
     "FEATURE_DEPS",
     "composed_feature_names",

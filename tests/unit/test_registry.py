@@ -133,6 +133,7 @@ def test_components_from_meta_reads_explicit_block():
             "calibrator": "platt",
             "dense": "exact",
             "lexical": "bm25",
+            "signals": ["dense", "lexical"],
         }
     }
     got = ArtifactRepository._components_from_meta(meta)
@@ -142,6 +143,7 @@ def test_components_from_meta_reads_explicit_block():
         "calibrator": "platt",
         "dense": "exact",
         "lexical": "bm25",
+        "signals": ["dense", "lexical"],
     }
 
 
@@ -152,6 +154,7 @@ def test_components_from_meta_falls_back_to_config_kinds():
             "fusion": {"kind": "xgboost"},
             "calibration": {"kind": "isotonic"},
             "retrieval": {"dense_kind": "exact", "lexical_kind": "bm25"},
+            "signals": ["dense", "lexical"],
         }
     }
     got = ArtifactRepository._components_from_meta(meta)
@@ -161,11 +164,12 @@ def test_components_from_meta_falls_back_to_config_kinds():
         "calibrator": "isotonic",
         "dense": "exact",
         "lexical": "bm25",
+        "signals": ["dense", "lexical"],
     }
 
 
 def test_components_from_meta_legacy_defaults():
-    """A model dir written before T23 (or before T34 phase 1, for dense/lexical)
+    """A model dir written before T23 (or before T34, for dense/lexical/signals)
     has neither block → built-in defaults."""
     got = ArtifactRepository._components_from_meta({"config": {}})
     assert got == {
@@ -174,6 +178,7 @@ def test_components_from_meta_legacy_defaults():
         "calibrator": "isotonic",
         "dense": "exact",
         "lexical": "bm25",
+        "signals": ["dense", "lexical"],
     }
 
 
@@ -224,6 +229,7 @@ def test_end_to_end_with_custom_fusion(tmp_path):
         "calibrator": "isotonic",
         "dense": "exact",
         "lexical": "bm25",
+        "signals": ["dense", "lexical"],
     }
 
     loaded = ArtifactRepository().load(model_dir)

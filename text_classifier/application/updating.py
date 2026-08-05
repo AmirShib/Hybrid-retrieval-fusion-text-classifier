@@ -38,6 +38,7 @@ import numpy as np
 from ..domain import ClassDefinition, LabeledItem, LabelSpace
 from ..infrastructure import DeployedArtifacts, encoder_is_corpus_dependent
 from ..infrastructure.retrieval import LexicalRetrieverAdapter
+from ..infrastructure.signals import rewrap_signal_providers
 
 log = logging.getLogger(__name__)
 
@@ -173,5 +174,16 @@ def update(
     else:
         updated_corpus = list(corpus) if corpus is not None else None
 
-    new_artifacts = replace(artifacts, label_space=label_space, dense=dense, lexical=lexical)
+    # T34 phase 2: rewrap any DenseSignalProvider/LexicalSignalProvider onto
+    # the (possibly extended) dense/lexical retrievers built above, or a later
+    # assemble() call would score against the stale, pre-update retriever and
+    # silently miss the new classes/examples.
+    signal_providers = rewrap_signal_providers(artifacts.signal_providers, dense, lexical)
+    new_artifacts = replace(
+        artifacts,
+        label_space=label_space,
+        dense=dense,
+        lexical=lexical,
+        signal_providers=signal_providers,
+    )
     return new_artifacts, updated_corpus

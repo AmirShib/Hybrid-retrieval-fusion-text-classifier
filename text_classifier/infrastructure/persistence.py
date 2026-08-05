@@ -26,7 +26,7 @@ import logging
 import os
 import pickle
 from dataclasses import dataclass, field, replace
-from typing import Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 import numpy as np
 
@@ -40,18 +40,22 @@ from ..domain import (
     FusionModel,
     LabeledItem,
     LabelSpace,
+    SignalProvider,
     TextEncoder,
     fusion_feature_names,
 )
 from .registry import (
+    build_signal_providers,
     calibrator_spec,
     dense_retriever_spec,
     encoder_spec,
     feature_provider_spec,
     fusion_spec,
     lexical_retriever_spec,
+    load_signal_providers,
 )
 from .retrieval import DenseRetrieverAdapter, LexicalRetrieverAdapter
+from .signals import rewrap_signal_providers
 
 log = logging.getLogger(__name__)
 
@@ -64,6 +68,9 @@ _LEGACY_COMPONENTS = {
     "dense": "exact",
     "lexical": "bm25",
 }
+# T34 phase 2: the signal-provider list for model dirs written before it was
+# recorded -- the two built-ins, unconditionally (byte-identical legacy schema).
+_LEGACY_SIGNALS = ["dense", "lexical"]
 
 
 # A new class may be given as a ClassDefinition or a plain (key, description) pair.
@@ -98,6 +105,12 @@ class DeployedArtifacts:
     # for a model with no custom features — the byte-for-byte-identical default.
     # A trailing field with a default keeps every positional construction valid.
     feature_providers: List[FeatureProvider] = field(default_factory=list)
+    # T34 phase 2: the SignalProviders that compute the (now pluggable)
+    # retrieval signals, in ``config.signals`` order. Empty is never persisted
+    # for a trained model (``ArtifactRepository.save``/``.load`` always fill
+    # this in, defaulting to the two built-ins) — the default kept as an empty
+    # list here only so direct construction (e.g. in tests) stays valid.
+    signal_providers: List[SignalProvider] = field(default_factory=list)
 
     def with_added_classes(self, new_classes: Sequence[NewClass]) -> "DeployedArtifacts":
         """Widen this model's label space with new classes, **without retraining**.
@@ -151,7 +164,17 @@ class DeployedArtifacts:
 
         dense = self.dense.with_added_classes(self.encoder, [d.description for d in defs])
         lexical = self.lexical.with_added_descriptions(extended_space.descriptions)
-        return replace(self, label_space=extended_space, dense=dense, lexical=lexical)
+        # T34 phase 2: a DenseSignalProvider/LexicalSignalProvider wraps a
+        # specific dense/lexical instance by reference; rewrap onto the
+        # extended indices so a later `assemble()` call sees the new classes.
+        signal_providers = rewrap_signal_providers(self.signal_providers, dense, lexical)
+        return replace(
+            self,
+            label_space=extended_space,
+            dense=dense,
+            lexical=lexical,
+            signal_providers=signal_providers,
+        )
 
 
 class ArtifactRepository:
@@ -187,7 +210,15 @@ class ArtifactRepository:
         # records kind + relative path + declared names so load rebuilds them in
         # order; the composed feature-name list below is the authoritative schema.
         provider_manifest = self._save_providers(directory, cfg, artifacts.feature_providers)
-        feature_names = fusion_feature_names(artifacts.feature_providers, cfg.fusion.drop_features)
+        feature_names = fusion_feature_names(
+            artifacts.feature_providers, cfg.fusion.drop_features, artifacts.signal_providers
+        )
+
+        # T34 phase 2: each SignalProvider persists to `signals/<name>/` via its
+        # own `save()` -- a no-op for the two built-ins (their state already
+        # lives in dense.npz/lexical.npz above), a real write for any custom
+        # provider with its own learned state.
+        self._save_signal_providers(directory, artifacts.signal_providers)
 
         meta = {
             "feature_names": feature_names,
@@ -199,6 +230,7 @@ class ArtifactRepository:
                 "calibrator": cfg.calibration.kind,
                 "dense": cfg.retrieval.dense_kind,
                 "lexical": cfg.retrieval.lexical_kind,
+                "signals": list(cfg.signals),
             },
             "feature_providers": provider_manifest,
             "classes": [
@@ -347,6 +379,19 @@ class ArtifactRepository:
         )
 
     @staticmethod
+    def _save_signal_providers(directory: str, providers: Sequence[SignalProvider]) -> None:
+        """Persist each signal provider to ``signals/<name>/`` via its own
+        ``save()`` (T34 phase 2). The two built-ins' ``save`` is a no-op --
+        their numeric state already lives in ``dense.npz``/``lexical.npz``,
+        written above by their wrapped retriever's own spec -- so a model with
+        only the default two providers writes no ``signals/`` directory,
+        keeping its on-disk layout byte-for-byte the pre-T34-phase-2 one."""
+        if not providers:
+            return
+        for provider in providers:
+            provider.save(os.path.join(directory, "signals", provider.name))
+
+    @staticmethod
     def _save_providers(
         directory: str, cfg: PipelineConfig, providers: Sequence[FeatureProvider]
     ) -> List[Dict]:
@@ -416,17 +461,6 @@ class ArtifactRepository:
         config = PipelineConfig.from_dict(meta["config"])
         if device is not None:
             config.encoder.device = device
-        # Rebuild feature providers before the schema check: the effective schema
-        # is core + provider columns, so the providers must exist to compute it.
-        feature_providers = self._load_providers(directory, meta, config)
-        self._check_feature_schema(
-            meta.get("feature_names"),
-            fusion_feature_names(feature_providers, config.fusion.drop_features),
-        )
-
-        label_space = LabelSpace(
-            [ClassDefinition(c["key"], c["description"]) for c in meta["classes"]]
-        )
 
         # Dispatch each swappable component through the registry by its recorded
         # kind (defaulting for legacy dirs that predate the `components` block).
@@ -436,10 +470,39 @@ class ArtifactRepository:
         cal_spec = calibrator_spec(components["calibrator"])
         dense_spec = dense_retriever_spec(components["dense"])
 
+        # Rebuild feature providers + a *schema-only* signal-provider list before
+        # the schema check, so a corrupt/incompatible model dir fails fast on the
+        # schema mismatch before any other file (dense.npz, the encoder dir, ...)
+        # is even opened. `column_names()` never touches the wrapped retriever
+        # (only `build()` does), so `dense=lexical=None` is safe here -- exactly
+        # the same "unfitted instance" discipline `build_feature_providers`
+        # already relies on for `FeatureProvider.names()`. An unregistered signal
+        # kind raises here too, naming the registered set -- the same
+        # schema-drift contract as encoder/fusion/calibrator/dense/lexical kind
+        # mismatches.
+        feature_providers = self._load_providers(directory, meta, config)
+        schema_signal_providers = build_signal_providers(
+            config.retrieval, components["signals"], None, None, None
+        )
+        self._check_feature_schema(
+            meta.get("feature_names"),
+            fusion_feature_names(
+                feature_providers, config.fusion.drop_features, schema_signal_providers
+            ),
+        )
+
+        label_space = LabelSpace(
+            [ClassDefinition(c["key"], c["description"]) for c in meta["classes"]]
+        )
+
         encoder = enc_spec.load(os.path.join(directory, enc_spec.dirname), config.encoder)
 
         dense = dense_spec.load(directory, config.retrieval)
         lexical = self._load_lexical(directory, components["lexical"])
+        # The real SignalProviders, wrapping the now-loaded dense/lexical.
+        signal_providers = load_signal_providers(
+            directory, config.retrieval, components["signals"], dense, lexical
+        )
 
         fusion = fus_spec.load(os.path.join(directory, fus_spec.filename))
         fusion.set_device(device)
@@ -459,11 +522,13 @@ class ArtifactRepository:
             calibrator,
             abstention,
             feature_providers=feature_providers,
+            signal_providers=signal_providers,
         )
 
     @staticmethod
-    def _components_from_meta(meta: Dict) -> Dict[str, str]:
-        """Resolve each component's ``kind`` for load dispatch.
+    def _components_from_meta(meta: Dict) -> Dict[str, Any]:
+        """Resolve each component's ``kind`` for load dispatch (``signals`` is a
+        list of kinds rather than a single one -- see ``PipelineConfig.signals``).
 
         Prefers the explicit ``components`` block; falls back
         to the kinds embedded in ``config``; finally to the built-in defaults so
@@ -487,6 +552,7 @@ class ArtifactRepository:
             "lexical": comp.get("lexical")
             or cfg.get("retrieval", {}).get("lexical_kind")
             or _LEGACY_COMPONENTS["lexical"],
+            "signals": comp.get("signals") or cfg.get("signals") or list(_LEGACY_SIGNALS),
         }
 
     @staticmethod

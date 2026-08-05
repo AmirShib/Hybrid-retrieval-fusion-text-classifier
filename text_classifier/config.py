@@ -231,6 +231,15 @@ class PipelineConfig:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     features: FeaturesConfig = field(default_factory=FeaturesConfig)
     candidate_top_n: int = 10
+    # T34 phase 2: which SignalProvider(s) compute the retrieval signals that
+    # feed candidate selection + the core feature columns. Registry keys (see
+    # infrastructure/registry.py's register_signal_provider), mirroring how
+    # retrieval.dense_kind/lexical_kind select a retriever *backend*: this
+    # selects which *signals* run at all. The default ["dense", "lexical"] is
+    # the byte-for-byte-identical five-signal schema; a third "kind" here adds
+    # a whole new signal (its own matrices, joining candidate selection via its
+    # own `candidate_features()`) without touching FeatureAssembler/pipelines.
+    signals: List[str] = field(default_factory=lambda: ["dense", "lexical"])
     # T84: which ArrayOps backend runs the numeric kernels in feature assembly
     # and dense retrieval. Registry key (see infrastructure/registry.py),
     # "auto" (the default) picks numpy vs. torch from T83's measured crossover
@@ -390,6 +399,18 @@ class PipelineConfig:
                 len(set(self.fusion.drop_features)) == len(self.fusion.drop_features),
                 "free of duplicates",
             ),
+            (
+                "signals",
+                self.signals,
+                bool(self.signals) and all(isinstance(s, str) and s.strip() for s in self.signals),
+                "a non-empty list of non-empty registry-key strings",
+            ),
+            (
+                "signals",
+                self.signals,
+                len(set(self.signals)) == len(self.signals),
+                "free of duplicates",
+            ),
         ]
         problems = [
             f"{name} must be {constraint}; got {value!r}"
@@ -436,6 +457,7 @@ class PipelineConfig:
             features=_build_features_section(data),
             candidate_top_n=data.get("candidate_top_n", cls().candidate_top_n),
             array_backend=data.get("array_backend", cls().array_backend),
+            signals=list(data.get("signals", cls().signals)),
         )
 
 

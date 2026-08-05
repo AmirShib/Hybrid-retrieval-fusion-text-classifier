@@ -1,8 +1,72 @@
 # T34 — Pluggable retrieval signals (and retrievers) behind the registry
 
-status: in-review (partial, phase 1 landed 2026-08-05; phase 2 still open)
+status: in-review (phase 1 + phase 2 landed 2026-08-05)
 tier: 3
 depends_on: T23, T03
+
+## Progress (2026-08-05) — Phase 2 landed
+`SignalProvider` (domain/ports.py) plus `SignalContext`/`SignalMatrix` — a
+provider contributes one or more `(b, C)` matrices that join the top-n
+candidate union, one layer below the existing `FeatureProvider` (T70), which
+only appends post-candidate-selection fusion columns. The two built-ins
+(`infrastructure/signals.py`'s `DenseSignalProvider`/`LexicalSignalProvider`)
+wrap an already-built `DenseRetriever`/`LexicalRetriever` (T34 phase 1) rather
+than re-implementing retrieval, reproducing exactly the five signal matrices
+`FeatureAssembler._assemble_chunk` used to compute inline.
+
+The five signals are *not* symmetric in `FEATURE_NAMES` (`d_proto_sim` has no
+rank/norm; only some signals get a missing flag or `q_gap_*`), so each
+`SignalMatrix` declares, per matrix, which generic derivations apply (raw,
+rank, min-max norm, missing, margin+gap, is-top1) and what each derived
+column is named — not inferred from a fixed naming convention. Cross-signal
+features (`desc_proto_gap`, `n_signal_agreement`, `class_log_freq`) stay
+hardcoded in the assembler over the default two providers' matrices, looked
+up by node name, exactly as the ticket scopes it — not generalized to N
+providers.
+
+`PipelineConfig.signals: List[str] = ["dense", "lexical"]` (registry keys, via
+new `register_signal_provider`/`build_signal_providers`/`load_signal_providers`
+in `infrastructure/registry.py`). Each provider persists to `signals/<name>/`
+via its own `save()`; the two built-ins are a no-op there since their state
+already lives in `dense.npz`/`lexical.npz`. `meta.json`'s `components.signals`
+records the provider list, defaulting to `["dense", "lexical"]` for model dirs
+saved before this field existed (mirrors `dense_kind`/`lexical_kind`'s legacy
+default). The schema check on load builds a *schema-only* provider list
+(`dense=lexical=None`, safe since `column_names()` never touches the
+retriever) so a corrupt/incompatible dir fails on schema drift before other
+files are opened.
+
+Found and fixed a real bug in the process: `DeployedArtifacts.with_added_classes`
+(the no-retrain add-classes path) rebuilds extended `dense`/`lexical` retrievers
+but previously left nothing to update a wrapping signal provider's stale
+reference — `rewrap_signal_providers` (`infrastructure/signals.py`) now
+rebuilds the built-in providers onto the new retrievers whenever `dense`/
+`lexical` are replaced.
+
+**Byte-identical, verified via golden fixture, not just asserted.** Before
+refactoring `_assemble_chunk`, three `.npz` fixtures
+(`tests/unit/t34_phase2_golden*.npz`) were captured from the *unmodified* code
+(labels / no-labels / T87-narrowed-request paths) and are checked in;
+`tests/unit/test_features_golden.py` asserts the refactored assembler
+reproduces them exactly (`assert_array_equal`, no tolerance). Leakage
+regression (`tests/integration/test_leakage.py`) and the T52 benchmark-floor
+tests stay green. Full suite: green except the one pre-existing flaky failure
+(`test_meta_and_calibrator_change_other_artifacts_untouched`, unrelated).
+
+`tests/unit/test_signal_providers.py` adds a toy stateless third-party
+provider (`_TextLengthSignalProvider`) registered purely via
+`register_signal_provider` + `cfg.signals` — zero edits to
+`FeatureAssembler`/`TrainingPipeline`/`ArtifactRepository` — that joins the
+candidate union, round-trips through train → save → load, and produces
+identical predictions/confidences/explanations on reload. Also covers the
+unregistered-signal-kind schema-drift error and the legacy-default path.
+
+**Scoping decisions carried over from the design, not deviations:**
+`desc_proto_gap`/`n_signal_agreement` remain hardcoded to the default two
+providers (the ticket's own "not generalized" note); `SignalProvider` has no
+`fit()` lifecycle like `FeatureProvider` does — a stateful, non-wrapping
+custom signal needing per-fold leakage-free fitting is future work, not
+covered by the toy provider (which is deliberately stateless).
 
 ## Progress (2026-08-05) — Phase 1 landed
 `RetrievalConfig` gained `dense_kind: str = "exact"` / `lexical_kind: str =
@@ -44,9 +108,8 @@ persist + reload with a custom dense/lexical kind, own filenames, own
 `components` entry) and the unknown-kind error-contract tests, mirroring the
 existing fusion/calibrator registry tests.
 
-**Not done (phase 2, still open):** the `SignalProvider` port, the
-`FeatureAssembler` refactor to consume an ordered provider list, and
-`FEATURE_NAMES` becoming derived — see the design below, unchanged.
+(Phase 2, described as still open in this section as originally written, has
+since landed — see "Progress (2026-08-05) — Phase 2 landed" above.)
 
 ## Re-prioritized 2026-08-04 (Tier 8)
 Both phases are now on the critical path and the two halves have **different**

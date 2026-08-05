@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Dict, Iterable, List, Mapping, Optional, Seque
 import numpy as np
 
 if TYPE_CHECKING:  # avoid a runtime import cycle; only needed for type hints
-    from .ports import FeatureProvider
+    from .ports import FeatureProvider, SignalProvider
 
 # Canonical, ordered schema of the *core* features — the five retrieval signals'
 # ~36 columns. This is the "core provider's" ``names()``: with no custom
@@ -169,18 +169,39 @@ def feature_closure(requested: Iterable[str]) -> Set[str]:
     return needed
 
 
-def composed_feature_names(providers: Sequence["FeatureProvider"] = ()) -> List[str]:
-    """The effective, ordered feature schema: the core ~36 columns (``FEATURE_NAMES``)
-    followed by each provider's ``names()``, in provider order.
+def composed_feature_names(
+    providers: Sequence["FeatureProvider"] = (),
+    signal_providers: Sequence["SignalProvider"] = (),
+) -> List[str]:
+    """The effective, ordered feature schema: the core ~36 columns (``FEATURE_NAMES``),
+    then any *non-default* ``SignalProvider``'s ``column_names()`` (T34 phase 2 --
+    a signal beyond the two built-ins), then each ``FeatureProvider``'s ``names()``,
+    in provider order.
 
     This is *the* column order the fusion model is trained and scored on, and it is
     persisted into ``meta.json`` at save time so inference rebuilds the identical
-    order. With no providers it is exactly ``FEATURE_NAMES``. Raises ``ValueError`` on a name
-    collision (a provider colliding with a core column, or two providers colliding),
-    because a duplicate column name would silently overwrite data in the assembled
-    frame — the worst kind of train/infer disagreement."""
+    order. With no providers it is exactly ``FEATURE_NAMES``. The built-in ``"dense"``/
+    ``"lexical"`` signal providers are skipped here (by ``name``): their columns
+    *are* ``FEATURE_NAMES``, already present, so declaring them again would just be
+    a duplicate of the constant this function already starts from. Raises
+    ``ValueError`` on a name collision (a provider colliding with a core column, or
+    two providers colliding), because a duplicate column name would silently
+    overwrite data in the assembled frame — the worst kind of train/infer
+    disagreement."""
     names: List[str] = list(FEATURE_NAMES)
     seen = set(names)
+    for sp in signal_providers:
+        if sp.name in ("dense", "lexical"):
+            continue
+        for name in sp.column_names():
+            if name in seen:
+                raise ValueError(
+                    f"feature name collision: {name!r} is contributed by signal provider "
+                    f"{sp.name!r} but is already in the schema. Signal-provider column "
+                    "names must be unique across the core features and all providers."
+                )
+            seen.add(name)
+            names.append(name)
     for provider in providers:
         for name in provider.names():
             if name in seen:
@@ -195,7 +216,9 @@ def composed_feature_names(providers: Sequence["FeatureProvider"] = ()) -> List[
 
 
 def fusion_feature_names(
-    providers: Sequence["FeatureProvider"] = (), drop: Sequence[str] = ()
+    providers: Sequence["FeatureProvider"] = (),
+    drop: Sequence[str] = (),
+    signal_providers: Sequence["SignalProvider"] = (),
 ) -> List[str]:
     """The columns the *fusion model* is trained and scored on: the composed
     schema (``composed_feature_names``) minus ``drop``, order otherwise preserved.
@@ -221,7 +244,7 @@ def fusion_feature_names(
     otherwise silently drop nothing and quietly invalidate an experiment) and on
     a ``drop`` that would empty the schema.
     """
-    names = composed_feature_names(providers)
+    names = composed_feature_names(providers, signal_providers)
     if not drop:
         return names
     known = set(names)

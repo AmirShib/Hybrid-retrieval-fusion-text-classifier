@@ -51,9 +51,9 @@ class InferencePipeline:
         # just did not reach the model, and hiding it would break a report that
         # reads core signal columns by name.
         self._feature_names = fusion_feature_names(
-            self._providers, artifacts.config.fusion.drop_features
+            self._providers, artifacts.config.fusion.drop_features, artifacts.signal_providers
         )
-        self._assembled_names = composed_feature_names(self._providers)
+        self._assembled_names = composed_feature_names(self._providers, artifacts.signal_providers)
 
     @classmethod
     def from_directory(cls, directory: str, device: Optional[str] = None) -> "InferencePipeline":
@@ -113,6 +113,7 @@ class InferencePipeline:
             chunk=a.config.retrieval.feature_chunk,
             providers=self._providers,
             requested=self._feature_names,
+            signal_providers=a.signal_providers,
         )
 
         # Every item defaults to abstaining; this also covers items whose features
@@ -171,6 +172,7 @@ class InferencePipeline:
             chunk=a.config.retrieval.feature_chunk,
             providers=self._providers,
             requested=self._feature_names,
+            signal_providers=a.signal_providers,
         )
         results: List[List[Tuple[str, float]]] = [[] for _ in texts]
         if not len(feats):
@@ -226,6 +228,7 @@ class InferencePipeline:
             chunk=a.config.retrieval.feature_chunk,
             providers=self._providers,
             requested=self._assembled_names,
+            signal_providers=a.signal_providers,
         )
         if not len(feats):
             return pd.DataFrame(columns=columns)
@@ -291,6 +294,7 @@ class InferencePipeline:
             chunk=a.config.retrieval.feature_chunk,
             providers=self._providers,
             requested=self._assembled_names,
+            signal_providers=a.signal_providers,
         )
         if not len(feats):
             empty = {
@@ -357,6 +361,7 @@ class InferencePipeline:
             chunk=a.config.retrieval.feature_chunk,
             providers=self._providers,
             requested=self._assembled_names,
+            signal_providers=a.signal_providers,
         )
         neighbors = self._neighbor_evidence(texts, q_emb, keys, n_neighbors)
 

@@ -38,6 +38,7 @@ from ..domain import (
     FusionModel,
     LabeledItem,
     LabelSpace,
+    SignalProvider,
     TextEncoder,
     ThresholdTuner,
     fusion_feature_names,
@@ -56,6 +57,7 @@ from ..infrastructure import (
     build_feature_providers,
     build_fusion,
     build_lexical_retriever,
+    build_signal_providers,
     encoder_is_corpus_dependent,
     fit_encoder,
     resolve_array_backend,
@@ -121,6 +123,11 @@ class TrainingPipeline:
         self._feature_names: List[str] = fusion_feature_names(
             drop=self.cfg.fusion.drop_features
         )
+        # T34 phase 2: the SignalProviders that ship in the deployed model,
+        # built once (on all training data) by `_build_deployment_index` and
+        # reused by `_featurize_external`/the returned `DeployedArtifacts`,
+        # mirroring `self._providers`'s lifecycle above.
+        self._signal_providers: List[SignalProvider] = []
         # T88: the shared-encoder document embeddings (full example pool + every
         # class description), encoded once per `run()` call and reused by both
         # `_build_oof` (sliced per fold) and `_build_deployment_index` (used
@@ -299,6 +306,7 @@ class TrainingPipeline:
             calibrator,
             abstention,
             feature_providers=self._providers,
+            signal_providers=self._signal_providers,
         )
         if output_dir:
             repo = ArtifactRepository()
@@ -557,12 +565,20 @@ class TrainingPipeline:
                 lexical = build_lexical_retriever(self.cfg.retrieval, tr_texts, y[tr], label_space)
             # Providers are fit on this fold's training rows only (leakage-free).
             providers = self._fit_providers(tr, texts, y, label_space)
+            # T34 phase 2: the SignalProviders for this fold, wrapping this
+            # fold's `dense`/`lexical` retrievers (same leakage-free discipline
+            # -- built fresh per fold, exactly like `dense`/`lexical` above).
+            signal_providers = build_signal_providers(
+                self.cfg.retrieval, self.cfg.signals, dense, lexical, self._ops
+            )
             # T87: request only the columns the fusion model will actually be
             # fitted on. This is the accepted diagnostic-narrowing trade —
             # `signal_report(oof)` downstream only sees what survives here — and
             # is fold-invariant (same drop list, provider names are stable
             # before/after fit), so every fold's frame carries the same columns.
-            requested = fusion_feature_names(providers, self.cfg.fusion.drop_features)
+            requested = fusion_feature_names(
+                providers, self.cfg.fusion.drop_features, signal_providers
+            )
 
             va_texts = [texts[i] for i in va]
             q_emb = enc.encode_queries(va_texts)
@@ -577,6 +593,7 @@ class TrainingPipeline:
                 chunk=self.cfg.retrieval.feature_chunk,
                 providers=providers,
                 requested=requested,
+                signal_providers=signal_providers,
             )
             feats["fold"] = fold
             frames.append(feats)
@@ -623,6 +640,7 @@ class TrainingPipeline:
             providers=self._providers,
             self_ids=self_ids,
             requested=self._feature_names,
+            signal_providers=self._signal_providers,
         )
         feats["fold"] = 0
         recall = float(feats.groupby("item_id")["is_true"].max().mean()) if len(feats) else 0.0
@@ -675,6 +693,7 @@ class TrainingPipeline:
             # production condition, exactly like the dense/lexical indices here.
             providers=self._providers,
             requested=self._feature_names,
+            signal_providers=self._signal_providers,
         )
         return feats, y
 
@@ -853,5 +872,13 @@ class TrainingPipeline:
         # that ships in the model and scores external val/test sets. The composed
         # schema (core + provider columns) is what the fusion/eval steps select by.
         self._providers = self._fit_providers(np.arange(len(texts)), texts, y, label_space)
-        self._feature_names = fusion_feature_names(self._providers, self.cfg.fusion.drop_features)
+        # T34 phase 2: the SignalProviders that ship in the deployed model,
+        # wrapping the deployment `dense`/`lexical` indices built above (the
+        # same objects `_featurize_external`/the returned `DeployedArtifacts` use).
+        self._signal_providers = build_signal_providers(
+            self.cfg.retrieval, self.cfg.signals, dense, lexical, self._ops
+        )
+        self._feature_names = fusion_feature_names(
+            self._providers, self.cfg.fusion.drop_features, self._signal_providers
+        )
         return encoder, dense, lexical
