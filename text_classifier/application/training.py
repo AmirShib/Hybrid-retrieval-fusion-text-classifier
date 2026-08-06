@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -117,7 +117,15 @@ class TrainingPipeline:
     def __init__(self, config: PipelineConfig, shared_encoder: Optional[TextEncoder] = None):
         self.cfg = config
         self.assembler: Optional[FeatureAssembler] = None
-        self._ops: ArrayOps = NumpyArrayOps()  # replaced in run() with this run's resolved backend
+        # Retrieval/encoder-facing backend, replaced in run() with this run's
+        # resolved backend (numpy or, T85, torch).
+        self._ops: ArrayOps = NumpyArrayOps()
+        # FeatureAssembler/build_signal_providers-facing backend -- always
+        # numpy (T85 deliberately does not touch application/features.py;
+        # its kernels mix raw numpy indexing with the array port in ways that
+        # are only safe against host arrays. T86 is what makes this backend-
+        # polymorphic, at which point this can become `self._ops` again).
+        self._assembler_ops: ArrayOps = NumpyArrayOps()
         # Optional injected encoder for the shared-encoder path (DI / offline tests).
         self._shared_override = shared_encoder
         # Custom feature providers fitted on all training data, and the
@@ -134,8 +142,10 @@ class TrainingPipeline:
         # class description), encoded once per `run()` call and reused by both
         # `_build_oof` (sliced per fold) and `_build_deployment_index` (used
         # whole) — instead of each paying its own `encode_documents` pass.
-        self._shared_pool_emb: Optional[np.ndarray] = None
-        self._shared_desc_emb: Optional[np.ndarray] = None
+        # Any, not np.ndarray: a resident torch tensor when this run resolves
+        # the torch backend (T85) -- see `_load_shared_encoder`.
+        self._shared_pool_emb: Any = None
+        self._shared_desc_emb: Any = None
         # T32 A1/A2: the example-corpus BM25 tokenization + the description
         # BM25 index, built once per `run()` call and reused by `_build_oof`
         # (sliced per fold) and `_build_deployment_index` (used whole) — BM25
@@ -156,13 +166,25 @@ class TrainingPipeline:
         return self._shared_override is None and encoder_is_corpus_dependent(self.cfg.encoder)
 
     def _load_shared_encoder(self) -> TextEncoder:
-        if self._shared_override is not None:
-            return self._shared_override
-        return build_encoder(self.cfg.encoder)
+        encoder = (
+            self._shared_override
+            if self._shared_override is not None
+            else build_encoder(self.cfg.encoder)
+        )
+        # T85: upgrade a SentenceTransformerEncoder to hand back device-
+        # resident tensors when this run resolved a torch backend, so the
+        # embeddings that build DenseState never take a forced D2H on the way
+        # out of the encoder. duck-typed (hasattr, not isinstance) so
+        # TfidfEncoder/HashingEncoder -- always numpy -- and any injected
+        # test double are untouched; a no-op when self._ops is numpy (every
+        # existing caller, byte-for-byte unchanged).
+        if self._ops.name != "numpy" and hasattr(encoder, "set_array_backend"):
+            encoder.set_array_backend(self._ops.name)
+        return encoder
 
     def _shared_document_embeddings(
         self, texts: List[str], label_space: LabelSpace, encoder: TextEncoder
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    ) -> Tuple[Any, Any]:
         """The full example-pool and class-description embeddings for the
         shared-encoder path, encoded once and cached on ``self`` for the
         lifetime of one ``run()`` call (T88).
@@ -263,7 +285,7 @@ class TrainingPipeline:
         )
         self._ops = build_array_ops(backend)
         self.assembler = FeatureAssembler(
-            label_space, CandidatePolicy(self.cfg.candidate_top_n), self._ops
+            label_space, CandidatePolicy(self.cfg.candidate_top_n), self._assembler_ops
         )
         texts = [it.text for it in items]
         y = np.array(label_space.encode_labels([it.label for it in items]), dtype=np.int64)
@@ -586,7 +608,7 @@ class TrainingPipeline:
             # fold's `dense`/`lexical` retrievers (same leakage-free discipline
             # -- built fresh per fold, exactly like `dense`/`lexical` above).
             signal_providers = build_signal_providers(
-                self.cfg.retrieval, self.cfg.signals, dense, lexical, self._ops
+                self.cfg.retrieval, self.cfg.signals, dense, lexical, self._assembler_ops
             )
             # T87: request only the columns the fusion model will actually be
             # fitted on. This is the accepted diagnostic-narrowing trade —
@@ -903,7 +925,7 @@ class TrainingPipeline:
         # wrapping the deployment `dense`/`lexical` indices built above (the
         # same objects `_featurize_external`/the returned `DeployedArtifacts` use).
         self._signal_providers = build_signal_providers(
-            self.cfg.retrieval, self.cfg.signals, dense, lexical, self._ops
+            self.cfg.retrieval, self.cfg.signals, dense, lexical, self._assembler_ops
         )
         self._feature_names = fusion_feature_names(
             self._providers, self.cfg.fusion.drop_features, self._signal_providers

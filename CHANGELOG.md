@@ -9,6 +9,28 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 ## [Unreleased]
 
 ### Added
+- **Device-resident dense retrieval + encoder handoff (T85)** — a torch
+  `ArrayOps` backend (`array_backend="torch"`/`"auto"` over T83's crossover)
+  keeps the dense index's embeddings and query compute on-device across the
+  whole out-of-fold loop instead of re-uploading the corpus on every chunk:
+  `SentenceTransformerEncoder.array_backend="torch"` hands back a resident
+  tensor instead of forcing a numpy conversion, and `DenseState`'s arrays
+  (uploaded once per run, not once per fold) stay there for every query
+  afterward. Every public `DenseRetrieverAdapter` method still returns numpy
+  at its boundary — `application/features.py`'s kernels aren't
+  backend-polymorphic yet (T86), so `FeatureAssembler` always gets a plain
+  `NumpyArrayOps` regardless of the run's resolved backend. Registered
+  lazily: listing "torch" as a kind never imports it, and a below-crossover
+  run never even asks whether torch is installed. Persistence stays numpy
+  always — a torch-trained model directory loads on an air-gapped, torch-free
+  host unchanged. No new install extra: the existing `sentence-transformers`
+  extra already pulls in torch. CPU-only, torch-free, and CUDA-visible-but-
+  below-crossover runs are all byte-identical to before. Verified with a
+  torch-CPU parity suite (`tests/unit/test_array_ops_torch.py`,
+  `tests/integration/test_device_parity.py`) — GPU-specific acceptance
+  criteria (transfer byte counts, the VRAM-vs-chunk curve) remain unverified
+  pending a CUDA host, same limitation T83 already flagged; see
+  `docs/device-policy.md`'s T85 addendum.
 - **Multi-threaded BM25 kNN (`RetrievalConfig.bm25_n_jobs`)** — `BM25Index.top_k`'s
   per-chunk sparse mat-mul (`Qbin_chunk @ Wt`) previously ran serially even
   though scipy's sparse `@` releases the GIL during the C-level multiply, so

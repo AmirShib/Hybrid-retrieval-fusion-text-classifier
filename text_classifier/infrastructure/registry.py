@@ -506,6 +506,20 @@ register_calibrator(
 register_array_ops("numpy", ArrayOpsSpec(build=lambda: NumpyArrayOps()))
 
 
+def _build_torch_array_ops() -> ArrayOps:
+    """Deferred import (T85): this only runs when ``build_array_ops("torch")``
+    is actually called -- registration itself (below) is metadata only, so
+    listing "torch" as a registered kind never imports torch (see
+    ``array_ops.py::resolve_array_backend``, which checks ``torch_installed()``
+    -- a non-importing probe -- rather than registry membership)."""
+    from .array_ops_torch import TorchArrayOps
+
+    return TorchArrayOps()
+
+
+register_array_ops("torch", ArrayOpsSpec(build=_build_torch_array_ops))
+
+
 def _load_dense_exact(directory: str, cfg: RetrievalConfig) -> DenseRetriever:
     arrays: Dict[str, Any] = dict(np.load(os.path.join(directory, "dense.npz")))
     return DenseRetrieverAdapter.from_state(arrays, chunk=cfg.dense_chunk)

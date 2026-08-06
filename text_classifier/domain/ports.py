@@ -96,13 +96,19 @@ class ArrayOps(ABC):
 
 
 class TextEncoder(ABC):
-    """Maps text to L2-normalized embeddings (so dot product == cosine)."""
+    """Maps text to L2-normalized embeddings (so dot product == cosine).
+
+    The return type is ``(n, d)`` float32 in whatever array type the
+    encoder's configured backend uses (T85): numpy for every encoder kind by
+    default, or a resident torch tensor for ``SentenceTransformerEncoder``
+    with ``array_backend="torch"`` (see its docstring). L2-normalization is
+    the invariant that never changes; the container is not."""
 
     @abstractmethod
-    def encode(self, texts: Sequence[str]) -> np.ndarray:  # (n, d) float32
+    def encode(self, texts: Sequence[str]) -> Any:  # (n, d) float32
         ...
 
-    def encode_queries(self, texts: Sequence[str]) -> np.ndarray:  # (n, d) float32
+    def encode_queries(self, texts: Sequence[str]) -> Any:  # (n, d) float32
         """Encode texts in the *query* role (the items being classified).
 
         Defaults to symmetric ``encode``, so existing adapters need no change;
@@ -110,7 +116,7 @@ class TextEncoder(ABC):
         pipelines route every encode call by role."""
         return self.encode(texts)
 
-    def encode_documents(self, texts: Sequence[str]) -> np.ndarray:  # (n, d) float32
+    def encode_documents(self, texts: Sequence[str]) -> Any:  # (n, d) float32
         """Encode texts in the *document* role (the example pool + class
         descriptions queries are matched against). Defaults to symmetric
         ``encode``; see ``encode_queries``."""

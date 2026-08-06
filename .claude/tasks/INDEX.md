@@ -223,7 +223,7 @@ Decisions taken 2026-08-04, recorded in the tickets:
 | T87 | Feature dependency graph + demand-driven computation                         | done   | T70                     |
 | T83 | Device execution profile + device policy (measure-first gate; run after T88) | in-progress | T88                |
 | T84 | Array-backend seam: `ArrayOps` port, `auto` selection, CPU byte-identical    | in-review | T83 (thresholds)        |
-| T85 | Device-resident dense retrieval + encoder handoff (no D2H mid-pipeline)      | todo   | T63, T34-p1, T83, T84, T88 |
+| T85 | Device-resident dense retrieval + encoder handoff (no D2H mid-pipeline)      | in-progress | T63, T34-p1, T83, T84, T88 |
 | T86 | Zero-copy feature matrix into fusion; drop pandas from the hot path          | todo   | T84, T85                |
 
 **Cross-tier effects when these land:** T63 is promoted from Tier 6 to a hard

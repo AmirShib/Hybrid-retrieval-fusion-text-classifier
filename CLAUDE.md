@@ -29,6 +29,9 @@ Dependency rule: `domain` imports no ML framework. `infrastructure` depends on `
   built from *other* folds only. Calibration and the coverage report come from folds the
   fusion model never trained on. Never let an item see itself in its own index.
 - **Embeddings are L2-normalized** so dot product == cosine. Encoders must preserve this.
+  The container is not part of the invariant: it's numpy by default and for every encoder
+  kind except `SentenceTransformerEncoder` with `array_backend="torch"` (T85), which
+  returns a resident torch tensor instead — normalization survives either way.
 - **`LabelSpace` owns the canonical key↔index map.** Column `c` always means `key_at(c)`.
 - A trained **model directory must be portable** (numpy + json + native
   XGBoost/SentenceTransformer formats only; no pickle) — it ships to an air-gapped

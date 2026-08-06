@@ -87,9 +87,21 @@ class SentenceTransformerEncoder(TextEncoder):
     prepended per role, or a ``*_prompt_name`` selects a model-card prompt
     (an explicit prompt wins over its prompt_name). ``encode_kwargs`` merge
     into every ``model.encode(...)`` call, with user keys winning over our
-    defaults — except ``normalize_embeddings``/``convert_to_numpy``, which are
-    forced ``True``: L2-normalized numpy output (dot == cosine) is a
-    package-wide invariant and cannot be configured away.
+    defaults — except ``normalize_embeddings``/``convert_to_numpy``/
+    ``convert_to_tensor``, which are forced: L2-normalization (dot == cosine)
+    is a package-wide invariant and cannot be configured away, but *which*
+    array type carries it is backend-driven (T85) — see ``array_backend``.
+
+    ``array_backend`` (``"numpy"`` by default -- unchanged behaviour for every
+    existing caller) selects the container type ``encode``/``encode_queries``/
+    ``encode_documents`` return: ``"numpy"`` forces ``convert_to_numpy=True``
+    exactly as before; ``"torch"`` forces ``convert_to_numpy=False,
+    convert_to_tensor=True`` and returns the raw (still L2-normalized) tensor,
+    resident on whatever device the underlying model lives on, so a caller
+    that immediately hands it to a torch-backed retriever pays no D2H-then-H2D
+    round trip. Set via ``set_array_backend`` after construction (not a
+    constructor-only choice) so a shared, already-built encoder can be
+    upgraded once a run resolves its array backend, without rebuilding it.
 
     ``training_history`` is the per-epoch record of a fine-tune that selected its
     best epoch (see ``train_encoder``); it is evidence, not state — ``save``
@@ -97,7 +109,7 @@ class SentenceTransformerEncoder(TextEncoder):
     need it back. It is empty for a loaded or non-fine-tuned encoder.
     """
 
-    _PROTECTED_ENCODE_KWARGS = ("normalize_embeddings", "convert_to_numpy")
+    _PROTECTED_ENCODE_KWARGS = ("normalize_embeddings", "convert_to_numpy", "convert_to_tensor")
     TRAINING_HISTORY_NAME = "encoder_training.json"
 
     def __init__(
@@ -111,10 +123,12 @@ class SentenceTransformerEncoder(TextEncoder):
         query_prompt_name: Optional[str] = None,
         document_prompt_name: Optional[str] = None,
         training_history: Optional[Dict[str, Any]] = None,
+        array_backend: str = "numpy",
     ):
         self._model = model
         self._batch_size = batch_size
         self.training_history: Dict[str, Any] = dict(training_history or {})
+        self.array_backend = array_backend
         cleaned = dict(encode_kwargs or {})
         for key in self._PROTECTED_ENCODE_KWARGS:
             if key in cleaned:
@@ -160,18 +174,26 @@ class SentenceTransformerEncoder(TextEncoder):
     def model(self):
         return self._model
 
-    def encode(self, texts: Sequence[str]) -> np.ndarray:
+    def set_array_backend(self, array_backend: str) -> None:
+        """Switch the container type ``encode*`` return going forward. See the
+        class docstring's ``array_backend`` note. ``"numpy"`` (the value every
+        encoder starts with) is always safe; ``"torch"`` requires torch to
+        actually be installed, which the caller is responsible for having
+        established (e.g. via ``resolve_array_backend``) before calling this."""
+        self.array_backend = array_backend
+
+    def encode(self, texts: Sequence[str]) -> Any:
         return self._encode(texts, prompt=None, prompt_name=None)
 
-    def encode_queries(self, texts: Sequence[str]) -> np.ndarray:
+    def encode_queries(self, texts: Sequence[str]) -> Any:
         return self._encode(texts, self._query_prompt, self._query_prompt_name)
 
-    def encode_documents(self, texts: Sequence[str]) -> np.ndarray:
+    def encode_documents(self, texts: Sequence[str]) -> Any:
         return self._encode(texts, self._document_prompt, self._document_prompt_name)
 
     def _encode(
         self, texts: Sequence[str], prompt: Optional[str], prompt_name: Optional[str]
-    ) -> np.ndarray:
+    ) -> Any:
         texts = list(texts)
         kwargs: Dict[str, Any] = {"batch_size": self._batch_size, "show_progress_bar": False}
         kwargs.update(self._encode_kwargs)  # user keys win over the two defaults above
@@ -179,8 +201,15 @@ class SentenceTransformerEncoder(TextEncoder):
             texts = [prompt + t for t in texts]
         elif prompt_name:
             kwargs["prompt_name"] = prompt_name
-        kwargs["convert_to_numpy"] = True
         kwargs["normalize_embeddings"] = True
+        if self.array_backend == "torch":
+            # convert_to_tensor=True keeps the embedding resident on whatever
+            # device the model lives on (T85) -- no forced D2H here, unlike
+            # the numpy path below.
+            kwargs["convert_to_numpy"] = False
+            kwargs["convert_to_tensor"] = True
+            return self._model.encode(texts, **kwargs)
+        kwargs["convert_to_numpy"] = True
         emb = self._model.encode(texts, **kwargs)
         return np.ascontiguousarray(emb, dtype=np.float32)
 

@@ -9,10 +9,30 @@ to succeed.
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+def torch_installed() -> bool:
+    """Whether torch is importable, without actually importing it.
+
+    ``importlib.util.find_spec`` only does import-system bookkeeping (locates
+    the module) — it does not execute torch's ``__init__.py``, so it never
+    loads torch's C extensions or its bundled OpenMP runtime. That matters:
+    ``cuda_available()``/``mps_available()`` do a real ``import torch``, and
+    T84 found that colliding with xgboost's own OpenMP runtime can segfault
+    (see ``infrastructure/array_ops.py::resolve_array_backend``). This probe
+    is the cheap, safe check callers use *before* deciding whether a real
+    import (and its side effects) is warranted at all. ``False`` (not raise)
+    if the check itself fails for any reason -- best-effort, like the other
+    probes in this module."""
+    try:
+        return importlib.util.find_spec("torch") is not None
+    except Exception:
+        return False
 
 
 def cuda_available() -> bool:

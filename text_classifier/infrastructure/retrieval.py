@@ -543,15 +543,24 @@ def _dense_topk(
     out_sim = np.full((Q.shape[0], k), np.nan, dtype=np.float32)
     if Q.shape[0] == 0 or k_eff == 0:
         return out_idx, out_sim
-    Xt = np.ascontiguousarray(X.T)
+    # `.T` is a view on both numpy and torch (no host-only ascontiguousarray
+    # here, so `X` -- possibly a device-resident DenseState array, T85 -- never
+    # gets forced through numpy on its way into `ops.matmul`).
+    Xt = X.T
     for s in range(0, Q.shape[0], chunk):
         sims = ops.matmul(Q[s : s + chunk], Xt)
         part = ops.argpartition(sims, -k_eff, axis=1)[:, -k_eff:]
         rows = np.arange(part.shape[0])[:, None]
         part_sims = ops.gather(sims, rows, part)
         order = ops.argsort(-part_sims, axis=1)
-        out_idx[s : s + chunk, :k_eff] = np.take_along_axis(part, order, axis=1)
-        out_sim[s : s + chunk, :k_eff] = np.take_along_axis(part_sims, order, axis=1)
+        # `ops.gather` (not `np.take_along_axis`, which requires a numpy-
+        # convertible input) reorders `part`/`part_sims` by `order`, exactly
+        # reproducing take_along_axis's semantics via the same (b,1)/(b,k)
+        # broadcast `gather` already supports above. `to_host` here is the
+        # one D2H per chunk: the small (chunk, k_eff) result crosses back to
+        # feed the (still-numpy, T86's scope) feature assembler.
+        out_idx[s : s + chunk, :k_eff] = ops.to_host(ops.gather(part, rows, order))
+        out_sim[s : s + chunk, :k_eff] = ops.to_host(ops.gather(part_sims, rows, order))
     return out_idx, out_sim
 
 
@@ -573,7 +582,18 @@ def _prototypes_and_freq(
     contract), so results are numerically equal to the loop version to
     float32 precision, not bit-for-bit identical -- IEEE754 addition is not
     associative, and the loop's ``.mean(axis=0)`` sums each group in a
-    different order (numpy's pairwise summation) than a flat scatter does."""
+    different order (numpy's pairwise summation) than a flat scatter does.
+
+    ``emb`` may be a backend-native array (T85: a resident torch tensor from
+    a torch-backend encoder) -- ``ops.asarray``/``.reshape(-1)`` (a method
+    both numpy arrays and torch tensors expose, so no new port primitive is
+    needed) keep the flatten backend-safe, unlike a raw ``np.asarray(emb)``,
+    which raises on a CUDA tensor. The class-sum accumulation itself still
+    round-trips through the host (``ops.to_host`` below, matching
+    ``scatter_add``'s existing contract) -- a one-time, once-per-run cost, not
+    a per-chunk one -- and the finished prototype array is re-uploaded to the
+    backend before returning, so ``DenseState.prototypes`` stays resident for
+    every query afterward."""
     ops = ops or NumpyArrayOps()
     dim = emb.shape[1]
     labels = np.asarray(labels)
@@ -585,7 +605,7 @@ def _prototypes_and_freq(
     )
     rows = np.repeat(labels, dim)
     cols = np.tile(np.arange(dim), n)
-    values = np.asarray(emb, dtype=np.float64).ravel()
+    values = ops.asarray(emb, dtype=np.float64).reshape(-1)
     class_sum = ops.to_host(
         ops.scatter_add(ops.zeros((n_classes, dim), dtype=np.float64), rows, cols, values)
     )
@@ -596,17 +616,24 @@ def _prototypes_and_freq(
     has_proto = (freq > 0) & (norm > 0)
     safe_norm = np.where(norm > 0, norm, 1.0)
     proto = np.where(has_proto[:, None], (mean / safe_norm[:, None]).astype(np.float32), np.nan)
-    return proto.astype(np.float32), freq
+    return ops.asarray(proto.astype(np.float32)), freq
 
 
 @dataclass
 class DenseState:
-    """Serializable numeric state of the dense retriever."""
+    """Numeric state of the dense retriever.
 
-    example_emb: np.ndarray
+    ``example_emb``/``prototypes``/``description_emb`` may be a backend-
+    native array during a live run (T85: a resident torch tensor, uploaded
+    once at build time and reused by every query afterward) -- serialization
+    is always numpy regardless (``DenseRetrieverAdapter.to_state``). Typed
+    ``Any`` rather than ``np.ndarray`` to reflect that; ``example_labels``/
+    ``class_freq`` are index/count bookkeeping and stay plain numpy always."""
+
+    example_emb: Any
     example_labels: np.ndarray
-    prototypes: np.ndarray
-    description_emb: np.ndarray
+    prototypes: Any
+    description_emb: Any
     class_freq: np.ndarray
 
 
@@ -673,14 +700,19 @@ class DenseRetrieverAdapter(DenseRetriever):
         ``LexicalRetrieverAdapter.to_state``, so a registered dense-retriever
         spec's save/load can be generic). Keys/layout match ``dense.npz`` as
         written by ``persistence.py`` before this method existed, byte-for-byte —
-        existing model dirs load unchanged."""
+        existing model dirs load unchanged.
+
+        Explicit ``self._ops.to_host`` on every array (T85): ``DenseState``'s
+        arrays may be backend-native (a torch-trained run), but persistence
+        stays numpy always -- a model directory must stay portable to an
+        air-gapped, torch-free host regardless of what trained it."""
         s = self._s
         return {
-            "example_emb": s.example_emb,
-            "example_labels": s.example_labels,
-            "prototypes": s.prototypes,
-            "description_emb": s.description_emb,
-            "class_freq": s.class_freq,
+            "example_emb": self._ops.to_host(s.example_emb),
+            "example_labels": self._ops.to_host(s.example_labels),
+            "prototypes": self._ops.to_host(s.prototypes),
+            "description_emb": self._ops.to_host(s.description_emb),
+            "class_freq": self._ops.to_host(s.class_freq),
         }
 
     @classmethod
@@ -716,7 +748,12 @@ class DenseRetrieverAdapter(DenseRetriever):
         return labels.astype(np.int64), sim
 
     def prototype_similarity(self, query_emb: np.ndarray) -> np.ndarray:
-        return self._ops.matmul(query_emb, self._s.prototypes.T)
+        # to_host at the public-method boundary (T85): internal computation
+        # (matmul) runs through self._ops -- device-resident when that is a
+        # torch backend -- but FeatureAssembler (T86's scope, not this
+        # ticket's) still requires numpy, so every public query method hands
+        # back a plain array regardless of what backend built the index.
+        return self._ops.to_host(self._ops.matmul(query_emb, self._s.prototypes.T))
 
     def loo_prototype_similarity(self, query_emb: np.ndarray, self_idx: np.ndarray) -> np.ndarray:
         """Prototype similarity with each query's own example left out of its own
@@ -729,22 +766,36 @@ class DenseRetrieverAdapter(DenseRetriever):
         query that was its class's only example gets NaN (no prototype without it),
         which XGBoost reads as "did not retrieve" — the same as an absent class.
         Every other column, and every out-of-pool query, keeps the ordinary value.
+
+        Runs on the host regardless of backend: this is the leave-one-out
+        (``n_folds=1``) path, called once per query chunk, and rebuilding a
+        held-out class mean per call isn't worth threading through the array
+        port for a chunk-sized win -- unlike the OOF loop T85 targets, LOO
+        mode's per-chunk cost was never the profiled bottleneck (T83). ``E``/
+        ``query_emb`` are pulled to host explicitly (``self._ops.to_host``)
+        so this stays correct when ``example_emb`` is a resident torch
+        tensor, at the cost of one host round-trip of the corpus per call —
+        a documented, deliberate scope boundary, not an oversight.
         """
-        base = self.prototype_similarity(query_emb)
+        base = self.prototype_similarity(query_emb)  # already host, see above
         self_idx = np.asarray(self_idx)
         rows = np.nonzero(self_idx >= 0)[0]
         if rows.size == 0:
             return base
-        E = self._s.example_emb.astype(np.float64)
+        E = self._ops.to_host(self._s.example_emb).astype(np.float64)
         y = self._s.example_labels
         C = base.shape[1]
         dim = E.shape[1]
         n = y.shape[0]
         scatter_rows = np.repeat(y, dim)
         scatter_cols = np.tile(np.arange(dim), n)
-        class_sum = self._ops.to_host(
-            self._ops.scatter_add(
-                self._ops.zeros((C, dim), dtype=np.float64), scatter_rows, scatter_cols, E.ravel()
+        # A plain numpy backend here, deliberately -- E is already host-side,
+        # so routing this specific scatter through self._ops (torch) would
+        # buy nothing but an extra upload/download round trip.
+        host_ops = NumpyArrayOps()
+        class_sum = host_ops.to_host(
+            host_ops.scatter_add(
+                host_ops.zeros((C, dim), dtype=np.float64), scatter_rows, scatter_cols, E.ravel()
             )
         )
         class_cnt = np.bincount(y, minlength=C).astype(np.float64)
@@ -754,7 +805,7 @@ class DenseRetrieverAdapter(DenseRetriever):
         loo_vec = class_sum[c] - E[s]  # class sum with the query's own vector removed
         loo_cnt = class_cnt[c] - 1.0
         norm = np.linalg.norm(loo_vec, axis=1)
-        q = np.asarray(query_emb, dtype=np.float64)[rows]
+        q = self._ops.to_host(query_emb).astype(np.float64)[rows]
         with np.errstate(invalid="ignore", divide="ignore"):
             sim = np.einsum("md,md->m", q, loo_vec) / norm
         sim = np.where((loo_cnt > 0) & (norm > 0), sim, np.nan)
@@ -763,7 +814,7 @@ class DenseRetrieverAdapter(DenseRetriever):
         return out
 
     def description_similarity(self, query_emb: np.ndarray) -> np.ndarray:
-        return self._ops.matmul(query_emb, self._s.description_emb.T)
+        return self._ops.to_host(self._ops.matmul(query_emb, self._s.description_emb.T))
 
     def with_added_classes(
         self, encoder: TextEncoder, new_descriptions: Sequence[str]

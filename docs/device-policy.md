@@ -137,3 +137,72 @@ python -m scripts.profile_devices --n-items 10000,100000 --n-classes 500,5000
 ```
 
 Raw output: `docs/device-profile.json`. Markdown table: `docs/device-profile.md`.
+
+## T85 implementation notes (2026-08-06, still CPU-only host)
+
+Landed: `TorchArrayOps` (`infrastructure/array_ops_torch.py`), registered
+lazily (metadata-only registration — `import torch` happens only inside
+`build_array_ops("torch")`'s deferred callable, never at package-import
+time). `SentenceTransformerEncoder.array_backend` (default `"numpy"`,
+unchanged) hands back a resident torch tensor from `encode`/`encode_queries`/
+`encode_documents` instead of forcing `convert_to_numpy=True`. `DenseState`'s
+arrays are uploaded once at build time (`DenseRetrieverAdapter.build`/
+`build_from_embeddings`) and stay resident for every query in the run;
+`_dense_topk`'s matmul/top-k run through the array port end to end. Every
+public `DenseRetrieverAdapter` query method (`knn_example_labels`,
+`prototype_similarity`, `loo_prototype_similarity`, `description_similarity`)
+explicitly `to_host`s its return value — this is the actual scope boundary:
+`application/features.py`'s kernels mix raw numpy indexing with the array
+port in ways that are only safe against host arrays (T84 deliberately left
+them that way — "not an array-API reimplementation"), so `FeatureAssembler`
+is always built with a plain `NumpyArrayOps`, never the run's resolved
+backend, until T86 makes that layer backend-polymorphic. Concretely: with
+`array_backend="torch"`, the corpus embeddings and the dense index's matmul/
+top-k/scatter compute stay device-resident and are **not** re-uploaded per
+chunk or per fold — the T83-identified cost this ticket targets — but the
+per-chunk *result* (small: `(chunk, C)` or `(chunk, k)`) still crosses back to
+host once per public method call, not zero times. Closing that last gap is
+T86's stated job, not a T85 shortfall.
+
+**A second, unplanned crossover-check fix.** The original `resolve_array_backend`
+(T84) short-circuited on registry membership ("torch" not registered ⇒ numpy,
+skip every probe) — deliberately, so an ordinary numpy run never imports torch.
+Once T85 registers "torch" unconditionally, that check stopped being a useful
+install proxy, so it was swapped for `torch_installed()` (a
+`importlib.util.find_spec` probe — locates the module without executing it).
+But `torch_installed()` returns `True` on any host where torch happens to be
+installed for an unrelated reason (this repo's own dev environment, via the
+`sentence-transformers` extra) — and simply moving the guard from "registered"
+to "installed" would have made `cuda_available()` (a real `import torch`) run
+on *every* auto-resolved run on such a host, including a two-item smoke test,
+reintroducing exactly the segfault T84's own notes describe. Fixed by
+reordering: the crossover-scale check now runs *before* `torch_installed()`/
+`cuda_available()`, so a run below `CROSSOVER_MIN_ITEMS`/`CROSSOVER_MIN_CLASSES`
+never asks whether torch is installed or visible, regardless of what else
+shares the host. Reproduced and verified against a live crash on this
+machine (see below) before landing the fix.
+
+**A real, reproducible torch↔xgboost conflict on this host (not code-caused).**
+Independent of any of the above: `import torch` followed by `xgboost.fit()`
+in the same process reliably crashes on this dev machine with
+`OMP: Error #179: Function pthread_mutex_init failed` — torch's bundled
+OpenMP runtime and this host's (Homebrew) libomp collide with xgboost's own.
+Reproduces with zero of this ticket's code involved (a five-line script:
+import torch, import xgboost, fit). Importing xgboost *before* torch avoids
+it; `KMP_DUPLICATE_LIB_OK=TRUE` and `OMP_NUM_THREADS=1` also avoid it but
+degrade performance. `tests/conftest.py` now imports xgboost first, before
+pytest collects any test module (several of the T85 tests import torch at
+module level), so the test suite is unaffected — but this is a workaround for
+*this test session*, not a fix in the package: a user script that imports
+`sentence-transformers`/torch before `text_classifier` on a similarly-configured
+host could still hit it. Whether this reproduces on the reference platform
+(Linux x86_64, the lockfile's and CI's target) is unverified from here — flagged
+as a follow-up, not assumed either way.
+
+**Still blocked on a GPU host** (same limitation T83 already flagged, now also
+covering T85): H2D/D2H transfer count and bytes per batch, the VRAM-vs-
+`feature_chunk` curve, and a measured (not CPU-torch-parity-only) speedup are
+all unverified from this machine. `tests/unit/test_array_ops_torch.py` and
+`tests/integration/test_device_parity.py` cover CPU-torch correctness and
+parity, which is the GPU-free half of the ticket's testing strategy — a
+CUDA-host re-run is what closes the rest.

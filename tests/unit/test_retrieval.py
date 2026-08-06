@@ -894,3 +894,115 @@ class TestLexicalBuildFromCounts:
         npt.assert_allclose(
             sliced.description_score(queries), direct.description_score(queries), atol=1e-6
         )
+
+
+# =========================================================================== #
+#  Part E — T85: DenseRetrieverAdapter against a torch array backend
+# =========================================================================== #
+try:
+    import torch
+
+    _TORCH_AVAILABLE = True
+except ImportError:
+    _TORCH_AVAILABLE = False
+
+
+@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch not installed")
+class TestDenseRetrieverAdapterTorchBackend:
+    """Every public query method must return numpy at its boundary regardless
+    of the backend (features.py, T86's scope, is not backend-polymorphic
+    yet), while internal computation and DenseState's arrays are backend-
+    resident. Parity is checked against the same build on NumpyArrayOps."""
+
+    def _label_space(self, n_classes=4):
+        from text_classifier.infrastructure.array_ops import NumpyArrayOps
+        from text_classifier.infrastructure.array_ops_torch import TorchArrayOps
+
+        classes = [ClassDefinition(f"c{i}", f"desc {i}") for i in range(n_classes)]
+        return LabelSpace(classes), NumpyArrayOps(), TorchArrayOps(device="cpu")
+
+    def _build(self, ops, label_space, emb, labels, desc_emb, as_tensor=False):
+        cfg = RetrievalConfig()
+        e = torch.as_tensor(emb) if as_tensor else emb
+        d = torch.as_tensor(desc_emb) if as_tensor else desc_emb
+        return DenseRetrieverAdapter.build_from_embeddings(e, labels, d, label_space, cfg, ops)
+
+    def _corpus(self, seed=0, n=12, dim=8, n_classes=4):
+        rng = np.random.default_rng(seed)
+        labels = np.array([i % n_classes for i in range(n)], dtype=np.int64)
+        emb = rng.standard_normal((n, dim)).astype(np.float32)
+        emb /= np.linalg.norm(emb, axis=1, keepdims=True)
+        desc_emb = rng.standard_normal((n_classes, dim)).astype(np.float32)
+        desc_emb /= np.linalg.norm(desc_emb, axis=1, keepdims=True)
+        query = rng.standard_normal((5, dim)).astype(np.float32)
+        query /= np.linalg.norm(query, axis=1, keepdims=True)
+        return labels, emb, desc_emb, query
+
+    def test_state_arrays_are_backend_resident_after_build(self):
+        label_space, _, tops = self._label_space()
+        labels, emb, desc_emb, _ = self._corpus()
+        dense = self._build(tops, label_space, emb, labels, desc_emb, as_tensor=True)
+        assert isinstance(dense.state.example_emb, torch.Tensor)
+        assert isinstance(dense.state.prototypes, torch.Tensor)
+        assert isinstance(dense.state.description_emb, torch.Tensor)
+
+    def test_query_methods_return_numpy_and_match_numpy_backend(self):
+        label_space, nops, tops = self._label_space()
+        labels, emb, desc_emb, query = self._corpus()
+        dense_t = self._build(tops, label_space, emb, labels, desc_emb, as_tensor=True)
+        dense_n = self._build(nops, label_space, emb, labels, desc_emb)
+
+        lab_t, sim_t = dense_t.knn_example_labels(query, k=3)
+        lab_n, sim_n = dense_n.knn_example_labels(query, k=3)
+        assert isinstance(lab_t, np.ndarray) and isinstance(sim_t, np.ndarray)
+        npt.assert_array_equal(lab_t, lab_n)
+        npt.assert_allclose(sim_t, sim_n, atol=1e-5)
+
+        proto_t = dense_t.prototype_similarity(query)
+        proto_n = dense_n.prototype_similarity(query)
+        assert isinstance(proto_t, np.ndarray)
+        npt.assert_allclose(proto_t, proto_n, atol=1e-5, equal_nan=True)
+
+        desc_t = dense_t.description_similarity(query)
+        desc_n = dense_n.description_similarity(query)
+        assert isinstance(desc_t, np.ndarray)
+        npt.assert_allclose(desc_t, desc_n, atol=1e-5)
+
+    def test_loo_prototype_similarity_matches_numpy_backend(self):
+        label_space, nops, tops = self._label_space()
+        labels, emb, desc_emb, query = self._corpus()
+        dense_t = self._build(tops, label_space, emb, labels, desc_emb, as_tensor=True)
+        dense_n = self._build(nops, label_space, emb, labels, desc_emb)
+        self_idx = np.array([0, -1, 2, -1, 4])
+
+        loo_t = dense_t.loo_prototype_similarity(query, self_idx)
+        loo_n = dense_n.loo_prototype_similarity(query, self_idx)
+        assert isinstance(loo_t, np.ndarray)
+        npt.assert_allclose(loo_t, loo_n, atol=1e-5, equal_nan=True)
+
+    def test_to_state_is_always_numpy_and_round_trips(self):
+        label_space, _, tops = self._label_space()
+        labels, emb, desc_emb, query = self._corpus()
+        dense_t = self._build(tops, label_space, emb, labels, desc_emb, as_tensor=True)
+
+        state = dense_t.to_state()
+        for key, arr in state.items():
+            assert isinstance(arr, np.ndarray), f"{key} is {type(arr)}, expected numpy"
+
+        # A torch-trained model reloads on a plain numpy backend (persistence
+        # stays numpy always -- the artifact must load on an air-gapped,
+        # torch-free host regardless of what trained it).
+        reloaded = DenseRetrieverAdapter.from_state(state, chunk=RetrievalConfig().dense_chunk)
+        lab_reloaded, _ = reloaded.knn_example_labels(query, k=3)
+        lab_t, _ = dense_t.knn_example_labels(query, k=3)
+        npt.assert_array_equal(lab_reloaded, lab_t)
+
+    def test_prototypes_and_freq_directly_with_torch_embeddings(self):
+        _, _, tops = self._label_space()
+        labels, emb, _, _ = self._corpus()
+        proto, freq = _prototypes_and_freq(torch.as_tensor(emb), labels, 4, tops)
+        assert isinstance(proto, torch.Tensor)
+        proto_host = tops.to_host(proto)
+        proto_n, freq_n = _prototypes_and_freq(emb, labels, 4)
+        npt.assert_allclose(proto_host, proto_n, atol=1e-5, equal_nan=True)
+        npt.assert_array_equal(freq, freq_n)

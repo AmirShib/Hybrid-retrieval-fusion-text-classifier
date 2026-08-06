@@ -1,7 +1,11 @@
 """Array-backend port implementations (T84).
 
-``NumpyArrayOps`` is a thin pass-through numpy backend -- the default, and
-until a torch backend lands (T85) the only one registered. Every method except
+``NumpyArrayOps`` is a thin pass-through numpy backend -- the default, always
+registered. A torch backend (T85, ``infrastructure/array_ops_torch.py``) is
+also always *registered* here (metadata only, no import), but its
+``ArrayOpsSpec.build`` defers ``import torch`` until it is actually called, so
+an ordinary numpy-backend run never imports torch as a side effect of loading
+this module. Every method except
 ``scatter_add``/``scatter_max`` is a direct 1:1 call onto ``numpy``, so routing
 a kernel through the port is a zero-behaviour-change swap.
 
@@ -140,25 +144,44 @@ def resolve_array_backend(
 
     An explicit ``kind`` (anything other than ``None``/``"auto"``) always
     wins -- the same explicit-beats-detected rule ``resolve_device`` already
-    follows. Otherwise: numpy unless a device is visible, a torch backend is
-    actually registered (T85; unregistered today, so this path never fires
-    yet), and the scale meets or exceeds ``CROSSOVER_MIN_ITEMS`` /
-    ``CROSSOVER_MIN_CLASSES``. The choice and the reason are logged -- this is
-    meant to be traceable, not silent."""
+    follows. Otherwise: numpy unless the scale meets or exceeds
+    ``CROSSOVER_MIN_ITEMS``/``CROSSOVER_MIN_CLASSES``, torch is actually
+    installed, and a device is visible. The choice and the reason are logged
+    -- this is meant to be traceable, not silent.
+
+    **Order matters, and is deliberate.** The crossover check runs *before*
+    ``torch_installed()``/``cuda_available()`` -- not after -- so a small run
+    never even asks whether torch is installed or a device is visible. This
+    is not just an optimization: ``cuda_available()`` does a real
+    ``import torch``, and on a host where torch happens to be installed for
+    an unrelated reason (e.g. this repo's dev environment, where the
+    ``sentence-transformers`` extra pulls it in), skipping straight to
+    ``torch_installed()`` first would make *every* numpy-backend run -- even
+    a handful of items -- pay that import, reintroducing exactly the T63
+    boundary violation T84 already hit once (colliding with xgboost's bundled
+    OpenMP runtime badly enough to segfault). Gating on scale first means an
+    ordinary small run stays torch-free regardless of what else happens to be
+    installed alongside this package."""
     if explicit is not None and explicit != "auto":
         logger.info("array backend: %r (explicit)", explicit)
         return explicit
 
-    # Registry check first, and *always* before any torch probe: today no
-    # torch backend is registered (T85), so this must short-circuit before
-    # ``cuda_available()`` -- which imports torch -- ever runs. An ordinary
-    # numpy-backend training/inference run must not import torch at all (T63's
-    # boundary; see also the OpenMP-runtime clash between torch's bundled
-    # libomp and xgboost's when both end up loaded in one process).
-    from . import registry
+    if not (n_items >= CROSSOVER_MIN_ITEMS or n_classes >= CROSSOVER_MIN_CLASSES):
+        logger.info(
+            "array backend: numpy (auto: n_items=%d n_classes=%d below crossover "
+            "n_items>=%d or n_classes>=%d)",
+            n_items,
+            n_classes,
+            CROSSOVER_MIN_ITEMS,
+            CROSSOVER_MIN_CLASSES,
+        )
+        return "numpy"
 
-    if "torch" not in registry.registered_array_ops_kinds():
-        logger.info("array backend: numpy (auto: no torch backend registered)")
+    # Cheap (no import) before any real torch probe -- see the docstring.
+    from .device import torch_installed
+
+    if not torch_installed():
+        logger.info("array backend: numpy (auto: torch not installed)")
         return "numpy"
 
     if device_visible is None:
@@ -169,23 +192,12 @@ def resolve_array_backend(
         logger.info("array backend: numpy (auto: no device visible)")
         return "numpy"
 
-    if n_items >= CROSSOVER_MIN_ITEMS or n_classes >= CROSSOVER_MIN_CLASSES:
-        logger.info(
-            "array backend: torch (auto: n_items=%d n_classes=%d meets crossover "
-            "n_items>=%d or n_classes>=%d)",
-            n_items,
-            n_classes,
-            CROSSOVER_MIN_ITEMS,
-            CROSSOVER_MIN_CLASSES,
-        )
-        return "torch"
-
     logger.info(
-        "array backend: numpy (auto: n_items=%d n_classes=%d below crossover "
+        "array backend: torch (auto: n_items=%d n_classes=%d meets crossover "
         "n_items>=%d or n_classes>=%d)",
         n_items,
         n_classes,
         CROSSOVER_MIN_ITEMS,
         CROSSOVER_MIN_CLASSES,
     )
-    return "numpy"
+    return "torch"

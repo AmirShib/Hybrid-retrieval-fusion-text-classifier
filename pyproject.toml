@@ -49,6 +49,10 @@ lightgbm = ["lightgbm"]
 # The semantic (bi-encoder) TextEncoder backend, encoder_kind="sentence-transformers"
 # (the pipeline default). Pulls in torch. Core installs stay torch-free and can
 # still train/infer with --encoder-kind tfidf or --encoder-kind hashing (T63).
+# This is also what the device-resident torch ArrayOps backend (T85,
+# array_backend="torch"/"auto") needs -- it deliberately does not get its own
+# "gpu" extra: torch is already exactly one install away via this one, and a
+# second extra pinning the same dependency would only be a second name for it.
 sentence-transformers = ["sentence-transformers>=2.2"]
 
 [project.urls]
