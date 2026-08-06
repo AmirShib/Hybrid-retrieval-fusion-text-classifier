@@ -14,6 +14,9 @@ from .domain.services import ENCODER_SELECTION_METRICS
 
 _T = TypeVar("_T")
 
+# T89: valid values for EncoderConfig.reuse_query_embeddings (see its comment).
+REUSE_QUERY_EMBEDDINGS_MODES = ("auto", "always", "never")
+
 
 @dataclass
 class EncoderConfig:
@@ -68,6 +71,24 @@ class EncoderConfig:
     document_prompt: Optional[str] = None
     query_prompt_name: Optional[str] = None
     document_prompt_name: Optional[str] = None
+    # T89: whether training may reuse T88's once-per-run document embeddings as
+    # the *query* embeddings for held-out items, instead of encoding them a
+    # second time. Valid only when the two roles encode identically -- with the
+    # *_prompt fields above set (E5/BGE-style asymmetry), a document embedding is
+    # NOT a query embedding and substituting one is a correctness bug, not an
+    # optimization. Follows the array_backend="auto" precedent: auto-detect by
+    # default, an explicit value always wins.
+    #   "auto"   -- reuse when the encoder advertises `roles_share_encoding`
+    #               (the built-in encoders do; an unrecognized/custom encoder
+    #               does not, and is left re-encoding). The default.
+    #   "always" -- reuse even against a detected asymmetry: the caller asserts
+    #               the roles are equivalent. Logged as a warning when it
+    #               overrides, so it is never silent.
+    #   "never"  -- always re-encode; byte-for-byte the pre-T89 behaviour.
+    # None of these can reuse what does not exist: on the per-fold-encoder path
+    # there is no shared cache (a fold's embeddings are stale the moment that
+    # fold's encoder is fine-tuned), so all three are a no-op there.
+    reuse_query_embeddings: str = "auto"
 
 
 @dataclass
@@ -397,6 +418,12 @@ class PipelineConfig:
                 self.encoder.train_early_stopping_patience,
                 self.encoder.train_early_stopping_patience >= 0,
                 ">= 0 (0 trains every epoch)",
+            ),
+            (
+                "encoder.reuse_query_embeddings",
+                self.encoder.reuse_query_embeddings,
+                self.encoder.reuse_query_embeddings in REUSE_QUERY_EMBEDDINGS_MODES,
+                f"one of {list(REUSE_QUERY_EMBEDDINGS_MODES)}",
             ),
             # Membership in the schema is checked later, by fusion_feature_names,
             # which is the only place the *composed* schema (core + providers) is

@@ -48,7 +48,7 @@ make the signal-provider refactor a safe refactor instead of a rewrite-and-pray.
 | 3 | Operational capabilities (strictly ordered) | T66 → T43 → T68 → T69, then T29 |
 | 4 | Architecture & retrieval | T34 (phase 1 → 2) → T31, T33; T32 when corpus size demands |
 | 5 | Science & long-tail | T45, T40; T70 → T71; T72, T75; T76 last (gated, measure-first) |
-| 8 | **Execution model & feature decoupling (current priority)** | T88 → T87 → T83, T34-p1, T63 → T84 → T85 → T86; T34-p2 last |
+| 8 | **Execution model & feature decoupling (current priority)** | T88 → T87 → T83, T34-p1, T63 → T84 → T85 → T86; T34-p2 last. T89 → T90 slot in anywhere after T88 (independent of the device track) |
 
 ## Tier 1 — Tests (detailed, do first)
 
@@ -225,6 +225,17 @@ Decisions taken 2026-08-04, recorded in the tickets:
 | T84 | Array-backend seam: `ArrayOps` port, `auto` selection, CPU byte-identical    | in-review | T83 (thresholds)        |
 | T85 | Device-resident dense retrieval + encoder handoff (no D2H mid-pipeline)      | in-progress | T63, T34-p1, T83, T84, T88 |
 | T86 | Zero-copy feature matrix into fusion; drop pandas from the hot path          | todo   | T84, T85                |
+| T89 | Reuse pooled embeddings as query embeddings (2x → 1x encoder passes)          | in-review | T88, T28             |
+| T90 | Overlap BM25 corpus tokenization with the up-front encoder pass               | todo   | T88, T32                |
+
+**T89 and T90 were raised 2026-08-06** from the same question: what in training
+is serialized that needn't be. T89 turned out not to be a scheduling problem at
+all — it is duplicated work T88 left behind (it shared the *document* side of the
+shared-encoder path and left the *query* side re-encoding every held-out item, a
+flat extra full pass regardless of `n_folds`). Do **T89 before T90**: it is
+bit-identity-testable against T52's golden outputs, so it has an unambiguous
+pass/fail signal that a concurrency change would muddy, and it removes most of
+what any later fold-level parallelism would be hiding.
 
 **Cross-tier effects when these land:** T63 is promoted from Tier 6 to a hard
 prerequisite for T85. T34 phase 1 is promoted (also a T85 prerequisite) and phase

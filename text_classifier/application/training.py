@@ -182,6 +182,43 @@ class TrainingPipeline:
             encoder.set_array_backend(self._ops.name)
         return encoder
 
+    def _may_reuse_query_embeddings(self, encoder: TextEncoder) -> bool:
+        """Whether held-out items may take their query embeddings from T88's
+        shared document-embedding cache instead of being encoded a second time
+        (T89).
+
+        This answers the *policy* question only. The correctness precondition —
+        that a shared, frozen encoder produced the cache in the first place — is
+        enforced structurally by the cache being populated exclusively under
+        ``not self._use_per_fold_encoder()``; a fine-tuned per-fold encoder never
+        has a cache to reuse, so every mode below is a no-op on that path. The
+        callers still check ``... is not None`` before consulting this.
+
+        The capability is probed with ``getattr``, not ``isinstance``, following
+        T85's ``set_array_backend`` precedent, and **absence means "do not
+        reuse"**: a custom ``TextEncoder`` supplied through the port (or injected
+        as ``shared_encoder``) may distinguish the two roles internally without
+        going through ``EncoderConfig``'s prompt fields, and reading those fields
+        directly would silently hand it document vectors where it expects query
+        vectors. Conservative by default; opt in with ``"always"``.
+        """
+        mode = self.cfg.encoder.reuse_query_embeddings
+        if mode == "never":
+            return False
+        symmetric = bool(getattr(encoder, "roles_share_encoding", False))
+        if mode == "always":
+            if not symmetric:
+                log.warning(
+                    "encoder.reuse_query_embeddings='always' is reusing document embeddings "
+                    "as query embeddings even though %s does not advertise role-symmetric "
+                    "encoding. If this encoder really does encode queries and documents "
+                    "differently (e.g. E5/BGE-style prompts), the reused vectors are wrong "
+                    "and every retrieval signal built on them is invalid.",
+                    type(encoder).__name__,
+                )
+            return True
+        return symmetric
+
     def _shared_document_embeddings(
         self, texts: List[str], label_space: LabelSpace, encoder: TextEncoder
     ) -> Tuple[Any, Any]:
@@ -522,6 +559,7 @@ class TrainingPipeline:
         shared = None
         shared_emb: Optional[np.ndarray] = None
         shared_desc_emb: Optional[np.ndarray] = None
+        reuse_query_emb = False
         # T34 phase 1: the T88/T32 sharing optimizations below (`build_from_embeddings`,
         # `build_from_counts`/`build_with_shared_descriptions`) are specific to the
         # built-in adapters' internals, not part of the generic retriever-port
@@ -555,6 +593,12 @@ class TrainingPipeline:
                 shared_emb, shared_desc_emb = self._shared_document_embeddings(
                     texts, label_space, shared
                 )
+                # T89: T88 shared the *document* side and left the query side
+                # re-encoding every held-out item. Across the folds the `va` sets
+                # partition the item list, so that is one extra full pass over
+                # the corpus per run (flat in n_folds, not proportional to it) --
+                # recomputing vectors already sitting in `shared_emb`.
+                reuse_query_emb = self._may_reuse_query_embeddings(shared)
         # T32 A1/A2: BM25 tokenization is unconditional (it doesn't depend on
         # the encoder), so this cache always attempts to populate — tokenize
         # the whole example corpus + build the description index once here,
@@ -620,7 +664,15 @@ class TrainingPipeline:
             )
 
             va_texts = [texts[i] for i in va]
-            q_emb = enc.encode_queries(va_texts)
+            if shared_emb is not None and reuse_query_emb:
+                # Row order matches: `va_texts` is built in `va` order, so
+                # `shared_emb[va]` is the same rows in the same order the
+                # re-encode would have produced. Indexed exactly like
+                # `shared_emb[tr]` above, which keeps this working when the
+                # cache holds a resident torch tensor (T85) rather than numpy.
+                q_emb = shared_emb[va]
+            else:
+                q_emb = enc.encode_queries(va_texts)
             feats = self.assembler.assemble(
                 va_texts,
                 q_emb,
@@ -666,7 +718,20 @@ class TrainingPipeline:
         """
         assert self.assembler is not None  # set in run() before this is called
         self_ids = np.arange(len(texts))
-        q_emb = encoder.encode_queries(texts)
+        # T89: `_build_deployment_index` ran first on this path and, on the
+        # shared-encoder path, already encoded exactly this `texts` list (same
+        # object, same order) into the cache. Reuse it whole rather than encode
+        # the entire pool a second time. The length check is a cheap guard on
+        # that "same list" assumption, not a fallback for a legitimate mismatch.
+        pooled = self._shared_pool_emb
+        if (
+            pooled is not None
+            and len(pooled) == len(texts)
+            and self._may_reuse_query_embeddings(encoder)
+        ):
+            q_emb = pooled
+        else:
+            q_emb = encoder.encode_queries(texts)
         feats = self.assembler.assemble(
             texts,
             q_emb,

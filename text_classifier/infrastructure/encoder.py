@@ -182,6 +182,36 @@ class SentenceTransformerEncoder(TextEncoder):
         established (e.g. via ``resolve_array_backend``) before calling this."""
         self.array_backend = array_backend
 
+    @property
+    def roles_share_encoding(self) -> bool:
+        """Whether ``encode_queries`` and ``encode_documents`` are the same
+        function of the text, so a document embedding may be reused as a query
+        embedding (T89).
+
+        True exactly when both roles resolve to the same *effective* prompt.
+        Note this compares the effective pair, not the four raw fields, because
+        ``_encode`` gives an explicit literal ``prompt`` precedence over a
+        ``prompt_name`` — a role with both set ignores its ``prompt_name``, so
+        comparing the raw fields would report a difference that does not exist
+        (and, worse, could miss one that does).
+
+        False for any instruction-tuned asymmetric setup (E5/BGE-style
+        ``"query: "``/``"passage: "`` prompts, T28): there a document embedding
+        is genuinely not a query embedding, and reusing it would be a
+        correctness bug rather than an optimization.
+        """
+        return self._effective_prompt(
+            self._query_prompt, self._query_prompt_name
+        ) == self._effective_prompt(self._document_prompt, self._document_prompt_name)
+
+    @staticmethod
+    def _effective_prompt(
+        prompt: Optional[str], prompt_name: Optional[str]
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """The ``(prompt, prompt_name)`` pair ``_encode`` will actually apply,
+        mirroring its ``if prompt: ... elif prompt_name: ...`` precedence."""
+        return (prompt, None) if prompt else (None, prompt_name)
+
     def encode(self, texts: Sequence[str]) -> Any:
         return self._encode(texts, prompt=None, prompt_name=None)
 
@@ -238,6 +268,9 @@ class TfidfEncoder(TextEncoder):
     _VOCAB_NAME = "tfidf_vocab.json"
     _IDF_NAME = "tfidf_idf.npz"
     _PICKLE_NAME = "tfidf.pkl"  # legacy fallback
+    # T89: role-symmetric by construction -- it defines only `encode`, so both
+    # role methods inherit TextEncoder's default delegation to it.
+    roles_share_encoding = True
 
     def __init__(self, vectorizer: Any = None, tfidf_kwargs: dict | None = None):
         self._vectorizer = vectorizer
@@ -323,6 +356,9 @@ class HashingEncoder(TextEncoder):
     embeddings are byte-for-byte identical across Python processes, versions, and
     platforms — no ``PYTHONHASHSEED`` pinning required.
     """
+
+    # T89: role-symmetric by construction -- see TfidfEncoder's note.
+    roles_share_encoding = True
 
     def __init__(self, dim: int = 128) -> None:
         self.dim = dim

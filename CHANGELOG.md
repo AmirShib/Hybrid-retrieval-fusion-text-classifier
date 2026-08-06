@@ -8,6 +8,38 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 
 ## [Unreleased]
 
+### Changed
+- **Query embeddings are reused instead of recomputed (T89)** — on the
+  shared-encoder path (the default), training encoded every item twice: once as
+  a document into T88's once-per-run pool cache, and again as a *query* when the
+  fold loop reached it. Because the folds' held-out sets partition the item list,
+  that was one extra full pass over the corpus per run — flat in `n_folds`, not
+  proportional to it, and pure recomputation whenever the encoder treats both
+  roles identically (which it does unless a query/document prompt is configured).
+  Held-out items now slice the cache. Measured on Apple Silicon (M5/MPS) with
+  the default MiniLM encoder over 3,000 items: **55-61% less encoder time**
+  (6.9s → 3.1s uniform-length, 10.5s → 4.1s variable-length) and 47-55% less
+  out-of-fold wall-clock.
+  **On feature parity, read this carefully.** With a deterministic host-side
+  encoder the output is bit-identical (all 40 columns, NaN placement included).
+  With a real transformer on GPU it is bit-identical for uniform-length inputs
+  but *not* for variable-length ones: 12 of 40 continuous columns moved by up to
+  ~2e-06 (ordinal `rank_*`/`is_*_top1` columns were unaffected in that run,
+  though a near-tie could in principle flip one). The cause is that the old path
+  re-encoded held-out items in different *batches* than the pooled pass had, and
+  padding changes float reduction order — meaning the pre-T89 pipeline computed
+  two slightly different vectors for the same text, one indexed and one used to
+  query. Reuse removes that inconsistency rather than introducing one, but the
+  numbers are not byte-for-byte what a pre-T89 GPU run produced.
+  Reuse is refused whenever it would be wrong: a per-fold fine-tuned encoder
+  never populates a cache in the first place (its pre-training embeddings would
+  be stale), an asymmetric E5/BGE-style encoder (T28) keeps re-encoding, and a
+  custom `TextEncoder` that does not advertise the new `roles_share_encoding`
+  capability is left alone rather than assumed symmetric. Override with
+  `encoder.reuse_query_embeddings` / `--reuse-query-embeddings`:
+  `auto` (default, detect), `always` (force, warns when it overrides a detected
+  asymmetry), `never` (byte-for-byte the pre-T89 path).
+
 ### Added
 - **Device-resident dense retrieval + encoder handoff (T85)** — a torch
   `ArrayOps` backend (`array_backend="torch"`/`"auto"` over T83's crossover)

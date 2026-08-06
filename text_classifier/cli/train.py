@@ -42,6 +42,7 @@ import json
 import logging
 
 from .. import TrainingPipeline
+from ..config import REUSE_QUERY_EMBEDDINGS_MODES
 from ..domain import ENCODER_SELECTION_METRICS
 from ..infrastructure.registry import encoder_spec
 from ._common import (
@@ -108,6 +109,18 @@ def main() -> None:
         default=None,
         help="stop fine-tuning after this many consecutive epochs without an "
         "improvement in --encoder-select-metric (default: 0 = run every epoch)",
+    )
+    p.add_argument(
+        "--reuse-query-embeddings",
+        default=None,
+        choices=list(REUSE_QUERY_EMBEDDINGS_MODES),
+        help="whether training may reuse the once-per-run document embeddings as "
+        "the query embeddings for held-out items instead of encoding them twice "
+        "(default: auto -- reuse when the encoder encodes both roles identically, "
+        "which is the case unless a query/document prompt is configured). "
+        "'never' always re-encodes; 'always' forces reuse even against a detected "
+        "asymmetry. No effect with --per-fold-encoder, where there is no shared "
+        "encoder and thus nothing cached to reuse.",
     )
     p.add_argument(
         "--folds",
@@ -210,6 +223,8 @@ def main() -> None:
         cfg.encoder.train_select_metric = args.encoder_select_metric
     if args.encoder_patience is not None:
         cfg.encoder.train_early_stopping_patience = args.encoder_patience
+    if args.reuse_query_embeddings is not None:
+        cfg.encoder.reuse_query_embeddings = args.reuse_query_embeddings
     if args.folds is not None:
         cfg.training.n_folds = args.folds
     if args.target_precision is not None:

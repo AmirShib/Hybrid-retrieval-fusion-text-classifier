@@ -182,7 +182,15 @@ class TestPipelineRoleRouting:
     def test_training_routes_examples_and_descriptions_as_documents(self):
         enc = RoleRecordingEncoder()
         label_space, items = make_synthetic(n_classes=4, per_class=9, seed=5)
-        TrainingPipeline(_cfg(), shared_encoder=enc).run(items, label_space)
+        cfg = _cfg()
+        # T89 lets a *symmetric* encoder take its query embeddings from the
+        # shared document cache, so on the default "auto" the pipeline stops
+        # calling encode_queries at all and this test could no longer observe
+        # the routing it exists to protect. Pin the mode to "never" so role
+        # routing stays asserted on its own terms; the reuse path gets its own
+        # coverage in TestQueryEmbeddingReuse below.
+        cfg.encoder.reuse_query_embeddings = "never"
+        TrainingPipeline(cfg, shared_encoder=enc).run(items, label_space)
 
         # Every fold's validation items went through the query role...
         assert enc.query_batches, "no query-role encodes recorded during training"
