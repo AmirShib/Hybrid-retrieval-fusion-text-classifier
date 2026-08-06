@@ -10,12 +10,14 @@ double rather than timed, so the assertion is exact and CI-stable.
 from __future__ import annotations
 
 from typing import Sequence
+from unittest.mock import patch
 
 import numpy as np
 import pytest
 
 from text_classifier.config import EncoderConfig, FusionConfig, PipelineConfig, TrainingConfig
 from text_classifier.domain import TextEncoder
+import text_classifier.application.training as training
 from text_classifier.application.training import TrainingPipeline
 from tests._doubles import HashingEncoder, make_synthetic
 
@@ -104,14 +106,14 @@ class TestPerFoldEncoderPathUnchanged:
         fits + encodes its own corpus-dependent (TF-IDF) encoder, so the T88
         caching path (which requires a frozen shared encoder) must never engage.
         A per-fold-fit TF-IDF vocabulary differs fold to fold, so training must
-        still succeed without ever touching `_shared_document_embeddings`."""
+        still succeed without ever touching the shared document-embedding cache."""
         label_space, items = corpus
         cfg = _cfg(n_folds=5, use_per_fold_encoder=True)
         cfg.encoder = EncoderConfig(kind="tfidf")
         pipeline = TrainingPipeline(cfg)
         _, report = pipeline.run(items, label_space)
         assert report.n_items > 0
-        assert pipeline._shared_pool_emb is None
+        assert not pipeline._indexes.pool_embeddings_cached
 
 
 class TestCorpusDependentEncoderPathUnchanged:
@@ -125,4 +127,49 @@ class TestCorpusDependentEncoderPathUnchanged:
         pipeline = TrainingPipeline(cfg)
         _, report = pipeline.run(items, label_space)
         assert report.n_items > 0
-        assert pipeline._shared_pool_emb is None
+        assert not pipeline._indexes.pool_embeddings_cached
+
+
+class TestSharedEncoderIsBuiltOnce:
+    def test_shared_encoder_is_constructed_once_per_run(self, corpus):
+        """The out-of-fold loop and the deployment build both need the frozen
+        shared encoder. They each used to call `_load_shared_encoder`, which
+        built a fresh one every time — two constructions per run, and for a
+        pretrained backend that is a second load of the same weights off disk.
+        `_load_shared_encoder` memoizes, so both now share one instance.
+        """
+        label_space, items = corpus
+        cfg = _cfg(n_folds=3)
+        built = []
+        real_build = training.build_encoder
+
+        def counting_build(encoder_cfg):
+            built.append(encoder_cfg)
+            return real_build(encoder_cfg)
+
+        pipeline = TrainingPipeline(cfg)
+        with patch.object(training, "build_encoder", counting_build):
+            _, report = pipeline.run(items, label_space)
+
+        assert report.n_items > 0
+        assert len(built) == 1
+
+    def test_per_fold_path_still_fits_an_encoder_per_fold(self, corpus):
+        """The memoization must not leak into the per-fold path, where each fold
+        deliberately fits its own encoder (plus one for the deployment index)."""
+        label_space, items = corpus
+        cfg = _cfg(n_folds=3, use_per_fold_encoder=True)
+        cfg.encoder = EncoderConfig(kind="tfidf")
+        fits = []
+        real_fit = training.fit_encoder
+
+        pipeline = TrainingPipeline(cfg)
+        with patch.object(
+            training,
+            "fit_encoder",
+            lambda c, i, ls: (fits.append(1), real_fit(c, i, ls))[1],
+        ):
+            _, report = pipeline.run(items, label_space)
+
+        assert report.n_items > 0
+        assert len(fits) == cfg.training.n_folds + 1

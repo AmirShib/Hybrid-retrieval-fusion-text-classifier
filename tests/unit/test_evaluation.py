@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from text_classifier.application.evaluation import (
-    _json_safe,
+    json_safe,
     brier_score,
     evaluate_decisions,
     expected_calibration_error,
@@ -121,6 +121,6 @@ def test_evaluate_decisions_shape_and_overall():
     assert set(rep) >= {"overall", "calibration", "risk_coverage_curve", "per_class"}
 
 
-def test_json_safe_replaces_nonfinite_and_numpy():
-    cleaned = _json_safe({"a": np.float64("nan"), "b": np.int64(3), "c": [np.float32(1.5)]})
+def testjson_safe_replaces_nonfinite_and_numpy():
+    cleaned = json_safe({"a": np.float64("nan"), "b": np.int64(3), "c": [np.float32(1.5)]})
     assert cleaned == {"a": None, "b": 3, "c": [1.5]}

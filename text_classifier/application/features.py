@@ -320,21 +320,25 @@ class FeatureAssembler:
         # is-top1) — driven by each SignalMatrix's own declaration, so the
         # asymmetric built-in schema (e.g. `d_desc_sim` has no missing flag,
         # `d_proto_sim` has no rank/norm at all) is reproduced exactly. ----
+        # The four *independent* derivations, each a pure function of the matrix
+        # (plus the candidate mask) gathered at the candidate grid. Table-driven
+        # so adding one is a row here rather than a fifth near-identical block;
+        # "margin" stays out of it because it alone produces a paired per-query
+        # column (`gap_column`) and so is not a plain gather.
+        simple_derivations = {
+            "raw": lambda M: g(M),
+            "missing": lambda M: np.isnan(g(M)).astype(np.float64),
+            "rank": lambda M: g(_row_rank(M, mask, self._ops)),
+            "norm": lambda M: g(_row_minmax(M, mask, self._ops)),
+        }
+
         for sm in sig_matrices.values():
             M = sm.value
-            raw_col = sm.columns.get("raw") if "raw" in sm.derive else None
-            if raw_col is not None and _want(raw_col):
-                data[raw_col] = g(M)
-            missing_col = sm.columns.get("missing") if "missing" in sm.derive else None
-            if missing_col is not None and _want(missing_col):
-                data[missing_col] = np.isnan(g(M)).astype(np.float64)
-            rank_col = sm.columns.get("rank") if "rank" in sm.derive else None
-            if rank_col is not None and _want(rank_col):
-                data[rank_col] = g(_row_rank(M, mask, self._ops))
-            norm_col = sm.columns.get("norm") if "norm" in sm.derive else None
-            if norm_col is not None and _want(norm_col):
-                data[norm_col] = g(_row_minmax(M, mask, self._ops))
-            margin_col = sm.columns.get("margin") if "margin" in sm.derive else None
+            for derivation, compute in simple_derivations.items():
+                col = sm.column_for(derivation)
+                if col is not None and _want(col):
+                    data[col] = compute(M)
+            margin_col = sm.column_for("margin")
             want_margin = margin_col is not None and _want(margin_col)
             want_gap = sm.gap_column is not None and _want(sm.gap_column)
             if margin_col is not None and (want_margin or want_gap):

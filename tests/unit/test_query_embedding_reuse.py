@@ -159,7 +159,7 @@ def test_per_fold_encoder_populates_no_cache_to_reuse():
     pipeline = TrainingPipeline(cfg)
     pipeline.run(items, label_space)
     assert pipeline._use_per_fold_encoder() is True
-    assert pipeline._shared_pool_emb is None, (
+    assert not pipeline._indexes.pool_embeddings_cached, (
         "a per-fold fine-tuned encoder must leave no shared embedding cache; "
         "reusing one would feed folds embeddings from the wrong weights"
     )

@@ -19,14 +19,13 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
-from scipy import sparse
-from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.model_selection import StratifiedKFold
 
+from .._messages import format_preview
 from ..config import CalibrationConfig, PipelineConfig
 from ..domain import (
     AbstentionPolicy,
@@ -34,10 +33,12 @@ from ..domain import (
     CandidatePolicy,
     ConfidenceCalibrator,
     CoverageReport,
+    DenseRetriever,
     FeatureProvider,
     FusionModel,
     LabeledItem,
     LabelSpace,
+    LexicalRetriever,
     SignalProvider,
     TextEncoder,
     ThresholdTuner,
@@ -45,18 +46,12 @@ from ..domain import (
 )
 from ..infrastructure import (
     ArtifactRepository,
-    BM25Index,
-    DenseRetrieverAdapter,
     DeployedArtifacts,
-    LexicalRetrieverAdapter,
-    bm25_prunes_vocab,
     build_array_ops,
     build_calibrator,
-    build_dense_retriever,
     build_encoder,
     build_feature_providers,
     build_fusion,
-    build_lexical_retriever,
     build_signal_providers,
     encoder_is_corpus_dependent,
     fit_encoder,
@@ -65,6 +60,7 @@ from ..infrastructure import (
 from ..infrastructure.array_ops import NumpyArrayOps
 from .evaluation import build_manifest, evaluate_decisions, write_evaluation_artifacts
 from .features import FeatureAssembler
+from .indexing import RetrievalIndexBuilder
 from .scoring import add_confidence, select_feature_columns, top_per_item
 from .signal_report import signal_report
 
@@ -138,23 +134,43 @@ class TrainingPipeline:
         # reused by `_featurize_external`/the returned `DeployedArtifacts`,
         # mirroring `self._providers`'s lifecycle above.
         self._signal_providers: List[SignalProvider] = []
-        # T88: the shared-encoder document embeddings (full example pool + every
-        # class description), encoded once per `run()` call and reused by both
-        # `_build_oof` (sliced per fold) and `_build_deployment_index` (used
-        # whole) — instead of each paying its own `encode_documents` pass.
-        # Any, not np.ndarray: a resident torch tensor when this run resolves
-        # the torch backend (T85) -- see `_load_shared_encoder`.
-        self._shared_pool_emb: Any = None
-        self._shared_desc_emb: Any = None
-        # T32 A1/A2: the example-corpus BM25 tokenization + the description
-        # BM25 index, built once per `run()` call and reused by `_build_oof`
-        # (sliced per fold) and `_build_deployment_index` (used whole) — BM25
-        # tokenization is unconditional (independent of the encoder), so this
-        # cache always attempts to populate, guarded only by
-        # `bm25_prunes_vocab`.
-        self._shared_example_counts: Optional[sparse.csr_matrix] = None
-        self._shared_example_vectorizer: Optional[CountVectorizer] = None
-        self._shared_desc_bm25: Optional[BM25Index] = None
+        # The frozen encoder shared across folds, and the index builder that
+        # owns every once-per-run cache (document embeddings, BM25 tokenization
+        # — see `application/indexing.py`). Both are per-run state, keyed to
+        # that run's corpus and array backend: `run()` clears them and the
+        # first index-construction site builds them (`_index_builder`).
+        self._shared_encoder: Optional[TextEncoder] = None
+        self._indexes: Optional[RetrievalIndexBuilder] = None
+
+    def _index_builder(
+        self, texts: Sequence[str], y: np.ndarray, label_space: LabelSpace
+    ) -> RetrievalIndexBuilder:
+        """The one ``RetrievalIndexBuilder`` for this run, built on first use.
+
+        Both index-construction sites — the out-of-fold fold loop and the
+        deployment build — go through here, and whichever runs first creates it
+        (the k-fold path starts with the folds; the leave-one-out path starts
+        with the deployment index). Sharing the instance is what shares the
+        once-per-run encode/tokenize caches between them, so this is memoized
+        rather than constructed per call. ``run()`` clears it, so a pipeline
+        instance can be reused for a second corpus.
+
+        ``shared_encoder`` is ``None`` on the per-fold-encoder path, which
+        disables the embedding cache: a fold's vectors are stale the moment the
+        next fold refits the encoder.
+        """
+        if self._indexes is None:
+            self._indexes = RetrievalIndexBuilder(
+                self.cfg,
+                label_space,
+                texts,
+                y,
+                self._ops,
+                shared_encoder=(
+                    None if self._use_per_fold_encoder() else self._load_shared_encoder()
+                ),
+            )
+        return self._indexes
 
     def _use_per_fold_encoder(self) -> bool:
         """Refit the encoder per fold when explicitly requested, or whenever the
@@ -166,6 +182,15 @@ class TrainingPipeline:
         return self._shared_override is None and encoder_is_corpus_dependent(self.cfg.encoder)
 
     def _load_shared_encoder(self) -> TextEncoder:
+        """Build (or take the injected) frozen encoder shared across every fold.
+
+        Called once per ``run()`` and memoized into ``self._shared_encoder``:
+        the out-of-fold loop and the deployment build both need it, and for a
+        pretrained backend a second call would re-load the same weights from
+        disk for no benefit.
+        """
+        if self._shared_encoder is not None:
+            return self._shared_encoder
         encoder = (
             self._shared_override
             if self._shared_override is not None
@@ -180,94 +205,8 @@ class TrainingPipeline:
         # existing caller, byte-for-byte unchanged).
         if self._ops.name != "numpy" and hasattr(encoder, "set_array_backend"):
             encoder.set_array_backend(self._ops.name)
+        self._shared_encoder = encoder
         return encoder
-
-    def _may_reuse_query_embeddings(self, encoder: TextEncoder) -> bool:
-        """Whether held-out items may take their query embeddings from T88's
-        shared document-embedding cache instead of being encoded a second time
-        (T89).
-
-        This answers the *policy* question only. The correctness precondition —
-        that a shared, frozen encoder produced the cache in the first place — is
-        enforced structurally by the cache being populated exclusively under
-        ``not self._use_per_fold_encoder()``; a fine-tuned per-fold encoder never
-        has a cache to reuse, so every mode below is a no-op on that path. The
-        callers still check ``... is not None`` before consulting this.
-
-        The capability is probed with ``getattr``, not ``isinstance``, following
-        T85's ``set_array_backend`` precedent, and **absence means "do not
-        reuse"**: a custom ``TextEncoder`` supplied through the port (or injected
-        as ``shared_encoder``) may distinguish the two roles internally without
-        going through ``EncoderConfig``'s prompt fields, and reading those fields
-        directly would silently hand it document vectors where it expects query
-        vectors. Conservative by default; opt in with ``"always"``.
-        """
-        mode = self.cfg.encoder.reuse_query_embeddings
-        if mode == "never":
-            return False
-        symmetric = bool(getattr(encoder, "roles_share_encoding", False))
-        if mode == "always":
-            if not symmetric:
-                log.warning(
-                    "encoder.reuse_query_embeddings='always' is reusing document embeddings "
-                    "as query embeddings even though %s does not advertise role-symmetric "
-                    "encoding. If this encoder really does encode queries and documents "
-                    "differently (e.g. E5/BGE-style prompts), the reused vectors are wrong "
-                    "and every retrieval signal built on them is invalid.",
-                    type(encoder).__name__,
-                )
-            return True
-        return symmetric
-
-    def _shared_document_embeddings(
-        self, texts: List[str], label_space: LabelSpace, encoder: TextEncoder
-    ) -> Tuple[Any, Any]:
-        """The full example-pool and class-description embeddings for the
-        shared-encoder path, encoded once and cached on ``self`` for the
-        lifetime of one ``run()`` call (T88).
-
-        Only valid when the encoder is frozen and shared across folds — callers
-        must guard on ``not self._use_per_fold_encoder()`` themselves, exactly as
-        ``_load_shared_encoder`` requires. ``_build_oof`` populates the cache
-        first (when ``n_folds != 1``) and slices per fold;
-        ``_build_deployment_index`` then reuses it whole instead of re-encoding
-        every distinct text a second time. On the ``n_folds == 1`` path
-        ``_build_deployment_index`` runs first and populates it instead."""
-        if self._shared_pool_emb is None:
-            self._shared_pool_emb = encoder.encode_documents(texts)
-            self._shared_desc_emb = encoder.encode_documents(label_space.descriptions)
-        assert self._shared_desc_emb is not None
-        return self._shared_pool_emb, self._shared_desc_emb
-
-    def _shared_lexical_state(
-        self, texts: List[str], label_space: LabelSpace
-    ) -> Tuple[Optional[Tuple[sparse.csr_matrix, CountVectorizer]], BM25Index]:
-        """The example-corpus BM25 tokenization + description BM25 index,
-        built once per ``run()`` call and cached on ``self`` (T32 A1/A2).
-
-        Returns ``(example_state, desc_bm25)``. ``desc_bm25`` is always cached
-        and reused verbatim — ``label_space.descriptions`` does not vary by
-        fold, and ``BM25Index`` is immutable after ``fit``, so this is a
-        straight reuse with no caveats (A1). ``example_state`` is ``None`` when
-        ``bm25_token_kwargs`` prunes vocabulary by corpus statistics
-        (``min_df``/``max_df``/``max_features``, checked via
-        ``bm25_prunes_vocab``) — full-corpus and per-fold vocabularies
-        genuinely differ then, so callers fall back to
-        ``LexicalRetrieverAdapter.build``, the ordinary per-fold path, exactly
-        as before this ticket (A2's guard)."""
-        cfg = self.cfg.retrieval
-        if self._shared_desc_bm25 is None:
-            self._shared_desc_bm25 = BM25Index(
-                cfg.k1, cfg.b, max_df_ratio=cfg.bm25_max_df_ratio, **cfg.bm25_token_kwargs
-            ).fit(label_space.descriptions)
-            if not bm25_prunes_vocab(cfg.bm25_token_kwargs):
-                counts, vectorizer = BM25Index.tokenize_corpus(texts, **cfg.bm25_token_kwargs)
-                self._shared_example_counts = counts
-                self._shared_example_vectorizer = vectorizer
-        example_state = None
-        if self._shared_example_counts is not None:
-            example_state = (self._shared_example_counts, self._shared_example_vectorizer)
-        return example_state, self._shared_desc_bm25
 
     # ---------------------------------------------------------------- public API
     def run(
@@ -326,6 +265,12 @@ class TrainingPipeline:
         )
         texts = [it.text for it in items]
         y = np.array(label_space.encode_labels([it.label for it in items]), dtype=np.int64)
+
+        # Per-run state, reset here so a pipeline instance can be run twice: the
+        # index builder's caches and the shared encoder belong to *this* corpus
+        # and this run's array backend.
+        self._shared_encoder = None
+        self._indexes = None
 
         roles = self.cfg.training.fold_roles(
             external_val=val_items is not None, external_test=test_items is not None
@@ -452,13 +397,11 @@ class TrainingPipeline:
                 "(A single-class problem has no negatives to learn from.)"
             )
 
-        known = set(label_space.keys)
-        unknown = sorted({it.label for it in items if it.label not in known})
+        unknown = label_space.unknown_keys(it.label for it in items)
         if unknown:
-            shown = unknown[:10]
-            suffix = " ..." if len(unknown) > 10 else ""
             raise ValueError(
-                f"{len(unknown)} item label(s) are not defined in the LabelSpace: {shown}{suffix}"
+                f"{len(unknown)} item label(s) are not defined in the LabelSpace: "
+                f"{format_preview(unknown)}"
             )
 
         n_folds = self.cfg.training.n_folds
@@ -467,11 +410,10 @@ class TrainingPipeline:
             key=lambda kc: (kc[1], kc[0]),
         )
         if underpopulated:
-            shown_counts = underpopulated[:10]
-            suffix = " ..." if len(underpopulated) > 10 else ""
             raise ValueError(
                 f"StratifiedKFold(n_folds={n_folds}) needs at least {n_folds} examples "
-                f"per class; these class(es) have too few (key, count): {shown_counts}{suffix}"
+                f"per class; these class(es) have too few (key, count): "
+                f"{format_preview(underpopulated)}"
             )
 
         # External splits: check labels + leakage before any encoding happens.
@@ -511,14 +453,11 @@ class TrainingPipeline:
         if not ext_items:
             raise ValueError(f"external {name} set was provided but is empty")
 
-        known = set(label_space.keys)
-        unknown = sorted({it.label for it in ext_items if it.label not in known})
+        unknown = label_space.unknown_keys(it.label for it in ext_items)
         if unknown:
-            shown = unknown[:10]
-            suffix = " ..." if len(unknown) > 10 else ""
             raise ValueError(
                 f"{len(unknown)} external {name}-set label(s) are not defined in the "
-                f"LabelSpace: {shown}{suffix}"
+                f"LabelSpace: {format_preview(unknown)}"
             )
 
         n_overlap = sum(1 for it in ext_items if it.text in train_texts)
@@ -556,96 +495,19 @@ class TrainingPipeline:
 
     def _build_oof(self, texts: List[str], y: np.ndarray, label_space: LabelSpace) -> pd.DataFrame:
         assert self.assembler is not None  # set in run() before this is called
-        shared = None
-        shared_emb: Optional[np.ndarray] = None
-        shared_desc_emb: Optional[np.ndarray] = None
-        reuse_query_emb = False
-        # T34 phase 1: the T88/T32 sharing optimizations below (`build_from_embeddings`,
-        # `build_from_counts`/`build_with_shared_descriptions`) are specific to the
-        # built-in adapters' internals, not part of the generic retriever-port
-        # contract a third-party `dense_kind`/`lexical_kind` must implement. They stay
-        # gated on the built-in kinds so default-config behaviour is untouched byte
-        # for byte; a non-default kind falls back to the plain per-fold
-        # `build_dense_retriever`/`build_lexical_retriever` call and loses the
-        # cross-fold sharing (an accepted phase-1 tradeoff, not a TODO — a backend
-        # that wants it back must earn it with its own per-fold-reuse hook).
-        use_shared_dense = self.cfg.retrieval.dense_kind == "exact"
-        # Building a lexical index at all -- tokenizing the corpus + fitting a
-        # BM25 weight matrix per fold -- is dead work when "lexical" isn't one
-        # of the configured signals: nothing downstream ever queries it (see
-        # `build_signal_providers`, which only wraps a `LexicalSignalProvider`
-        # around it when "lexical" is requested). Skipping it here, not just
-        # skipping its *use*, is what actually saves the tokenization cost.
-        lexical_enabled = "lexical" in self.cfg.signals
-        use_shared_lexical = lexical_enabled and self.cfg.retrieval.lexical_kind == "bm25"
-        if not self._use_per_fold_encoder():
-            shared = self._load_shared_encoder()
-            if use_shared_dense:
-                # T88: a frozen shared encoder's `encode_documents` is a pure
-                # function of the text, so encode the whole pool + every class
-                # description once (cached on `self`, shared with
-                # `_build_deployment_index`) and slice per fold here, instead of
-                # paying the encode again per fold (~5x the encoder work at
-                # n_folds=5). The per-fold and corpus-dependent (e.g. TF-IDF) paths
-                # are untouched — they stay inside `_encoder_for_split`/
-                # `DenseRetrieverAdapter.build` below, guarded by the same
-                # `_use_per_fold_encoder()` predicate.
-                shared_emb, shared_desc_emb = self._shared_document_embeddings(
-                    texts, label_space, shared
-                )
-                # T89: T88 shared the *document* side and left the query side
-                # re-encoding every held-out item. Across the folds the `va` sets
-                # partition the item list, so that is one extra full pass over
-                # the corpus per run (flat in n_folds, not proportional to it) --
-                # recomputing vectors already sitting in `shared_emb`.
-                reuse_query_emb = self._may_reuse_query_embeddings(shared)
-        # T32 A1/A2: BM25 tokenization is unconditional (it doesn't depend on
-        # the encoder), so this cache always attempts to populate — tokenize
-        # the whole example corpus + build the description index once here,
-        # cached on `self` and reused by `_build_deployment_index` below. Only
-        # done for the built-in "bm25" lexical_kind (see comment above) and
-        # only when the lexical signal is actually enabled.
-        example_state, desc_bm25 = (
-            self._shared_lexical_state(texts, label_space) if use_shared_lexical else (None, None)
-        )
+        indexes = self._index_builder(texts, y, label_space)
+        shared = None if self._use_per_fold_encoder() else self._load_shared_encoder()
         skf = StratifiedKFold(
             self.cfg.training.n_folds, shuffle=True, random_state=self.cfg.training.random_state
         )
         frames, recall_hits, total = [], 0, 0
         for fold, (tr, va) in enumerate(skf.split(texts, y)):
             enc = self._encoder_for_split(tr, texts, y, label_space, shared)
-            tr_texts = [texts[i] for i in tr]
-            if shared_emb is not None:
-                assert shared_desc_emb is not None
-                dense = DenseRetrieverAdapter.build_from_embeddings(
-                    shared_emb[tr],
-                    y[tr],
-                    shared_desc_emb,
-                    label_space,
-                    self.cfg.retrieval,
-                    self._ops,
-                )
-            else:
-                dense = build_dense_retriever(
-                    self.cfg.retrieval, enc, tr_texts, y[tr], label_space, self._ops
-                )
-            if not lexical_enabled:
-                lexical = None
-            elif example_state is not None:
-                counts, vectorizer = example_state
-                lexical = LexicalRetrieverAdapter.build_from_counts(
-                    counts[tr], vectorizer, y[tr], desc_bm25, self.cfg.retrieval
-                )
-            elif use_shared_lexical:
-                # A2's guard fell back (vocab-pruning kwargs) — the example
-                # side must refit per fold, but the description index (A1) is
-                # still shared: it is never row-sliced, so nothing about A2's
-                # concern applies to it.
-                lexical = LexicalRetrieverAdapter.build_with_shared_descriptions(
-                    tr_texts, y[tr], desc_bm25, self.cfg.retrieval
-                )
-            else:
-                lexical = build_lexical_retriever(self.cfg.retrieval, tr_texts, y[tr], label_space)
+            # This fold's retrieval state, over its *training* rows only — the
+            # leakage rule. Whether that reuses the run-wide caches (T88/T32) or
+            # rebuilds from scratch is the index builder's decision, made once
+            # and applied identically here and in `_build_deployment_index`.
+            dense, lexical = indexes.build(enc, tr)
             # Providers are fit on this fold's training rows only (leakage-free).
             providers = self._fit_providers(tr, texts, y, label_space)
             # T34 phase 2: the SignalProviders for this fold, wrapping this
@@ -664,15 +526,11 @@ class TrainingPipeline:
             )
 
             va_texts = [texts[i] for i in va]
-            if shared_emb is not None and reuse_query_emb:
-                # Row order matches: `va_texts` is built in `va` order, so
-                # `shared_emb[va]` is the same rows in the same order the
-                # re-encode would have produced. Indexed exactly like
-                # `shared_emb[tr]` above, which keeps this working when the
-                # cache holds a resident torch tensor (T85) rather than numpy.
-                q_emb = shared_emb[va]
-            else:
-                q_emb = enc.encode_queries(va_texts)
+            # T89: the held-out rows' query embeddings, taken from the run-wide
+            # document cache when that is legitimate rather than encoded again.
+            # Across the folds the `va` sets partition the item list, so this is
+            # a whole extra pass over the corpus saved per run.
+            q_emb = indexes.query_embeddings(enc, va)
             feats = self.assembler.assemble(
                 va_texts,
                 q_emb,
@@ -717,21 +575,13 @@ class TrainingPipeline:
         the drop-in replacement for ``_build_oof``'s output on the LOO path.
         """
         assert self.assembler is not None  # set in run() before this is called
+        indexes = self._index_builder(texts, y, label_space)
         self_ids = np.arange(len(texts))
         # T89: `_build_deployment_index` ran first on this path and, on the
-        # shared-encoder path, already encoded exactly this `texts` list (same
-        # object, same order) into the cache. Reuse it whole rather than encode
-        # the entire pool a second time. The length check is a cheap guard on
-        # that "same list" assumption, not a fallback for a legitimate mismatch.
-        pooled = self._shared_pool_emb
-        if (
-            pooled is not None
-            and len(pooled) == len(texts)
-            and self._may_reuse_query_embeddings(encoder)
-        ):
-            q_emb = pooled
-        else:
-            q_emb = encoder.encode_queries(texts)
+        # shared-encoder path, already encoded exactly this corpus into the
+        # cache — the builder owns that corpus, so reusing it whole needs no
+        # "same list" guard here.
+        q_emb = indexes.query_embeddings(encoder)
         feats = self.assembler.assemble(
             texts,
             q_emb,
@@ -762,8 +612,8 @@ class TrainingPipeline:
         ext_items: Sequence[LabeledItem],
         label_space: LabelSpace,
         encoder: TextEncoder,
-        dense: DenseRetrieverAdapter,
-        lexical: Optional[LexicalRetrieverAdapter],
+        dense: DenseRetriever,
+        lexical: Optional[LexicalRetriever],
     ) -> Tuple[pd.DataFrame, np.ndarray]:
         """Featurize an external val/test set against the *deployment* index.
 
@@ -920,7 +770,7 @@ class TrainingPipeline:
     # ---------------------------------------------------------------- (5) deploy
     def _build_deployment_index(
         self, texts, y, label_space
-    ) -> Tuple[TextEncoder, DenseRetrieverAdapter, Optional[LexicalRetrieverAdapter]]:
+    ) -> Tuple[TextEncoder, DenseRetriever, Optional[LexicalRetriever]]:
         """Fit the final encoder and build the dense + lexical indices over *all*
         training items.
 
@@ -930,58 +780,20 @@ class TrainingPipeline:
         of deployment assembly is what lets the external sets be scored against the
         exact index the model will use in production.
         """
-        # T34 phase 1: same gating as `_build_oof` — the T88/T32 sharing
-        # optimizations are built-in-adapter-specific, so a non-default
-        # dense_kind/lexical_kind goes through the plain registry build instead
-        # (losing the sharing, an accepted phase-1 tradeoff).
-        use_shared_dense = self.cfg.retrieval.dense_kind == "exact"
-        lexical_enabled = "lexical" in self.cfg.signals
-        use_shared_lexical = lexical_enabled and self.cfg.retrieval.lexical_kind == "bm25"
+        indexes = self._index_builder(texts, y, label_space)
         if self._use_per_fold_encoder():
             items = [
                 LabeledItem(texts[i], label_space.key_at(int(y[i]))) for i in range(len(texts))
             ]
             encoder = fit_encoder(self.cfg.encoder, items, label_space)
-            dense = build_dense_retriever(
-                self.cfg.retrieval, encoder, texts, y, label_space, self._ops
-            )
         else:
             encoder = self._load_shared_encoder()
-            if use_shared_dense:
-                # T88: reuse the whole-pool embeddings `_build_oof` already computed
-                # (or compute them now, on the n_folds=1 path where this runs first)
-                # instead of a second `encode_documents` pass over every text.
-                emb, desc_emb = self._shared_document_embeddings(texts, label_space, encoder)
-                dense = DenseRetrieverAdapter.build_from_embeddings(
-                    emb, y, desc_emb, label_space, self.cfg.retrieval, self._ops
-                )
-            else:
-                dense = build_dense_retriever(
-                    self.cfg.retrieval, encoder, texts, y, label_space, self._ops
-                )
-        if not lexical_enabled:
-            # "lexical" isn't a configured signal: no code path ever queries
-            # this index (see the matching gate in `_build_oof`), so building
-            # one -- tokenizing the whole corpus, fitting the BM25 weight
-            # matrix -- would be pure waste. `DeployedArtifacts.lexical` is
-            # `Optional` precisely for this case.
-            lexical = None
-        elif use_shared_lexical:
-            # T32 A1/A2: reuse the corpus tokenization + description index
-            # `_build_oof` already built (or build them now, on the n_folds=1 path
-            # where this runs first) instead of a second tokenize pass.
-            example_state, desc_bm25 = self._shared_lexical_state(texts, label_space)
-            if example_state is not None:
-                counts, vectorizer = example_state
-                lexical = LexicalRetrieverAdapter.build_from_counts(
-                    counts, vectorizer, y, desc_bm25, self.cfg.retrieval
-                )
-            else:
-                lexical = LexicalRetrieverAdapter.build_with_shared_descriptions(
-                    texts, y, desc_bm25, self.cfg.retrieval
-                )
-        else:
-            lexical = build_lexical_retriever(self.cfg.retrieval, texts, y, label_space)
+        # The same construction the fold loop uses, over *all* rows. On the
+        # k-fold path this reuses the caches `_build_oof` already populated; on
+        # the leave-one-out path this runs first and populates them for
+        # `_build_loo`. Either way there is exactly one encode/tokenize pass
+        # over the corpus per run.
+        dense, lexical = indexes.build(encoder, None)
         # Custom feature providers fit on *all* training rows — the version
         # that ships in the model and scores external val/test sets. The composed
         # schema (core + provider columns) is what the fusion/eval steps select by.

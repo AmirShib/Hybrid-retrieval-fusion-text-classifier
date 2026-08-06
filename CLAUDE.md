@@ -12,12 +12,18 @@ calibration → tuned abstention threshold. Built for imbalanced data and air-ga
 text_classifier/
   domain/         framework-free: models, ports (ABCs), services (policies, schema)
   infrastructure/ adapters: encoder (sentence-transformers), retrieval (BM25+dense), fusion (XGBoost), persistence
-  application/    use cases: features, scoring, TrainingPipeline, InferencePipeline
+  application/    use cases: features, scoring, indexing, TrainingPipeline, InferencePipeline
   config.py       dataclasses (serialize to JSON alongside a model dir)
+  _messages.py    layer-neutral error-message formatting (`format_preview`)
 scripts/          train.py, infer.py (CLIs), demo.py (offline smoke test)
 ```
 Dependency rule: `domain` imports no ML framework. `infrastructure` depends on `domain`.
 `application` orchestrates through the ports. The two pipelines are the public entry points.
+
+`application/indexing.py::RetrievalIndexBuilder` owns every once-per-run cache
+(document embeddings, BM25 tokenization) and is the *only* place dense/lexical indices
+are constructed during training — the fold loop and the deployment build both call
+`build(encoder, rows)`. Add a retrieval optimization there, not at a call site.
 
 ## Invariants — do not break these
 - **`NaN` means "signal did not retrieve this class."** It is distinct from a true 0.

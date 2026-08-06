@@ -330,15 +330,37 @@ class AbstentionPolicy:
     per_class: Dict[int, float] = field(default_factory=dict)
 
     def threshold_for(self, class_index: int) -> float:
+        """This policy's threshold for one class — its own override, else the
+        global one. The scalar counterpart of ``thresholds_for``."""
         return self.per_class.get(int(class_index), self.global_threshold)
 
+    def thresholds_for(self, class_index: np.ndarray) -> np.ndarray:
+        """``threshold_for`` over a whole ``(n,)`` array of class indices,
+        without a Python-level lookup per row.
+
+        The overrides are sorted once and probed with ``searchsorted``, so the
+        cost is ``O(m log m + n log m)`` in C for ``m`` overrides and ``n`` rows,
+        rather than ``n`` dict lookups driven from the interpreter — this runs
+        over every scored item of every batch. An index with no override (which
+        includes any out-of-range or sentinel value, e.g. the ``-1`` an item
+        with no prediction carries) falls back to the global threshold, exactly
+        as ``threshold_for`` does.
+        """
+        idx = np.asarray(class_index)
+        if not self.per_class:
+            return np.full(idx.shape, self.global_threshold, dtype=np.float64)
+        keys = np.fromiter(self.per_class.keys(), dtype=np.int64, count=len(self.per_class))
+        values = np.fromiter(self.per_class.values(), dtype=np.float64, count=len(self.per_class))
+        order = np.argsort(keys)
+        keys, values = keys[order], values[order]
+        # `searchsorted` can return `len(keys)`; clipping keeps the gather in
+        # bounds and the `== idx` check below rejects the clipped miss anyway.
+        pos = np.clip(np.searchsorted(keys, idx), 0, keys.size - 1)
+        return np.where(keys[pos] == idx, values[pos], self.global_threshold)
+
     def accept(self, confidence: np.ndarray, class_index: np.ndarray) -> np.ndarray:
-        thr = np.fromiter(
-            (self.threshold_for(c) for c in class_index.tolist()),
-            dtype=np.float64,
-            count=len(class_index),
-        )
-        return confidence >= thr
+        """Elementwise "is this confidence above its class's threshold"."""
+        return confidence >= self.thresholds_for(class_index)
 
 
 class ThresholdTuner:

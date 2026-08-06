@@ -35,6 +35,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from .._messages import format_preview
 from ..domain import ClassDefinition, LabeledItem, LabelSpace
 from ..infrastructure import DeployedArtifacts, encoder_is_corpus_dependent
 from ..infrastructure.retrieval import LexicalRetrieverAdapter
@@ -95,12 +96,10 @@ def update(
         file_keys = {c.key for c in classes}
         missing = sorted(current_keys - file_keys)
         if missing:
-            shown = missing[:10]
-            suffix = " ..." if len(missing) > 10 else ""
             raise ValueError(
                 f"`classes` is missing {len(missing)} class key(s) already in the model: "
-                f"{shown}{suffix}. update never removes or reorders classes; retrain if "
-                "you need to change the taxonomy that way."
+                f"{format_preview(missing)}. update never removes or reorders classes; "
+                "retrain if you need to change the taxonomy that way."
             )
         seen_new = set()
         for c in classes:
@@ -134,14 +133,11 @@ def update(
     # -------------------------------------------------------- 2. new examples
     updated_corpus: Optional[List[LabeledItem]]
     if new_items:
-        known = set(label_space.keys)
-        unknown = sorted({it.label for it in new_items if it.label not in known})
+        unknown = label_space.unknown_keys(it.label for it in new_items)
         if unknown:
-            shown = unknown[:10]
-            suffix = " ..." if len(unknown) > 10 else ""
             raise ValueError(
                 f"{len(unknown)} new item label(s) are not in the label space "
-                f"(add them via `classes` first): {shown}{suffix}"
+                f"(add them via `classes` first): {format_preview(unknown)}"
             )
         if corpus is None:
             raise ValueError(

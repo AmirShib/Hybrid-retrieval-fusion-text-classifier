@@ -9,6 +9,44 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 ## [Unreleased]
 
 ### Changed
+- **Retrieval-index construction extracted into `RetrievalIndexBuilder`
+  (`application/indexing.py`)** — `TrainingPipeline` stated the same index-build
+  policy twice, once in the out-of-fold fold loop and once in the deployment
+  build: the same T88 embedding-cache, T32 A1/A2 tokenization-cache, and T34
+  phase-1 built-in-kind gating, spelled out in two places that had to be kept in
+  agreement by hand. A backend that changed one and not the other would have
+  trained the fusion model against a differently-built index than the one it
+  ships with. Both sites now call `build(encoder, rows)` on one builder that owns
+  the caches, so "shared once per run" is an object invariant rather than a
+  convention held by comments, and `TrainingPipeline` drops ~190 lines and six
+  cache fields. No behavioral change: the T88/T32/T89 call-count tests and the
+  golden feature vectors are unchanged.
+- **The shared encoder is built once per training run, not twice** — the
+  out-of-fold loop and the deployment build each called `_load_shared_encoder()`,
+  which constructed a fresh encoder every time. For a pretrained backend that was
+  a second load of identical weights off disk. It is memoized now; the per-fold
+  path still fits one encoder per fold, as intended.
+- `AbstentionPolicy.accept` no longer does a Python-level dict lookup per scored
+  row (against the package's own "no per-row Python loops on the hot path"
+  convention). The new `AbstentionPolicy.thresholds_for` resolves a whole batch
+  with a sorted `searchsorted` probe; `threshold_for` is unchanged for the scalar
+  case, and out-of-range/sentinel class indices still fall back to the global
+  threshold.
+- `InferencePipeline`'s five public entry points (`predict`, `predict_topk`,
+  `explain`, `importance_report`, `explain_records`) shared an identical 13-line
+  encode-and-assemble block that differed only in the requested schema; it is now
+  one `_featurize` call each.
+- `LabelSpace.unknown_keys` and `_messages.format_preview` replace six
+  re-implementations of "reject labels this model does not know" and eight of the
+  "show the first ten offenders" message idiom, so every such error now reads the
+  same way to an operator.
+- `application.evaluation._json_safe` is now public as `json_safe`: it was
+  imported under its private name by five modules across two layers.
+- CLI presentation helpers (`pct`/`signed_pct`/`num`/`signed_num`,
+  `write_json_report`) moved to `cli/_common.py`, deduplicating four copies of the
+  percentage formatter and four of the `--output` writer. `retrain-ablate` now
+  loads `--config` through the shared `load_pipeline_config` (friendly errors, no
+  leaked file handle) and gained `--dump-config` for parity with `train`.
 - **Query embeddings are reused instead of recomputed (T89)** — on the
   shared-encoder path (the default), training encoded every item twice: once as
   a document into T88's once-per-run pool cache, and again as a *query* when the

@@ -207,3 +207,61 @@ def test_legacy_model_dir_defaults_signals_to_dense_and_lexical(tmp_path):
     # And it still predicts.
     preds = InferencePipeline(loaded).predict([it.text for it in items[:5]])
     assert len(preds) == 5
+
+
+# --------------------------------------------------------------------------- #
+# SignalMatrix.column_for
+# --------------------------------------------------------------------------- #
+class TestSignalMatrixColumnFor:
+    """`derive` and `columns` answer two halves of one question — does this
+    derivation apply here, and what is it called. `column_for` is where they are
+    combined, so the assembler's table-driven loop can ask once per derivation.
+    """
+
+    def _matrix(self, **kwargs):
+        return SignalMatrix(node="toy.sig", value=np.zeros((2, 3)), **kwargs)
+
+    def test_returns_the_column_name_for_a_declared_derivation(self):
+        sm = self._matrix(derive=frozenset({"raw", "rank"}), columns={"raw": "x", "rank": "r_x"})
+        assert sm.column_for("raw") == "x"
+        assert sm.column_for("rank") == "r_x"
+
+    def test_returns_none_for_a_derivation_this_matrix_does_not_declare(self):
+        sm = self._matrix(derive=frozenset({"raw"}), columns={"raw": "x"})
+        assert sm.column_for("norm") is None
+
+    def test_a_derivation_named_in_derive_but_unnamed_in_columns_is_a_no_op(self):
+        """Half a declaration is not a derivation: it must read as absent rather
+        than raise in one code path and be silently skipped in another."""
+        sm = self._matrix(derive=frozenset({"raw", "margin"}), columns={"raw": "x"})
+        assert sm.column_for("margin") is None
+
+    def test_a_column_named_without_being_derived_is_also_a_no_op(self):
+        sm = self._matrix(derive=frozenset({"raw"}), columns={"raw": "x", "norm": "n_x"})
+        assert sm.column_for("norm") is None
+
+    def test_defaults_declare_nothing(self):
+        assert self._matrix().column_for("raw") is None
+
+
+def test_builtin_providers_declare_every_column_they_name():
+    """Each built-in `SignalMatrix`'s declared derivations must resolve to a
+    name, and those names must be exactly what `column_names()` advertises —
+    the contract `composed_feature_names` and the persisted schema rely on."""
+    cfg = PipelineConfig()
+    artifacts, _, items = _train(cfg)
+    texts = [it.text for it in items[:3]]
+
+    for provider in artifacts.signal_providers:
+        declared = set(provider.column_names())
+        ctx = SignalContext(
+            texts=texts,
+            q_emb=artifacts.encoder.encode_queries(texts),
+            k=cfg.retrieval.k_neighbors,
+            n_classes=artifacts.label_space.size,
+        )
+        for sm in provider.build(ctx):
+            for derivation in sm.derive:
+                name = sm.column_for(derivation)
+                assert name is not None, f"{sm.node} declares {derivation} with no column name"
+                assert name in declared, f"{sm.node}.{derivation} -> {name} not in column_names()"

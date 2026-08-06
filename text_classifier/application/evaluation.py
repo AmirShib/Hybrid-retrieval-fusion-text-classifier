@@ -36,16 +36,16 @@ from .._version import __version__
 # --------------------------------------------------------------------------- #
 # JSON hygiene
 # --------------------------------------------------------------------------- #
-def _json_safe(obj: Any) -> Any:
+def json_safe(obj: Any) -> Any:
     """Recursively coerce numpy scalars to Python and non-finite floats to None.
 
     Standard JSON has no representation for NaN/Infinity; emitting ``None`` keeps
     the persisted report valid JSON that any consumer can parse.
     """
     if isinstance(obj, dict):
-        return {k: _json_safe(v) for k, v in obj.items()}
+        return {k: json_safe(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
-        return [_json_safe(v) for v in obj]
+        return [json_safe(v) for v in obj]
     if isinstance(obj, (np.integer,)):
         return int(obj)
     if isinstance(obj, (np.floating, float)):
@@ -410,6 +410,6 @@ def write_evaluation_artifacts(
     os.makedirs(directory, exist_ok=True)
     payload = {"manifest": manifest, **evaluation}
     with open(os.path.join(directory, "evaluation.json"), "w") as fh:
-        json.dump(_json_safe(payload), fh, indent=2)
+        json.dump(json_safe(payload), fh, indent=2)
     with open(os.path.join(directory, "model_card.md"), "w") as fh:
         fh.write(render_model_card(manifest, evaluation))

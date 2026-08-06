@@ -265,6 +265,22 @@ class SignalMatrix:
     extra_scalars: Dict[str, np.ndarray] = field(default_factory=dict)
     topn_positive_only: bool = False
 
+    def column_for(self, derivation: str) -> Optional[str]:
+        """The output column name for ``derivation`` on this matrix, or ``None``
+        when this matrix does not declare it.
+
+        ``derive`` and ``columns`` answer two halves of one question — "does
+        this derivation apply here" and "what is it called" — and a derivation
+        is only real when *both* agree. Asking it as one method keeps the
+        assembler from re-deriving the conjunction per derivation, and makes a
+        matrix that lists a derivation in ``derive`` without naming its column
+        (or vice versa) a uniformly ignored no-op rather than a ``KeyError`` in
+        one code path and silence in another.
+        """
+        if derivation not in self.derive:
+            return None
+        return self.columns.get(derivation)
+
 
 class SignalProvider(ABC):
     """A pluggable source of retrieval *signals* (T34 phase 2) — the layer below

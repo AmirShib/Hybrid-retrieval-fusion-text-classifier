@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
+from .._messages import format_preview
 from ..config import PipelineConfig
 from ..domain import (
     CandidatePolicy,
@@ -21,10 +22,16 @@ from ..domain import (
 )
 from ..infrastructure import ArtifactRepository, DeployedArtifacts
 from ..infrastructure.persistence import NewClass
-from .evaluation import _json_safe
+from .evaluation import json_safe
 from .features import FeatureAssembler
 from .importance import ablation_report, global_feature_importance
-from .scoring import add_confidence, select_feature_columns, top_k_per_item, top_per_item
+from .scoring import (
+    add_confidence,
+    rank_candidates,
+    select_feature_columns,
+    top_k_per_item,
+    top_per_item,
+)
 from .signal_report import SIGNALS
 
 # Map each signal's ``is_*_top1`` feature flag back to the human-readable signal
@@ -89,17 +96,23 @@ class InferencePipeline:
         pipeline is left unchanged."""
         return InferencePipeline(self._a.with_added_classes(new_classes))
 
-    def predict(self, texts: Sequence[str]) -> List[Prediction]:
-        """Classify each input string.
+    def _featurize(
+        self, texts: List[str], requested: Sequence[str]
+    ) -> Tuple[np.ndarray, pd.DataFrame]:
+        """Encode ``texts`` and assemble their (item, candidate) feature table.
 
-        Empty strings are accepted: they encode to a degenerate vector that
-        retrieves nothing, so the corresponding item abstains (``top_key=""``,
-        ``abstained=True``) rather than raising. Non-string inputs (including
-        ``None``) are a programming error and raise ``TypeError`` before any
-        encoding work begins, pointing at the offending index.
+        The single encode → assemble pass every public method on this class
+        starts from; they differ only in ``requested``, the schema they need
+        (``_feature_names`` to score, ``_assembled_names`` for the diagnostics
+        that read core columns by name — see ``__init__``). Returns the query
+        embeddings alongside the frame because ``explain_records`` needs them
+        again for its neighbor evidence, and re-encoding to get them back would
+        be the one thing this method exists to prevent.
+
+        Callers must have validated ``texts`` first (``_validate_texts``): this
+        is where encoding actually begins, and a non-string input must fail
+        before it, not inside the encoder.
         """
-        texts = list(texts)
-        self._validate_texts(texts)
         a = self._a
         q_emb = a.encoder.encode_queries(texts)
         feats = self._assembler.assemble(
@@ -112,9 +125,24 @@ class InferencePipeline:
             query_labels=None,
             chunk=a.config.retrieval.feature_chunk,
             providers=self._providers,
-            requested=self._feature_names,
+            requested=requested,
             signal_providers=a.signal_providers,
         )
+        return q_emb, feats
+
+    def predict(self, texts: Sequence[str]) -> List[Prediction]:
+        """Classify each input string.
+
+        Empty strings are accepted: they encode to a degenerate vector that
+        retrieves nothing, so the corresponding item abstains (``top_key=""``,
+        ``abstained=True``) rather than raising. Non-string inputs (including
+        ``None``) are a programming error and raise ``TypeError`` before any
+        encoding work begins, pointing at the offending index.
+        """
+        texts = list(texts)
+        self._validate_texts(texts)
+        a = self._a
+        _, feats = self._featurize(texts, self._feature_names)
 
         # Every item defaults to abstaining; this also covers items whose features
         # surfaced no candidate at all (and are therefore absent from `decided`).
@@ -160,20 +188,7 @@ class InferencePipeline:
         texts = list(texts)
         self._validate_texts(texts)
         a = self._a
-        q_emb = a.encoder.encode_queries(texts)
-        feats = self._assembler.assemble(
-            texts,
-            q_emb,
-            a.dense,
-            a.lexical,
-            a.config.retrieval.k_neighbors,
-            query_ids=list(range(len(texts))),
-            query_labels=None,
-            chunk=a.config.retrieval.feature_chunk,
-            providers=self._providers,
-            requested=self._feature_names,
-            signal_providers=a.signal_providers,
-        )
+        _, feats = self._featurize(texts, self._feature_names)
         results: List[List[Tuple[str, float]]] = [[] for _ in texts]
         if not len(feats):
             return results
@@ -216,30 +231,13 @@ class InferencePipeline:
         self._validate_texts(texts)
         a = self._a
         columns = ["item_id", "text", "rank", "candidate_key", "conf", *self._assembled_names]
-        q_emb = a.encoder.encode_queries(texts)
-        feats = self._assembler.assemble(
-            texts,
-            q_emb,
-            a.dense,
-            a.lexical,
-            a.config.retrieval.k_neighbors,
-            query_ids=list(range(len(texts))),
-            query_labels=None,
-            chunk=a.config.retrieval.feature_chunk,
-            providers=self._providers,
-            requested=self._assembled_names,
-            signal_providers=a.signal_providers,
-        )
+        _, feats = self._featurize(texts, self._assembled_names)
         if not len(feats):
             return pd.DataFrame(columns=columns)
 
-        scored = add_confidence(feats, a.fusion, a.calibrator, self._feature_names)
-        scored = scored.sort_values(["item_id", "conf"], ascending=[True, False]).reset_index(
-            drop=True
+        scored = rank_candidates(
+            add_confidence(feats, a.fusion, a.calibrator, self._feature_names), top_k
         )
-        scored["rank"] = scored.groupby("item_id", sort=False).cumcount() + 1
-        if top_k is not None:
-            scored = scored[scored["rank"] <= top_k].reset_index(drop=True)
 
         item_ids = scored["item_id"].to_numpy(dtype=np.intp)
         keys = np.asarray(a.label_space.keys)
@@ -274,28 +272,12 @@ class InferencePipeline:
         texts = list(texts)
         self._validate_texts(texts)
         a = self._a
-        key_to_idx = {k: i for i, k in enumerate(a.label_space.keys)}
-        unknown = sorted({k for k in true_keys if k not in key_to_idx})
+        unknown = a.label_space.unknown_keys(true_keys)
         if unknown:
-            shown = unknown[:10]
-            suffix = " ..." if len(unknown) > 10 else ""
-            raise KeyError(f"label(s) not in model's label space: {shown}{suffix}")
-        true_idx_by_item = np.array([key_to_idx[k] for k in true_keys], dtype=np.intp)
+            raise KeyError(f"label(s) not in model's label space: {format_preview(unknown)}")
+        true_idx_by_item = np.array(a.label_space.encode_labels(true_keys), dtype=np.intp)
 
-        q_emb = a.encoder.encode_queries(texts)
-        feats = self._assembler.assemble(
-            texts,
-            q_emb,
-            a.dense,
-            a.lexical,
-            a.config.retrieval.k_neighbors,
-            query_ids=list(range(len(texts))),
-            query_labels=None,
-            chunk=a.config.retrieval.feature_chunk,
-            providers=self._providers,
-            requested=self._assembled_names,
-            signal_providers=a.signal_providers,
-        )
+        _, feats = self._featurize(texts, self._assembled_names)
         if not len(feats):
             empty = {
                 "n_items": 0,
@@ -351,20 +333,7 @@ class InferencePipeline:
         keys = a.label_space.keys
         descriptions = a.label_space.descriptions
 
-        q_emb = a.encoder.encode_queries(texts)
-        feats = self._assembler.assemble(
-            texts,
-            q_emb,
-            a.dense,
-            a.lexical,
-            a.config.retrieval.k_neighbors,
-            query_ids=list(range(len(texts))),
-            query_labels=None,
-            chunk=a.config.retrieval.feature_chunk,
-            providers=self._providers,
-            requested=self._assembled_names,
-            signal_providers=a.signal_providers,
-        )
+        q_emb, feats = self._featurize(texts, self._assembled_names)
         neighbors = self._neighbor_evidence(texts, q_emb, keys, n_neighbors)
 
         # Default: every item abstains with no candidates (covers items whose
@@ -385,10 +354,9 @@ class InferencePipeline:
             for i in range(len(texts))
         ]
         if len(feats):
-            scored = add_confidence(feats, a.fusion, a.calibrator, self._feature_names)
-            scored = scored.sort_values(["item_id", "conf"], ascending=[True, False])
-            scored["rank"] = scored.groupby("item_id", sort=False).cumcount() + 1
-            topk = scored[scored["rank"] <= top_k].reset_index(drop=True)
+            topk = rank_candidates(
+                add_confidence(feats, a.fusion, a.calibrator, self._feature_names), top_k
+            )
 
             contribs = None
             if include_contributions:
@@ -409,7 +377,7 @@ class InferencePipeline:
                 records[item_id]["candidates"] = cand_dicts
                 records[item_id]["decision"] = self._decision(cand_dicts[0], a)
 
-        return [_json_safe(rec) for rec in records]
+        return [json_safe(rec) for rec in records]
 
     def _candidate_dict(
         self,
@@ -419,7 +387,7 @@ class InferencePipeline:
         contrib_row: Optional[np.ndarray],
     ) -> Dict[str, Any]:
         """One candidate entry: its class key, confidence, per-signal feature
-        values (NaN preserved — ``_json_safe`` turns it into null), which signals
+        values (NaN preserved — ``json_safe`` turns it into null), which signals
         ranked it first, the class description, and optional SHAP contributions."""
         cand_idx = int(row["candidate"])
         features = {name: row[name] for name in self._feature_names}

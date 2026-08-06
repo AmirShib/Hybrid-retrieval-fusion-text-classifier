@@ -22,14 +22,22 @@ floor a not-yet-retrained class reaches, not trained-class performance.
 from __future__ import annotations
 
 import argparse
-import json
 
 import numpy as np
 
 from .. import InferencePipeline
-from ..application.evaluation import _json_safe, build_manifest, evaluate_decisions
+from .._messages import format_preview
+from ..application.evaluation import build_manifest, evaluate_decisions
 from ..application.signal_report import signal_report
-from ._common import add_logging_arg, configure_logging, read_items, read_label_space
+from ._common import (
+    add_logging_arg,
+    configure_logging,
+    num,
+    pct,
+    read_items,
+    read_label_space,
+    write_json_report,
+)
 
 
 def _extend_with_new_classes(pipeline: InferencePipeline, classes_path: str) -> InferencePipeline:
@@ -49,14 +57,6 @@ def _extend_with_new_classes(pipeline: InferencePipeline, classes_path: str) -> 
         f"{' ...' if len(new) > 10 else ''}"
     )
     return pipeline.with_added_classes(new)
-
-
-def _pct(x) -> str:
-    return "n/a" if x is None else f"{100 * x:.1f}%"
-
-
-def _num(x) -> str:
-    return "n/a" if x is None else f"{x:.4f}"
 
 
 def main() -> None:
@@ -92,13 +92,11 @@ def main() -> None:
     texts = [it.text for it in items]
     true_keys = [it.label for it in items]
 
-    unknown = sorted({k for k in true_keys if k not in key_to_idx})
+    unknown = label_space.unknown_keys(true_keys)
     if unknown:
-        shown = unknown[:10]
-        suffix = " ..." if len(unknown) > 10 else ""
         raise SystemExit(
             f"error: {len(unknown)} label(s) in {args.input!r} are not in the "
-            f"model's label space: {shown}{suffix}"
+            f"model's label space: {format_preview(unknown)}"
         )
 
     preds = pipeline.predict(texts)
@@ -141,13 +139,13 @@ def main() -> None:
     print("\n=== evaluation ===")
     print(f"items evaluated       : {o['n_items']}")
     print(
-        f"coverage              : {_pct(o['coverage'])} "
+        f"coverage              : {pct(o['coverage'])} "
         f"({o['n_accepted']} accepted, {o['n_abstained']} abstained)"
     )
-    print(f"accuracy on accepted  : {_pct(o['accuracy_on_accepted'])}")
-    print(f"accuracy if no abstain: {_pct(o['accuracy_if_no_abstain'])}")
-    print(f"expected calib. error : {_num(cal['expected_calibration_error'])}")
-    print(f"brier score           : {_num(cal['brier_score'])}")
+    print(f"accuracy on accepted  : {pct(o['accuracy_on_accepted'])}")
+    print(f"accuracy if no abstain: {pct(o['accuracy_if_no_abstain'])}")
+    print(f"expected calib. error : {num(cal['expected_calibration_error'])}")
+    print(f"brier score           : {num(cal['brier_score'])}")
 
     worst = sorted(
         (r for r in evaluation["per_class"] if r["support"] > 0),
@@ -158,7 +156,7 @@ def main() -> None:
         for r in worst:
             print(
                 f"  {r['key']:>12}  support={r['support']:<5} "
-                f"coverage={_pct(r['coverage'])}  precision={_pct(r['precision_on_accepted'])}"
+                f"coverage={pct(r['coverage'])}  precision={pct(r['precision_on_accepted'])}"
             )
 
     sig = evaluation.get("signal_report") or {}
@@ -167,15 +165,12 @@ def main() -> None:
         print("\nper-signal top-1 accuracy (each retrieval signal alone):")
         for e in per_signal:
             print(
-                f"  {e['signal']:>17}  top1={_pct(e.get('top1_accuracy'))}  "
-                f"fires={_pct(e.get('fired_rate'))}  "
-                f"prec_when_fired={_pct(e.get('top1_precision_when_fired'))}"
+                f"  {e['signal']:>17}  top1={pct(e.get('top1_accuracy'))}  "
+                f"fires={pct(e.get('fired_rate'))}  "
+                f"prec_when_fired={pct(e.get('top1_precision_when_fired'))}"
             )
 
-    if args.output:
-        with open(args.output, "w") as fh:
-            json.dump(_json_safe({"manifest": manifest, **evaluation}), fh, indent=2)
-        print(f"\nwrote full report to {args.output}")
+    write_json_report(args.output, {"manifest": manifest, **evaluation})
 
 
 if __name__ == "__main__":

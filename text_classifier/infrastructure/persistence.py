@@ -90,9 +90,21 @@ def _lexical_json_path(npz_filename: str) -> str:
 
 @dataclass
 class DeployedArtifacts:
-    """Everything the inference pipeline needs, in memory. Component fields are
-    typed against the ports, not concrete classes, so any registered backend
-    fits."""
+    """Everything the inference pipeline needs, in memory.
+
+    The encoder, fusion model, and calibrator are typed against their ports, so
+    any registered backend fits. ``dense``/``lexical`` are the exception, and
+    deliberately so *for now*: saving a model directory
+    (``DenseRetrieverAdapter.to_state``) and updating a deployed taxonomy
+    (``with_added_classes``/``with_added_examples``/``with_added_descriptions``)
+    call methods the retrieval ports do not declare. A non-built-in
+    ``dense_kind``/``lexical_kind`` (T34 phase 1) therefore builds and scores
+    fine but cannot round-trip through ``ArtifactRepository`` or be updated in
+    place. Closing that gap means widening ``DenseRetriever``/
+    ``LexicalRetriever`` with a persistence + extension contract — a breaking
+    change to a published port, so it belongs with the second real backend
+    (T31), not here.
+    """
 
     config: PipelineConfig
     label_space: LabelSpace

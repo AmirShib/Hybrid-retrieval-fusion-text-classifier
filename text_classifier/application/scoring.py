@@ -57,6 +57,26 @@ def add_confidence(
     return out
 
 
+def rank_candidates(scored: pd.DataFrame, k: Optional[int] = None) -> pd.DataFrame:
+    """``scored`` sorted by (item, confidence descending) with a 1-based ``rank``
+    column added per item, optionally truncated to each item's best ``k``.
+
+    Every consumer of a scored frame — ``top_k_per_item``, ``explain``,
+    ``explain_records`` — needs exactly this, and each used to spell it out
+    again. The tie-breaking is part of the contract, not an accident: the sort
+    is pandas' default stable quicksort-on-ties, so equal confidences keep their
+    assembly order (candidate-index ascending), which is what makes ``rank`` and
+    the reported top-1 agree across the three call sites. The index is reset so
+    positional row numbers align with any array computed from the result (the
+    contributions matrix in ``explain_records`` relies on this).
+    """
+    ranked = scored.sort_values(["item_id", "conf"], ascending=[True, False]).reset_index(drop=True)
+    ranked["rank"] = ranked.groupby("item_id", sort=False).cumcount() + 1
+    if k is not None:
+        ranked = ranked[ranked["rank"] <= k].reset_index(drop=True)
+    return ranked
+
+
 def top_per_item(scored: pd.DataFrame) -> pd.DataFrame:
     """One row per item: best candidate, its confidence, the runner-up's
     identity + margin, and (if present) whether the top candidate was correct.
@@ -81,8 +101,4 @@ def top_k_per_item(scored: pd.DataFrame, k: int) -> pd.DataFrame:
     """Long format: up to ``k`` rows per item, ranked by confidence descending.
     Columns: ``item_id``, ``rank`` (1-based), ``candidate``, ``conf``. Items
     with fewer than ``k`` scored candidates contribute fewer rows."""
-    scored = scored.sort_values(["item_id", "conf"], ascending=[True, False])
-    grp = scored.groupby("item_id", sort=False)
-    topk = grp.head(k).copy()
-    topk["rank"] = topk.groupby("item_id", sort=False).cumcount() + 1
-    return topk[["item_id", "rank", "candidate", "conf"]].reset_index(drop=True)
+    return rank_candidates(scored, k)[["item_id", "rank", "candidate", "conf"]]

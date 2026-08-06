@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from text_classifier.application.scoring import top_k_per_item, top_per_item
+from text_classifier.application.scoring import rank_candidates, top_k_per_item, top_per_item
 
 
 def _scored(rows):
@@ -91,3 +91,42 @@ class TestTopKPerItem:
         ranked = top_k_per_item(scored, k=2)
         assert len(ranked[ranked["item_id"] == 0]) == 2
         assert len(ranked[ranked["item_id"] == 1]) == 1
+
+
+class TestRankCandidates:
+    """`rank_candidates` is the one ranking rule behind `top_k_per_item`,
+    `InferencePipeline.explain`, and `explain_records` — all three used to spell
+    it out separately, so these pin the shared contract they now depend on."""
+
+    def test_ranks_are_per_item_and_one_based(self):
+        ranked = rank_candidates(_scored([(0, 1, 0.2), (0, 2, 0.9), (1, 3, 0.5), (1, 4, 0.7)]))
+        assert ranked["rank"].tolist() == [1, 2, 1, 2]
+        assert ranked["candidate"].tolist() == [2, 1, 4, 3]
+
+    def test_extra_columns_are_carried_through(self):
+        """`explain` reads the feature columns off the ranked frame, so ranking
+        must not project them away — only reorder."""
+        scored = _scored([(0, 1, 0.2), (0, 2, 0.9)])
+        scored["d_desc_sim"] = [0.11, 0.22]
+        ranked = rank_candidates(scored)
+        assert ranked["d_desc_sim"].tolist() == [0.22, 0.11]
+
+    def test_k_truncates_per_item_independently(self):
+        ranked = rank_candidates(_scored([(0, 1, 0.9), (0, 2, 0.8), (0, 3, 0.7), (1, 4, 0.5)]), k=2)
+        assert ranked["item_id"].tolist() == [0, 0, 1]
+        assert ranked["rank"].tolist() == [1, 2, 1]
+
+    def test_index_is_positional_after_truncation(self):
+        """`explain_records` indexes a contributions matrix by row position, so
+        the returned index must be a clean 0..n-1 range, not the pre-sort one."""
+        ranked = rank_candidates(_scored([(0, 1, 0.1), (0, 2, 0.9), (1, 3, 0.5)]), k=1)
+        assert ranked.index.tolist() == list(range(len(ranked)))
+
+    def test_k_none_keeps_every_candidate(self):
+        ranked = rank_candidates(_scored([(0, 1, 0.1), (0, 2, 0.9), (0, 3, 0.5)]), k=None)
+        assert len(ranked) == 3
+
+    def test_agrees_with_top_k_per_item(self):
+        scored = _scored([(0, 1, 0.4), (0, 2, 0.9), (1, 3, 0.2), (1, 4, 0.8)])
+        ranked = rank_candidates(scored, k=1)[["item_id", "rank", "candidate", "conf"]]
+        pd.testing.assert_frame_equal(ranked, top_k_per_item(scored, 1))

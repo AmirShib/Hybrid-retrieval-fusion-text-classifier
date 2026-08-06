@@ -14,6 +14,7 @@ from typing import List, Optional, Sequence, Tuple
 
 import pandas as pd
 
+from ..application.evaluation import json_safe
 from ..config import PipelineConfig
 from ..domain import ClassDefinition, LabeledItem, LabelSpace
 
@@ -72,6 +73,53 @@ def load_pipeline_config(config_path: Optional[str]) -> PipelineConfig:
         return PipelineConfig.from_dict(data)
     except ValueError as exc:
         raise SystemExit(f"error: invalid config file {config_path!r}: {exc}")
+
+
+# --------------------------------------------------------------- report output
+def write_json_report(path: Optional[str], payload, label: str = "full report") -> None:
+    """Write ``payload`` to ``path`` as JSON and print a confirmation; a ``None``
+    path writes nothing.
+
+    Every reporting CLI ends with the same three lines (coerce through
+    ``json_safe`` because reports carry numpy scalars and NaN, dump indented,
+    tell the operator where it went). Centralizing it keeps ``--output``
+    behaving identically across ``eval``/``tune``/``importance``/
+    ``retrain-ablate`` — including the ``json_safe`` step, which is easy to
+    forget and produces a report that is not valid JSON when it is.
+    """
+    if not path:
+        return
+    with open(path, "w") as fh:
+        json.dump(json_safe(payload), fh, indent=2)
+    print(f"\nwrote {label} to {path}")
+
+
+# ------------------------------------------------------------ number formatting
+# Reports carry `None` wherever a metric is undefined (no accepted items, an
+# empty class): these render that as "n/a" rather than crashing on a format
+# spec, and keep one house style across every CLI's console output.
+def pct(x) -> str:
+    """A ratio as a 1-decimal percentage (``"94.2%"``), or ``"n/a"``."""
+    return "n/a" if x is None else f"{100 * x:.1f}%"
+
+
+def signed_pct(x) -> str:
+    """Like ``pct`` but always signed (``"+1.3%"``) — for deltas, where the
+    direction is the whole point."""
+    return "n/a" if x is None else f"{100 * x:+.1f}%"
+
+
+def num(x) -> str:
+    """A raw metric at 4 decimals (Brier, ECE), or ``"n/a"``."""
+    return "n/a" if x is None else f"{x:.4f}"
+
+
+def signed_num(x) -> str:
+    """A signed raw metric at 4 decimals, ``"n/a"`` for ``None`` *or* NaN —
+    an all-NaN ablation arm is an undefined effect, not a zero one."""
+    if x is None or x != x:  # NaN != NaN
+        return "n/a"
+    return f"{x:+.4f}"
 
 
 def _read_csv(path: str, kind: str) -> pd.DataFrame:

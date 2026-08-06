@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from typing import List, Mapping, Optional, Sequence, Tuple
+from typing import Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,3 +126,17 @@ class LabelSpace:
 
     def encode_labels(self, labels: Sequence[str]) -> List[int]:
         return [self._index[label] for label in labels]
+
+    def unknown_keys(self, keys: Iterable[str]) -> List[str]:
+        """The sorted, de-duplicated subset of ``keys`` this label space does
+        not define.
+
+        Every caller that accepts labels from outside — training items, an
+        external val/test split, a tune set, an update's new examples, the
+        evaluate CLI — must reject unknown ones *before* ``encode_labels``
+        raises a bare ``KeyError`` naming a single key. They each want their own
+        wording and their own exception type, so this owns only the detection:
+        the aggregate that holds the key->index map is the right place to ask
+        "which of these do you not know". Empty result means every key resolves.
+        """
+        return sorted({k for k in keys if k not in self._index})

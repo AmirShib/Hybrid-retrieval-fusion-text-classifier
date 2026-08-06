@@ -21,6 +21,7 @@ from typing import Any, Dict, Sequence, Tuple
 
 import numpy as np
 
+from .._messages import format_preview
 from ..domain import (
     AbstentionPolicy,
     CandidatePolicy,
@@ -84,13 +85,11 @@ def retune(
     if not items:
         raise ValueError("retune requires a non-empty labeled set")
 
-    known = set(label_space.keys)
-    unknown = sorted({it.label for it in items if it.label not in known})
+    unknown = label_space.unknown_keys(it.label for it in items)
     if unknown:
-        shown = unknown[:10]
-        suffix = " ..." if len(unknown) > 10 else ""
         raise ValueError(
-            f"{len(unknown)} tune-set label(s) are not in the model's label space: {shown}{suffix}"
+            f"{len(unknown)} tune-set label(s) are not in the model's label space: "
+            f"{format_preview(unknown)}"
         )
 
     feature_names = fusion_feature_names(
