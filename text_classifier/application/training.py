@@ -65,7 +65,7 @@ from ..infrastructure import (
 from ..infrastructure.array_ops import NumpyArrayOps
 from .evaluation import build_manifest, evaluate_decisions, write_evaluation_artifacts
 from .features import FeatureAssembler
-from .scoring import add_confidence, top_per_item
+from .scoring import add_confidence, select_feature_columns, top_per_item
 from .signal_report import signal_report
 
 log = logging.getLogger(__name__)
@@ -92,7 +92,11 @@ def fit_calibration_and_abstention(
     labeled set without duplicating it.
     """
     names = list(feature_names)
-    raw = fusion.predict_proba(ca[names].to_numpy(np.float32))
+    raw = fusion.predict_proba(
+        select_feature_columns(ca, names, context="fit_calibration_and_abstention").to_numpy(
+            np.float32
+        )
+    )
     calibrator = build_calibrator(calibration_cfg)
     calibrator.fit(raw, ca["is_true"].to_numpy(), classes=ca["candidate"].to_numpy())
 
@@ -506,7 +510,14 @@ class TrainingPipeline:
         # cross-fold sharing (an accepted phase-1 tradeoff, not a TODO — a backend
         # that wants it back must earn it with its own per-fold-reuse hook).
         use_shared_dense = self.cfg.retrieval.dense_kind == "exact"
-        use_shared_lexical = self.cfg.retrieval.lexical_kind == "bm25"
+        # Building a lexical index at all -- tokenizing the corpus + fitting a
+        # BM25 weight matrix per fold -- is dead work when "lexical" isn't one
+        # of the configured signals: nothing downstream ever queries it (see
+        # `build_signal_providers`, which only wraps a `LexicalSignalProvider`
+        # around it when "lexical" is requested). Skipping it here, not just
+        # skipping its *use*, is what actually saves the tokenization cost.
+        lexical_enabled = "lexical" in self.cfg.signals
+        use_shared_lexical = lexical_enabled and self.cfg.retrieval.lexical_kind == "bm25"
         if not self._use_per_fold_encoder():
             shared = self._load_shared_encoder()
             if use_shared_dense:
@@ -526,7 +537,8 @@ class TrainingPipeline:
         # the encoder), so this cache always attempts to populate — tokenize
         # the whole example corpus + build the description index once here,
         # cached on `self` and reused by `_build_deployment_index` below. Only
-        # done for the built-in "bm25" lexical_kind (see comment above).
+        # done for the built-in "bm25" lexical_kind (see comment above) and
+        # only when the lexical signal is actually enabled.
         example_state, desc_bm25 = (
             self._shared_lexical_state(texts, label_space) if use_shared_lexical else (None, None)
         )
@@ -551,7 +563,9 @@ class TrainingPipeline:
                 dense = build_dense_retriever(
                     self.cfg.retrieval, enc, tr_texts, y[tr], label_space, self._ops
                 )
-            if example_state is not None:
+            if not lexical_enabled:
+                lexical = None
+            elif example_state is not None:
                 counts, vectorizer = example_state
                 lexical = LexicalRetrieverAdapter.build_from_counts(
                     counts[tr], vectorizer, y[tr], desc_bm25, self.cfg.retrieval
@@ -662,7 +676,7 @@ class TrainingPipeline:
         label_space: LabelSpace,
         encoder: TextEncoder,
         dense: DenseRetrieverAdapter,
-        lexical: LexicalRetrieverAdapter,
+        lexical: Optional[LexicalRetrieverAdapter],
     ) -> Tuple[pd.DataFrame, np.ndarray]:
         """Featurize an external val/test set against the *deployment* index.
 
@@ -720,9 +734,11 @@ class TrainingPipeline:
             # Sort so groups are contiguous, then pass run-length group sizes.
             tr = tr.sort_values("item_id", kind="stable")
             groups = tr.groupby("item_id", sort=False).size().to_numpy()
-            fusion.fit(tr[names].to_numpy(np.float32), tr["is_true"].to_numpy(), groups=groups)
+            X_tr = select_feature_columns(tr, names, context="_fit_fusion (training rows)")
+            fusion.fit(X_tr.to_numpy(np.float32), tr["is_true"].to_numpy(), groups=groups)
         else:
-            fusion.fit(tr[names].to_numpy(np.float32), tr["is_true"].to_numpy())
+            X_tr = select_feature_columns(tr, names, context="_fit_fusion (training rows)")
+            fusion.fit(X_tr.to_numpy(np.float32), tr["is_true"].to_numpy())
 
         calibrator, abstention = fit_calibration_and_abstention(
             ca,
@@ -817,7 +833,7 @@ class TrainingPipeline:
     # ---------------------------------------------------------------- (5) deploy
     def _build_deployment_index(
         self, texts, y, label_space
-    ) -> Tuple[TextEncoder, DenseRetrieverAdapter, LexicalRetrieverAdapter]:
+    ) -> Tuple[TextEncoder, DenseRetrieverAdapter, Optional[LexicalRetrieverAdapter]]:
         """Fit the final encoder and build the dense + lexical indices over *all*
         training items.
 
@@ -832,7 +848,8 @@ class TrainingPipeline:
         # dense_kind/lexical_kind goes through the plain registry build instead
         # (losing the sharing, an accepted phase-1 tradeoff).
         use_shared_dense = self.cfg.retrieval.dense_kind == "exact"
-        use_shared_lexical = self.cfg.retrieval.lexical_kind == "bm25"
+        lexical_enabled = "lexical" in self.cfg.signals
+        use_shared_lexical = lexical_enabled and self.cfg.retrieval.lexical_kind == "bm25"
         if self._use_per_fold_encoder():
             items = [
                 LabeledItem(texts[i], label_space.key_at(int(y[i]))) for i in range(len(texts))
@@ -855,7 +872,14 @@ class TrainingPipeline:
                 dense = build_dense_retriever(
                     self.cfg.retrieval, encoder, texts, y, label_space, self._ops
                 )
-        if use_shared_lexical:
+        if not lexical_enabled:
+            # "lexical" isn't a configured signal: no code path ever queries
+            # this index (see the matching gate in `_build_oof`), so building
+            # one -- tokenizing the whole corpus, fitting the BM25 weight
+            # matrix -- would be pure waste. `DeployedArtifacts.lexical` is
+            # `Optional` precisely for this case.
+            lexical = None
+        elif use_shared_lexical:
             # T32 A1/A2: reuse the corpus tokenization + description index
             # `_build_oof` already built (or build them now, on the n_folds=1 path
             # where this runs first) instead of a second tokenize pass.

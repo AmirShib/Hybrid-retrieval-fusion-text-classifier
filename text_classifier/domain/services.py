@@ -147,6 +147,45 @@ FEATURE_DEPS: Dict[str, Tuple[str, ...]] = {
 }
 
 
+def _direct_signal_reqs(name: str) -> Set[str]:
+    """Which of the two built-in signals (``"dense"``/``"lexical"``) a core
+    column's *own* ``FEATURE_DEPS`` entry names directly (a ``dense.*``/
+    ``bm25.*`` node), ignoring the shared ``"candidates"`` node.
+
+    ``"candidates"`` is deliberately excluded: every candidate-gated column
+    depends on it, but the *mask itself* is only ever built from whichever
+    signals are actually active (``FeatureAssembler``'s candidate union), not
+    both unconditionally — so it carries no signal-specific information for
+    this purpose. Derived from ``FEATURE_DEPS`` (not a second hardcoded list)
+    so a new dense/bm25 column is classified automatically, the same "single
+    source of truth" discipline ``FEATURE_DEPS`` itself documents."""
+    reqs: Set[str] = set()
+    for dep in FEATURE_DEPS.get(name, ()):
+        if dep.startswith("dense."):
+            reqs.add("dense")
+        elif dep.startswith("bm25."):
+            reqs.add("lexical")
+    return reqs
+
+
+def core_feature_names(active_signals: Optional[Iterable[str]] = None) -> List[str]:
+    """``FEATURE_NAMES`` narrowed to the columns computable from
+    ``active_signals`` (a name set that may include ``"dense"``/``"lexical"``
+    plus any third-party signal kind -- only the two built-ins matter here).
+
+    ``None`` (the default) means both built-ins are active and returns
+    ``FEATURE_NAMES`` verbatim -- the byte-for-byte-identical default schema.
+    A column that needs a signal absent from ``active_signals`` (e.g.
+    ``b_desc_sim`` without ``"lexical"``) is dropped; a column needing neither
+    (``class_log_freq``) always survives; ``n_signal_agreement`` needs both,
+    so it drops whenever either built-in is disabled -- with only one signal
+    active, "how many signals agree" carries no information."""
+    if active_signals is None:
+        return list(FEATURE_NAMES)
+    active = set(active_signals)
+    return [n for n in FEATURE_NAMES if _direct_signal_reqs(n) <= active]
+
+
 def feature_closure(requested: Iterable[str]) -> Set[str]:
     """The transitive closure of ``requested`` over ``FEATURE_DEPS``, plus the
     unconditional ``candidates`` dependency (and everything it pulls in).
@@ -181,14 +220,24 @@ def composed_feature_names(
     This is *the* column order the fusion model is trained and scored on, and it is
     persisted into ``meta.json`` at save time so inference rebuilds the identical
     order. With no providers it is exactly ``FEATURE_NAMES``. The built-in ``"dense"``/
-    ``"lexical"`` signal providers are skipped here (by ``name``): their columns
-    *are* ``FEATURE_NAMES``, already present, so declaring them again would just be
-    a duplicate of the constant this function already starts from. Raises
-    ``ValueError`` on a name collision (a provider colliding with a core column, or
-    two providers colliding), because a duplicate column name would silently
-    overwrite data in the assembled frame — the worst kind of train/infer
-    disagreement."""
-    names: List[str] = list(FEATURE_NAMES)
+    ``"lexical"`` signal providers are skipped in the loop below (by ``name``): their
+    columns are ``core_feature_names``' output, already present, so declaring them
+    again would just be a duplicate of what this function already starts from.
+
+    ``core_feature_names`` narrows that starting list to whichever of ``"dense"``/
+    ``"lexical"`` actually appear (by ``name``) in ``signal_providers`` — an empty
+    ``signal_providers`` (every pre-T34-phase-2 caller, and any caller that
+    deliberately wants the full legacy schema) means "assume both", the
+    byte-for-byte-identical default; a non-empty list missing one of the two
+    (e.g. only a ``DenseSignalProvider``) drops that signal's columns, because
+    nothing built them.
+
+    Raises ``ValueError`` on a name collision (a provider colliding with a core
+    column, or two providers colliding), because a duplicate column name would
+    silently overwrite data in the assembled frame — the worst kind of
+    train/infer disagreement."""
+    active_builtin = {sp.name for sp in signal_providers if sp.name in ("dense", "lexical")}
+    names: List[str] = core_feature_names(active_builtin if signal_providers else None)
     seen = set(names)
     for sp in signal_providers:
         if sp.name in ("dense", "lexical"):

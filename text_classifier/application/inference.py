@@ -24,7 +24,7 @@ from ..infrastructure.persistence import NewClass
 from .evaluation import _json_safe
 from .features import FeatureAssembler
 from .importance import ablation_report, global_feature_importance
-from .scoring import add_confidence, top_k_per_item, top_per_item
+from .scoring import add_confidence, select_feature_columns, top_k_per_item, top_per_item
 from .signal_report import SIGNALS
 
 # Map each signal's ``is_*_top1`` feature flag back to the human-readable signal
@@ -305,7 +305,9 @@ class InferencePipeline:
             }
             return {"importance": None, "ablation": {"baseline": empty, "ablations": []}}
 
-        X = feats[self._feature_names].to_numpy(dtype=np.float32)
+        X = select_feature_columns(
+            feats, self._feature_names, context="importance_report"
+        ).to_numpy(dtype=np.float32)
         importance = global_feature_importance(a.fusion, X, self._feature_names)
         ablation = ablation_report(
             feats, a.fusion, a.calibrator, a.abstention, self._feature_names, true_idx_by_item
@@ -390,7 +392,10 @@ class InferencePipeline:
 
             contribs = None
             if include_contributions:
-                contribs = a.fusion.predict_contribs(topk[self._feature_names].to_numpy(np.float32))
+                X_topk = select_feature_columns(
+                    topk, self._feature_names, context="explain_records (contributions)"
+                )
+                contribs = a.fusion.predict_contribs(X_topk.to_numpy(np.float32))
 
             for item_id, group in topk.groupby("item_id", sort=False):
                 item_id = int(item_id)
@@ -465,11 +470,18 @@ class InferencePipeline:
         """Per-item nearest dense + lexical example neighbors as ``{label_key,
         score}``. Padding (label ``< 0`` / NaN score) is dropped. Neighbor texts
         require a persisted corpus (a later capability), so ``texts_available`` is
-        ``False`` here — only class keys and scores are available."""
+        ``False`` here — only class keys and scores are available.
+
+        ``a.lexical`` is ``None`` for a model trained with "lexical" excluded
+        from ``config.signals`` (no BM25 index was ever built); every item's
+        ``"lexical"`` neighbor list is then empty rather than an error."""
         a = self._a
         k = a.config.retrieval.k_neighbors
         d_lab, d_sim = a.dense.knn_example_labels(q_emb, k)
-        b_lab, b_sco = a.lexical.knn_example_labels(list(texts), k)
+        if a.lexical is not None:
+            b_lab, b_sco = a.lexical.knn_example_labels(list(texts), k)
+        else:
+            b_lab = b_sco = None
 
         def rows(labels: np.ndarray, scores: np.ndarray) -> List[Dict[str, Any]]:
             out: List[Dict[str, Any]] = []
@@ -484,7 +496,7 @@ class InferencePipeline:
         return [
             {
                 "dense": rows(d_lab[i], d_sim[i]),
-                "lexical": rows(b_lab[i], b_sco[i]),
+                "lexical": [] if b_lab is None else rows(b_lab[i], b_sco[i]),
                 "texts_available": False,
             }
             for i in range(len(texts))

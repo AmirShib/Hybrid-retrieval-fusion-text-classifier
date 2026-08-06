@@ -94,7 +94,9 @@ def retune(
         )
 
     feature_names = fusion_feature_names(
-        artifacts.feature_providers, artifacts.config.fusion.drop_features
+        artifacts.feature_providers,
+        artifacts.config.fusion.drop_features,
+        artifacts.signal_providers,
     )
     assembler = FeatureAssembler(label_space, CandidatePolicy(artifacts.config.candidate_top_n))
     texts = [it.text for it in items]
@@ -122,6 +124,7 @@ def retune(
         query_labels=y,
         chunk=artifacts.config.retrieval.feature_chunk,
         providers=artifacts.feature_providers,
+        signal_providers=artifacts.signal_providers,
     )
     if not len(feats):
         raise ValueError(

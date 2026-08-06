@@ -98,7 +98,9 @@ class DeployedArtifacts:
     label_space: LabelSpace
     encoder: TextEncoder
     dense: DenseRetrieverAdapter
-    lexical: LexicalRetrieverAdapter
+    # `None` when "lexical" is absent from `config.signals` -- training skips
+    # building a BM25 index entirely rather than building one nothing queries.
+    lexical: Optional[LexicalRetrieverAdapter]
     fusion: FusionModel
     calibrator: ConfidenceCalibrator
     abstention: AbstentionPolicy
@@ -164,7 +166,11 @@ class DeployedArtifacts:
         extended_space = LabelSpace(current + defs)
 
         dense = self.dense.with_added_classes(self.encoder, [d.description for d in defs])
-        lexical = self.lexical.with_added_descriptions(extended_space.descriptions)
+        lexical = (
+            None
+            if self.lexical is None
+            else self.lexical.with_added_descriptions(extended_space.descriptions)
+        )
         # T34 phase 2: a DenseSignalProvider/LexicalSignalProvider wraps a
         # specific dense/lexical instance by reference; rewrap onto the
         # extended indices so a later `assemble()` call sees the new classes.
@@ -191,17 +197,23 @@ class ArtifactRepository:
         fus_spec = fusion_spec(cfg.fusion.kind)
         cal_spec = calibrator_spec(cfg.calibration.kind)
         dense_spec = dense_retriever_spec(cfg.retrieval.dense_kind)
-        lex_spec = lexical_retriever_spec(cfg.retrieval.lexical_kind)
 
         artifacts.encoder.save(os.path.join(directory, enc_spec.dirname))
 
         dense_arrays = artifacts.dense.to_state()
         np.savez_compressed(os.path.join(directory, dense_spec.filename), **dense_arrays)
 
-        arrays, lex_meta = artifacts.lexical.to_state()
-        np.savez_compressed(os.path.join(directory, lex_spec.filename), **arrays)
-        with open(os.path.join(directory, _lexical_json_path(lex_spec.filename)), "w") as fh:
-            json.dump(lex_meta, fh)
+        # `lexical` is `None` when "lexical" isn't a configured signal (no
+        # index was ever built -- see `TrainingPipeline._build_deployment_index`);
+        # nothing is written and `components.lexical` records that explicitly
+        # (not just absent -- see `_components_from_meta`), so `load()` doesn't
+        # try to read files that were never written.
+        if artifacts.lexical is not None:
+            lex_spec = lexical_retriever_spec(cfg.retrieval.lexical_kind)
+            arrays, lex_meta = artifacts.lexical.to_state()
+            np.savez_compressed(os.path.join(directory, lex_spec.filename), **arrays)
+            with open(os.path.join(directory, _lexical_json_path(lex_spec.filename)), "w") as fh:
+                json.dump(lex_meta, fh)
 
         artifacts.fusion.save(os.path.join(directory, fus_spec.filename))
         artifacts.calibrator.save(os.path.join(directory, cal_spec.filename))
@@ -230,7 +242,12 @@ class ArtifactRepository:
                 "fusion": cfg.fusion.kind,
                 "calibrator": cfg.calibration.kind,
                 "dense": cfg.retrieval.dense_kind,
-                "lexical": cfg.retrieval.lexical_kind,
+                # Explicit `None` (not just an absent key) when no lexical
+                # index was built, so `_components_from_meta` can tell "not
+                # recorded (legacy dir, default to bm25)" apart from
+                # "deliberately absent" -- a bare `.get` can't distinguish a
+                # missing key from a present `null`.
+                "lexical": cfg.retrieval.lexical_kind if artifacts.lexical is not None else None,
                 "signals": list(cfg.signals),
             },
             "feature_providers": provider_manifest,
@@ -499,7 +516,11 @@ class ArtifactRepository:
         encoder = enc_spec.load(os.path.join(directory, enc_spec.dirname), config.encoder)
 
         dense = dense_spec.load(directory, config.retrieval)
-        lexical = self._load_lexical(directory, components["lexical"])
+        lexical = (
+            None
+            if components["lexical"] is None
+            else self._load_lexical(directory, components["lexical"])
+        )
         # The real SignalProviders, wrapping the now-loaded dense/lexical.
         signal_providers = load_signal_providers(
             directory, config.retrieval, components["signals"], dense, lexical
@@ -550,9 +571,17 @@ class ArtifactRepository:
             "dense": comp.get("dense")
             or cfg.get("retrieval", {}).get("dense_kind")
             or _LEGACY_COMPONENTS["dense"],
-            "lexical": comp.get("lexical")
-            or cfg.get("retrieval", {}).get("lexical_kind")
-            or _LEGACY_COMPONENTS["lexical"],
+            # `"lexical" in comp` (not `.get(...) or ...`): a present-but-null
+            # value means `save()` deliberately built no lexical index (the
+            # "lexical" signal wasn't configured) and must stay `None` here,
+            # not fall through to the legacy default -- `.get(...) or ...`
+            # can't tell that apart from the key being absent altogether (a
+            # dir written before this distinction existed).
+            "lexical": (
+                comp["lexical"]
+                if "lexical" in comp
+                else cfg.get("retrieval", {}).get("lexical_kind") or _LEGACY_COMPONENTS["lexical"]
+            ),
             "signals": comp.get("signals") or cfg.get("signals") or list(_LEGACY_SIGNALS),
         }
 

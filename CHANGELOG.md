@@ -8,6 +8,49 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 
 ## [Unreleased]
 
+### Added
+- **Multi-threaded BM25 kNN (`RetrievalConfig.bm25_n_jobs`)** — `BM25Index.top_k`'s
+  per-chunk sparse mat-mul (`Qbin_chunk @ Wt`) previously ran serially even
+  though scipy's sparse `@` releases the GIL during the C-level multiply, so
+  on a large example pool (hundreds of thousands of rows) one core sat at
+  100% while the rest of the machine idled. `bm25_n_jobs` (default `1`,
+  byte-for-byte unchanged; `-1` uses all CPU cores) runs the chunk loop
+  across a thread pool instead — no cross-process pickling of the
+  `(vocab, n_docs)` weight matrix. Plumbed through
+  `LexicalRetrieverAdapter`/persisted in its `to_state`/`from_state`, and
+  exposed as `--bm25-n-jobs` on `text-classifier-train`.
+- **`PipelineConfig.signals` can now actually drop a built-in signal** —
+  previously `signals=["dense"]` (or `["lexical"]`) crashed at `fusion.fit`
+  with a `KeyError`: `FEATURE_NAMES` was a fixed ~36-column constant covering
+  both built-in signals unconditionally, so excluding one from `signals` never
+  actually removed its columns from the schema. `composed_feature_names`/
+  `fusion_feature_names` now narrow the schema (via the new
+  `core_feature_names`) to whichever of `"dense"`/`"lexical"` are actually
+  present in the active `SignalProvider`s, derived from `FEATURE_DEPS` rather
+  than a second hardcoded list; `n_signal_agreement` (needs both) drops when
+  either is disabled. Training also skips *building* the excluded index
+  entirely (no corpus tokenization, no per-fold BM25 fit) rather than building
+  one nothing queries — `DeployedArtifacts.lexical` is `Optional` for this.
+  `explain()`'s neighbor evidence, `update`, and `retune` all handle the
+  missing index. The default `signals=["dense", "lexical"]` is unaffected.
+- **Clear error on a feature-schema mismatch, instead of a bare `KeyError`** —
+  every place that indexed an assembled frame by the expected feature-column
+  list (`_fit_fusion`, `fit_calibration_and_abstention`, `add_confidence`,
+  `ablation_report`, `explain_records`'s contributions, `importance_report`)
+  now goes through a new `select_feature_columns` (`application/scoring.py`),
+  which raises a `ValueError` naming exactly which columns are missing and why
+  (a `SignalProvider`/`FeatureProvider` declared a column it didn't produce,
+  or `signals`/`drop_features` don't match what actually ran) instead of
+  pandas' `KeyError: "[...] not in index"` deep inside `fusion.fit`/`predict`.
+- **Progress bars on BM25's CPU-bound stages** — `tqdm` (new core dependency,
+  pure Python, no transitive deps) now brackets `BM25Index.tokenize_corpus`
+  (corpus tokenization), `fit_from_counts` (weight-matrix construction), and
+  `top_k`'s per-chunk query-scoring loop (real fractional progress, since that
+  loop is already chunked). Every bar passes `disable=None`, tqdm's "silence
+  on a non-TTY" mode, so piped/CI/log output and the test suite are unaffected
+  — nothing prints unless stdout is an interactive terminal. Purely observational:
+  scoring output is unchanged (verified byte-identical with/without).
+
 ## [0.1.1] - 2026-08-05
 
 ### Added

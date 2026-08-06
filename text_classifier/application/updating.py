@@ -123,7 +123,12 @@ def update(
     if edited:
         dense = dense.with_updated_descriptions(encoder, edited)
     if new_defs or edited:
-        lexical = lexical.with_added_descriptions(label_space.descriptions)
+        # `lexical` is `None` for a model trained with "lexical" excluded from
+        # `config.signals` (no BM25 index exists to extend) -- the new/edited
+        # descriptions are still added to `label_space`/`dense` above, they
+        # simply carry no lexical support, same as every other class in this model.
+        if lexical is not None:
+            lexical = lexical.with_added_descriptions(label_space.descriptions)
         log.info("classes: %d new, %d description edit(s)", len(new_defs), len(edited))
 
     # -------------------------------------------------------- 2. new examples
@@ -166,9 +171,11 @@ def update(
         )
 
         dense = dense.with_added_examples(encoder, new_texts, new_labels, label_space.size)
-        lexical = LexicalRetrieverAdapter.build(
-            merged_texts, merged_labels, label_space, artifacts.config.retrieval
-        )
+        # `lexical is None`: this model has no BM25 index to refit (see above).
+        if lexical is not None:
+            lexical = LexicalRetrieverAdapter.build(
+                merged_texts, merged_labels, label_space, artifacts.config.retrieval
+            )
         log.info("examples: %d added (corpus now %d items)", len(new_items), len(merged_items))
         updated_corpus = merged_items
     else:

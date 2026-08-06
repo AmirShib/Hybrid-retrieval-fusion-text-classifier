@@ -179,7 +179,7 @@ class FeatureAssembler:
         query_texts: Sequence[str],
         query_emb: np.ndarray,
         dense: DenseRetriever,
-        lexical: LexicalRetriever,
+        lexical: Optional[LexicalRetriever],
         k_neighbors: int,
         query_ids: Union[Sequence[Any], np.ndarray],
         query_labels: Optional[np.ndarray] = None,

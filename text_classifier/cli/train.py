@@ -144,6 +144,14 @@ def main() -> None:
         "-- pass 'english' to filter English stopwords.",
     )
     p.add_argument(
+        "--bm25-n-jobs",
+        type=int,
+        default=None,
+        help="threads for BM25's per-chunk kNN mat-mul (scipy sparse @ releases "
+        "the GIL, so this scales across cores on large example pools). Default: "
+        "1 (single-threaded); -1 uses all CPU cores.",
+    )
+    p.add_argument(
         "--per-fold-encoder",
         action="store_true",
         default=None,
@@ -212,6 +220,8 @@ def main() -> None:
         cfg.retrieval.k_neighbors = args.k_neighbors
     if args.drop_features is not None:
         cfg.fusion.drop_features = [n.strip() for n in args.drop_features.split(",") if n.strip()]
+    if args.bm25_n_jobs is not None:
+        cfg.retrieval.bm25_n_jobs = args.bm25_n_jobs
     if args.bm25_stop_words is not None:
         if args.bm25_stop_words.lower() == "none":
             cfg.retrieval.bm25_token_kwargs.pop("stop_words", None)

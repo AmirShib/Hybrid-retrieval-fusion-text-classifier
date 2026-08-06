@@ -13,12 +13,15 @@ query-chunked cosine mat-mul.
 from __future__ import annotations
 
 import json
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy import sparse
 from sklearn.feature_extraction.text import CountVectorizer
+from tqdm.auto import tqdm
 
 from ..config import RetrievalConfig
 from ..domain import ArrayOps, DenseRetriever, LabelSpace, LexicalRetriever, TextEncoder
@@ -145,7 +148,15 @@ class BM25Index:
         ``CountVectorizer.fit_transform``'s per-document regex analysis again
         for every instance."""
         vectorizer = CountVectorizer(**cv_kwargs)
-        counts = vectorizer.fit_transform(corpus).tocsr().astype(np.float32)
+        # `fit_transform` is one opaque C-backed call with no progress hook, so
+        # this can't show fractional progress -- the bar just brackets it with
+        # a start marker and an elapsed-time readout at completion.
+        # `disable=None` (not the tqdm default of `False`): auto-silence when
+        # stdout isn't a TTY (redirected to a file, CI logs) instead of
+        # printing a bar per refresh tick.
+        with tqdm(total=1, desc="BM25: tokenizing corpus", unit="corpus", disable=None) as bar:
+            counts = vectorizer.fit_transform(corpus).tocsr().astype(np.float32)
+            bar.update(1)
         return counts, vectorizer
 
     def fit(self, corpus: Sequence[str]) -> "BM25Index":
@@ -167,25 +178,35 @@ class BM25Index:
         self.vectorizer = vectorizer
         self.n_docs = counts.shape[0]
 
-        df = np.asarray((counts > 0).sum(axis=0)).ravel()
-        self.idf = np.log(1.0 + (self.n_docs - df + 0.5) / (df + 0.5)).astype(np.float32)
-        doc_len = np.asarray(counts.sum(axis=1)).ravel().astype(np.float32)
-        avg = float(doc_len.mean()) if self.n_docs else 0.0
-        avg = avg or 1.0
-        len_norm = 1.0 - self.b + self.b * (doc_len / avg)
+        # Every step here is one vectorized numpy/scipy call over the whole
+        # matrix (no per-row loop to report finer-grained progress over), so
+        # the bar advances one tick per stage rather than a fake percentage.
+        with tqdm(total=4, desc="BM25: fitting weight matrix", unit="step", disable=None) as bar:
+            df = np.asarray((counts > 0).sum(axis=0)).ravel()
+            self.idf = np.log(1.0 + (self.n_docs - df + 0.5) / (df + 0.5)).astype(np.float32)
+            bar.update(1)
 
-        # W[doc, t] = idf_t * tf*(k1+1) / (tf + k1 * len_norm_doc)
-        coo = counts.tocoo()
-        tf, row, col = coo.data, coo.row, coo.col
-        if self.max_df_ratio is not None and self.n_docs:
-            # T32 A4 (opt-in, lossy): drop entries whose term exceeds the df
-            # ratio *before* building W, so the matrix actually shrinks rather
-            # than merely carrying more near-zero weights.
-            keep = (df[col] / self.n_docs) <= self.max_df_ratio
-            tf, row, col = tf[keep], row[keep], col[keep]
-        w = self.idf[col] * (tf * (self.k1 + 1.0)) / (tf + self.k1 * len_norm[row])
-        W = sparse.coo_matrix((w.astype(np.float32), (row, col)), shape=counts.shape)
-        self._Wt = W.tocsc().T.tocsr()  # (vocab, n_docs)
+            doc_len = np.asarray(counts.sum(axis=1)).ravel().astype(np.float32)
+            avg = float(doc_len.mean()) if self.n_docs else 0.0
+            avg = avg or 1.0
+            len_norm = 1.0 - self.b + self.b * (doc_len / avg)
+            bar.update(1)
+
+            # W[doc, t] = idf_t * tf*(k1+1) / (tf + k1 * len_norm_doc)
+            coo = counts.tocoo()
+            tf, row, col = coo.data, coo.row, coo.col
+            if self.max_df_ratio is not None and self.n_docs:
+                # T32 A4 (opt-in, lossy): drop entries whose term exceeds the df
+                # ratio *before* building W, so the matrix actually shrinks rather
+                # than merely carrying more near-zero weights.
+                keep = (df[col] / self.n_docs) <= self.max_df_ratio
+                tf, row, col = tf[keep], row[keep], col[keep]
+            w = self.idf[col] * (tf * (self.k1 + 1.0)) / (tf + self.k1 * len_norm[row])
+            W = sparse.coo_matrix((w.astype(np.float32), (row, col)), shape=counts.shape)
+            bar.update(1)
+
+            self._Wt = W.tocsc().T.tocsr()  # (vocab, n_docs)
+            bar.update(1)
         return self
 
     def _query_incidence(self, texts: Sequence[str]) -> sparse.csr_matrix:
@@ -213,7 +234,12 @@ class BM25Index:
         return np.asarray((self._query_incidence(texts) @ self._Wt).todense(), dtype=np.float32)
 
     def top_k(
-        self, texts: Sequence[str], k: int, chunk: int = 256, exclude: Any = None
+        self,
+        texts: Sequence[str],
+        k: int,
+        chunk: int = 256,
+        exclude: Any = None,
+        n_jobs: int = 1,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """(idx (b, k) int with -1 pad, score (b, k) float with NaN pad). Only
         strictly-positive scores are returned; the rest is padding.
@@ -228,7 +254,16 @@ class BM25Index:
         directly off that sparse structure (``_sparse_row_topk``) rather than
         densifying to a ``(chunk, n_docs)`` block and discarding everything
         below the cut — the dense intermediate this used to allocate no longer
-        exists, so there is nothing left to bound with a block-size cap."""
+        exists, so there is nothing left to bound with a block-size cap.
+
+        ``n_jobs`` (T-large-corpus): chunks are independent (each writes a
+        disjoint row range of ``out_idx``/``out_score``), and scipy's sparse
+        ``@`` releases the GIL during the C-level multiply, so ``n_jobs != 1``
+        runs the chunk loop across a thread pool instead of serially — no
+        pickling of ``self._Wt`` across a process boundary, which for a
+        (vocab, n_docs) matrix at real corpus sizes would dwarf the per-chunk
+        compute it's meant to parallelize. ``1`` (default) is the original
+        serial loop, byte-for-byte; ``-1`` uses ``os.cpu_count()``."""
         b = len(texts)
         # Fetch one extra when self-masking so k real neighbours remain after drop.
         width = k + 1 if exclude is not None else k
@@ -237,11 +272,41 @@ class BM25Index:
         out_score = np.full((b, width), np.nan, dtype=np.float32)
         if fetch > 0:
             Qbin = self._query_incidence(texts)
-            for s in range(0, b, chunk):
+            starts = list(range(0, b, chunk))
+            # A single chunk finishes before a bar would ever render anything
+            # useful; only bother above that (also keeps tiny/test-sized calls
+            # quiet even when `disable=None` would otherwise let it through
+            # on an interactive terminal).
+            show_progress = len(starts) > 1
+
+            def _run_chunk(s: int) -> None:
                 S = (Qbin[s : s + chunk] @ self._Wt).tocsr()
                 idx, sc = _sparse_row_topk(S, fetch)
                 out_idx[s : s + chunk, :fetch] = idx
                 out_score[s : s + chunk, :fetch] = sc
+
+            workers = (os.cpu_count() or 1) if n_jobs == -1 else n_jobs
+            if workers == 1 or len(starts) <= 1:
+                iterator = (
+                    tqdm(starts, desc="BM25: scoring queries", unit="chunk", disable=None)
+                    if show_progress
+                    else starts
+                )
+                for s in iterator:
+                    _run_chunk(s)
+            else:
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    results = pool.map(_run_chunk, starts)
+                    if show_progress:
+                        results = tqdm(
+                            results,
+                            total=len(starts),
+                            desc="BM25: scoring queries",
+                            unit="chunk",
+                            disable=None,
+                        )
+                    for _ in results:
+                        pass
         if exclude is not None:
             return _exclude_self(out_idx, out_score, exclude, k)
         return out_idx, out_score
@@ -306,12 +371,14 @@ class LexicalRetrieverAdapter(LexicalRetriever):
         desc_bm25: BM25Index,
         k_chunk: int = 256,
         max_block_elems: Optional[int] = None,
+        n_jobs: int = 1,
     ):
         self._examples = example_bm25
         self._labels = example_labels.astype(np.int64)
         self._descriptions = desc_bm25
         self._k_chunk = k_chunk
         self._max_block_elems = max_block_elems
+        self._n_jobs = n_jobs
 
     @classmethod
     def build(
@@ -323,7 +390,9 @@ class LexicalRetrieverAdapter(LexicalRetriever):
         desc = BM25Index(
             cfg.k1, cfg.b, max_df_ratio=cfg.bm25_max_df_ratio, **cfg.bm25_token_kwargs
         ).fit(label_space.descriptions)
-        return cls(ex, np.asarray(labels), desc, cfg.dense_chunk, cfg.bm25_max_block_elems)
+        return cls(
+            ex, np.asarray(labels), desc, cfg.dense_chunk, cfg.bm25_max_block_elems, cfg.bm25_n_jobs
+        )
 
     @classmethod
     def build_from_counts(
@@ -345,7 +414,14 @@ class LexicalRetrieverAdapter(LexicalRetriever):
         only the tokenization is shared."""
         ex = BM25Index(cfg.k1, cfg.b, max_df_ratio=cfg.bm25_max_df_ratio, **cfg.bm25_token_kwargs)
         ex.fit_from_counts(example_counts, example_vectorizer)
-        return cls(ex, np.asarray(labels), desc_bm25, cfg.dense_chunk, cfg.bm25_max_block_elems)
+        return cls(
+            ex,
+            np.asarray(labels),
+            desc_bm25,
+            cfg.dense_chunk,
+            cfg.bm25_max_block_elems,
+            cfg.bm25_n_jobs,
+        )
 
     @classmethod
     def build_with_shared_descriptions(
@@ -366,12 +442,21 @@ class LexicalRetrieverAdapter(LexicalRetriever):
         ex = BM25Index(
             cfg.k1, cfg.b, max_df_ratio=cfg.bm25_max_df_ratio, **cfg.bm25_token_kwargs
         ).fit(texts)
-        return cls(ex, np.asarray(labels), desc_bm25, cfg.dense_chunk, cfg.bm25_max_block_elems)
+        return cls(
+            ex,
+            np.asarray(labels),
+            desc_bm25,
+            cfg.dense_chunk,
+            cfg.bm25_max_block_elems,
+            cfg.bm25_n_jobs,
+        )
 
     def knn_example_labels(
         self, query_texts: Sequence[str], k: int, exclude_idx: Any = None
     ) -> Tuple[np.ndarray, np.ndarray]:
-        idx, score = self._examples.top_k(query_texts, k, self._k_chunk, exclude=exclude_idx)
+        idx, score = self._examples.top_k(
+            query_texts, k, self._k_chunk, exclude=exclude_idx, n_jobs=self._n_jobs
+        )
         labels = np.where(idx >= 0, self._labels[np.clip(idx, 0, None)], -1)
         return labels.astype(np.int64), score
 
@@ -395,7 +480,7 @@ class LexicalRetrieverAdapter(LexicalRetriever):
             all_descriptions
         )
         return LexicalRetrieverAdapter(
-            self._examples, self._labels, desc, self._k_chunk, self._max_block_elems
+            self._examples, self._labels, desc, self._k_chunk, self._max_block_elems, self._n_jobs
         )
 
     def to_state(self) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
@@ -411,6 +496,7 @@ class LexicalRetrieverAdapter(LexicalRetriever):
             "descriptions": desc_meta,
             "k_chunk": self._k_chunk,
             "max_block_elems": self._max_block_elems,
+            "n_jobs": self._n_jobs,
         }
         return arrays, meta
 
@@ -426,9 +512,17 @@ class LexicalRetrieverAdapter(LexicalRetriever):
         }
         ex = BM25Index.from_state(ex_arrays, meta["examples"])
         desc = BM25Index.from_state(desc_arrays, meta["descriptions"])
-        # `.get`: a directory saved before T32 has no `max_block_elems` key;
-        # absence must mean "unbounded", the byte-identical legacy behaviour.
-        return cls(ex, arrays["example_labels"], desc, meta["k_chunk"], meta.get("max_block_elems"))
+        # `.get`: a directory saved before T32/this change has no
+        # `max_block_elems`/`n_jobs` key; absence must mean "unbounded"/"1",
+        # the byte-identical legacy behaviour.
+        return cls(
+            ex,
+            arrays["example_labels"],
+            desc,
+            meta["k_chunk"],
+            meta.get("max_block_elems"),
+            meta.get("n_jobs", 1),
+        )
 
 
 # ------------------------------------------------------------------- dense adapter

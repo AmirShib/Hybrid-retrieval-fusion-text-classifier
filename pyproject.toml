@@ -31,6 +31,11 @@ dependencies = [
     "scipy>=1.9",
     "scikit-learn>=1.1",
     "xgboost>=1.7",
+    # Progress bars for long CPU-bound stages (BM25 tokenization/fit, query
+    # scoring). Pure Python, zero transitive dependencies of its own, and
+    # auto-silences when stdout isn't a TTY (piped/CI logs) -- safe for the
+    # air-gapped/headless path.
+    "tqdm>=4.65",
 ]
 
 [project.optional-dependencies]

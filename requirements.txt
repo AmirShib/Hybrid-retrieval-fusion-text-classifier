@@ -7,4 +7,5 @@ pandas
 scipy
 scikit-learn
 xgboost
+tqdm
 sentence-transformers

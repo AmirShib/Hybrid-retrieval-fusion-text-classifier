@@ -104,6 +104,13 @@ class RetrievalConfig:
     # must go through the chunked, sparse `top_k` path instead. `None` (the
     # default) is unbounded — today's behaviour.
     bm25_max_block_elems: Optional[int] = None
+    # Threads used to parallelize BM25.top_k's per-chunk sparse mat-mul
+    # (Qbin_chunk @ Wt). scipy's sparse @ releases the GIL during the C-level
+    # multiply, so plain threads (no pickling of the (vocab, n_docs) Wt matrix
+    # across processes) already parallelize this across cores. 1 (default) is
+    # the original single-threaded behaviour, byte-for-byte; -1 uses
+    # os.cpu_count().
+    bm25_n_jobs: int = 1
 
 
 @dataclass

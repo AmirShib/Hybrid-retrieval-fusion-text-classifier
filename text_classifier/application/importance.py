@@ -27,7 +27,7 @@ import numpy as np
 import pandas as pd
 
 from ..domain import AbstentionPolicy, ConfidenceCalibrator, FusionModel
-from .scoring import add_confidence, top_per_item
+from .scoring import add_confidence, select_feature_columns, top_per_item
 
 
 def global_feature_importance(
@@ -114,6 +114,10 @@ def ablation_report(
     by ``delta_accuracy_if_no_abstain`` ascending — the most damaging removals
     (largest accuracy drop) first.
     """
+    # Fail fast, naming exactly what's missing, rather than a bare KeyError on
+    # the first `feats[name]` below.
+    select_feature_columns(feats, feature_names, context="ablation_report")
+
     baseline = _score_decisions(
         feats, fusion, calibrator, abstention, feature_names, true_idx_by_item
     )
