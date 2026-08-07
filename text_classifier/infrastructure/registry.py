@@ -433,10 +433,22 @@ register_encoder(
     ),
 )
 
+
+def _with_objective(params: Dict[str, Any], objective: Optional[str]) -> Dict[str, Any]:
+    """Merge ``FusionConfig.objective`` into a backend's params dict as its
+    "objective" key. An "objective" already present in ``params`` (a
+    power-user override typed directly into xgb_params/params) wins."""
+    if objective is None:
+        return params
+    return {"objective": objective, **params}
+
+
 register_fusion(
     "xgboost",
     FusionSpec(
-        build=lambda cfg: XGBoostFusionModel(cfg.xgb_params, cfg.auto_scale_pos_weight),
+        build=lambda cfg: XGBoostFusionModel(
+            _with_objective(cfg.xgb_params, cfg.objective), cfg.auto_scale_pos_weight
+        ),
         filename="fusion.json",
         load=XGBoostFusionModel.load,
     ),
@@ -445,7 +457,9 @@ register_fusion(
 register_fusion(
     "lightgbm",
     FusionSpec(
-        build=lambda cfg: LightGBMFusionModel(cfg.params, cfg.auto_scale_pos_weight),
+        build=lambda cfg: LightGBMFusionModel(
+            _with_objective(cfg.params, cfg.objective), cfg.auto_scale_pos_weight
+        ),
         filename="fusion.txt",  # LightGBM native text format
         load=LightGBMFusionModel.load,
     ),
@@ -454,7 +468,7 @@ register_fusion(
 register_fusion(
     "xgbranker",
     FusionSpec(
-        build=lambda cfg: XGBRankerFusionModel(cfg.params),
+        build=lambda cfg: XGBRankerFusionModel(_with_objective(cfg.params, cfg.objective)),
         filename="fusion_ranker",  # a directory: native model + isotonic head
         load=XGBRankerFusionModel.load,
     ),

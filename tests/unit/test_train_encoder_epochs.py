@@ -64,6 +64,7 @@ class _Script:
         self.fit_kwargs: list = []
         self.saves: list = []  # (directory, epoch) in call order
         self.loads: list = []  # directories reloaded through SentenceTransformer
+        self.built_losses: list = []  # (name, kwargs) for each loss constructed
 
 
 @pytest.fixture
@@ -92,8 +93,31 @@ def script(monkeypatch) -> _Script:
             self.primary_metric = None
 
     class MultipleNegativesSymmetricRankingLoss:
-        def __init__(self, model):
+        def __init__(self, model, **kwargs):
             self.model = model
+            self.kwargs = kwargs
+            state.built_losses.append(("multiple_negatives_symmetric_ranking", kwargs))
+
+    class MultipleNegativesRankingLoss:
+        def __init__(self, model, **kwargs):
+            self.model = model
+            self.kwargs = kwargs
+            state.built_losses.append(("multiple_negatives_ranking", kwargs))
+
+    class CachedMultipleNegativesRankingLoss:
+        def __init__(self, model, **kwargs):
+            self.model = model
+            self.kwargs = kwargs
+            state.built_losses.append(("cached_multiple_negatives_ranking", kwargs))
+
+    class CosineSimilarityLoss:
+        """A loss with no friendly alias -- reached only via the dynamic
+        sentence_transformers.losses.<ClassName> fallback."""
+
+        def __init__(self, model, **kwargs):
+            self.model = model
+            self.kwargs = kwargs
+            state.built_losses.append(("CosineSimilarityLoss", kwargs))
 
     class SentenceTransformer:
         """Embeds a text as a near-one-hot over classes.
@@ -176,6 +200,9 @@ def script(monkeypatch) -> _Script:
     root.SentenceTransformer = SentenceTransformer
     losses = types.ModuleType("sentence_transformers.losses")
     losses.MultipleNegativesSymmetricRankingLoss = MultipleNegativesSymmetricRankingLoss
+    losses.MultipleNegativesRankingLoss = MultipleNegativesRankingLoss
+    losses.CachedMultipleNegativesRankingLoss = CachedMultipleNegativesRankingLoss
+    losses.CosineSimilarityLoss = CosineSimilarityLoss
     datasets = types.ModuleType("sentence_transformers.datasets")
     datasets.NoDuplicatesDataLoader = NoDuplicatesDataLoader
     evaluation = types.ModuleType("sentence_transformers.evaluation")
@@ -263,6 +290,64 @@ class TestWithoutSelection:
 # --------------------------------------------------------------------------- #
 # selection on
 # --------------------------------------------------------------------------- #
+class TestTrainLoss:
+    """`EncoderConfig.train_loss`: a config choice, not a hardcoded default."""
+
+    def test_default_builds_the_previous_hardcoded_loss(self, script):
+        _train(_config(train_epochs=1))
+        assert [name for name, _ in script.built_losses] == ["multiple_negatives_symmetric_ranking"]
+
+    def test_alternate_loss_is_selected(self, script):
+        _train(_config(train_epochs=1, train_loss="multiple_negatives_ranking"))
+        assert [name for name, _ in script.built_losses] == ["multiple_negatives_ranking"]
+
+    def test_cached_variant_defaults_mini_batch_size(self, script):
+        _train(_config(train_epochs=1, train_loss="cached_multiple_negatives_ranking"))
+        (name, kwargs) = script.built_losses[0]
+        assert name == "cached_multiple_negatives_ranking"
+        assert kwargs["mini_batch_size"] == 32
+
+    def test_train_loss_params_pass_through_to_the_loss_constructor(self, script):
+        _train(
+            _config(
+                train_epochs=1,
+                train_loss="multiple_negatives_ranking",
+                train_loss_params={"scale": 10.0},
+            )
+        )
+        (name, kwargs) = script.built_losses[0]
+        assert kwargs == {"scale": 10.0}
+
+    def test_train_loss_params_override_the_cached_default(self, script):
+        _train(
+            _config(
+                train_epochs=1,
+                train_loss="cached_multiple_negatives_ranking",
+                train_loss_params={"mini_batch_size": 8},
+            )
+        )
+        (_, kwargs) = script.built_losses[0]
+        assert kwargs["mini_batch_size"] == 8
+
+    def test_arbitrary_sentence_transformers_class_name_resolves(self, script):
+        """Not one of the three friendly aliases -- reached only via the
+        dynamic sentence_transformers.losses.<ClassName> fallback."""
+        _train(
+            _config(
+                train_epochs=1,
+                train_loss="CosineSimilarityLoss",
+                train_loss_params={"loss_fct": "mse"},
+            )
+        )
+        (name, kwargs) = script.built_losses[0]
+        assert name == "CosineSimilarityLoss"
+        assert kwargs == {"loss_fct": "mse"}
+
+    def test_unknown_loss_raises_a_clear_error(self, script):
+        with pytest.raises(ValueError, match="unknown encoder.train_loss 'NotARealLoss'"):
+            _train(_config(train_epochs=1, train_loss="NotARealLoss"))
+
+
 class TestBestEpochSelection:
     def test_holds_out_a_stratified_slice_and_wires_fit_for_per_epoch_eval(self, script):
         script.good_epochs = {3}

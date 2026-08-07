@@ -43,7 +43,7 @@ import logging
 
 from .. import TrainingPipeline
 from ..config import REUSE_QUERY_EMBEDDINGS_MODES
-from ..domain import ENCODER_SELECTION_METRICS
+from ..domain import ENCODER_LOSSES, ENCODER_SELECTION_METRICS
 from ..infrastructure.registry import encoder_spec
 from ._common import (
     add_config_args,
@@ -93,6 +93,16 @@ def main() -> None:
         "and re-scored after every epoch, so the *best* epoch is the one kept "
         "instead of the last (default: 0.1). 0 disables selection: every item "
         "trains and the final epoch wins. Ignored when --encoder-epochs is 1",
+    )
+    p.add_argument(
+        "--encoder-loss",
+        default=None,
+        help=f"fine-tuning loss (default: multiple_negatives_symmetric_ranking). "
+        f"One of {list(ENCODER_LOSSES)} (verified compatible with the (item, "
+        "description) pairs this trains on), or any other "
+        "sentence_transformers.losses class name (e.g. 'CosineSimilarityLoss') for "
+        "direct access to the rest of the package's built-in losses -- not "
+        "validated here, and not guaranteed to match the pairs this builds",
     )
     p.add_argument(
         "--encoder-select-metric",
@@ -219,6 +229,8 @@ def main() -> None:
         cfg.encoder.train_epochs = args.encoder_epochs
     if args.encoder_epoch_holdout is not None:
         cfg.encoder.train_holdout_ratio = args.encoder_epoch_holdout
+    if args.encoder_loss is not None:
+        cfg.encoder.train_loss = args.encoder_loss
     if args.encoder_select_metric is not None:
         cfg.encoder.train_select_metric = args.encoder_select_metric
     if args.encoder_patience is not None:

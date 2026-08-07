@@ -79,6 +79,31 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
   asymmetry), `never` (byte-for-byte the pre-T89 path).
 
 ### Added
+- **Loss/objective is a config choice, not a hardcoded default, for both the
+  encoder fine-tune and the fusion models.** `EncoderConfig.train_loss`
+  (`--encoder-loss`) picks among `domain.services.ENCODER_LOSSES`
+  (`multiple_negatives_symmetric_ranking`, the previous hardcoded default;
+  `multiple_negatives_ranking`; `cached_multiple_negatives_ranking`) — all
+  three train on the same (item, description) pairs `train_encoder` already
+  builds, so switching is a config change, not a data-plumbing one. Beyond
+  those three, `train_loss` also accepts any other class name under
+  `sentence_transformers.losses` (e.g. `"CosineSimilarityLoss"`,
+  `"TripletLoss"`) for direct access to the rest of the package's built-in
+  losses, resolved by name at fine-tune time; unlike the three aliases those
+  are not verified to match the (item, description) *pair* shape this package
+  builds (some expect a label, a triplet, or a different batch structure), so
+  picking one is the caller's call, and an unresolvable name fails loudly
+  with a clear error rather than mis-training silently.
+  `FusionConfig.objective` merges into `xgb_params`/`params` as `"objective"`
+  for whichever fusion backend is selected (e.g. `binary:hinge` for xgboost,
+  `cross_entropy` for lightgbm, `rank:ndcg` for xgb-ranker); unset, each
+  backend keeps its previous implicit default (xgboost/lightgbm's own binary
+  log-loss, `rank:pairwise` for xgb-ranker). Not validated against a fixed
+  list — valid objectives are backend-specific and pluggable third-party
+  fusion kinds may support ones this package doesn't know about; an
+  unrecognized value surfaces as a clear error from the backend library
+  itself. An `"objective"` key already present in `xgb_params`/`params` wins
+  over the new field.
 - **Device-resident dense retrieval + encoder handoff (T85)** — a torch
   `ArrayOps` backend (`array_backend="torch"`/`"auto"` over T83's crossover)
   keeps the dense index's embeddings and query compute on-device across the

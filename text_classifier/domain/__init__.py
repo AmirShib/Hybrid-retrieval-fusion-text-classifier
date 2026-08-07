@@ -21,6 +21,7 @@ from .ports import (
     TextEncoder,
 )
 from .services import (
+    ENCODER_LOSSES,
     ENCODER_SELECTION_METRICS,
     FEATURE_DEPS,
     FEATURE_NAMES,
@@ -60,6 +61,7 @@ __all__ = [
     "AbstentionPolicy",
     "ThresholdTuner",
     "ENCODER_SELECTION_METRICS",
+    "ENCODER_LOSSES",
     "EpochSelectionPolicy",
     "encoder_retrieval_metrics",
 ]

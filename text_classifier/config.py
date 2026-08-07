@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Type, TypeVar
 # The domain layer owns the set of encoder-epoch metrics; import it rather than
 # restate it, so a new metric is valid in config the moment it can be measured.
 # (Acyclic: `domain` imports neither config nor infrastructure.)
-from .domain.services import ENCODER_SELECTION_METRICS
+from .domain.services import ENCODER_LOSSES, ENCODER_SELECTION_METRICS
 
 _T = TypeVar("_T")
 
@@ -24,10 +24,23 @@ class EncoderConfig:
     model_name_or_path: str = "sentence-transformers/all-MiniLM-L6-v2"
     encode_batch_size: int = 64
     device: Optional[str] = None
-    # fine-tuning (MultipleNegativesSymmetricRankingLoss on item<->description pairs)
+    # fine-tuning, on item<->description pairs. `train_loss` selects the
+    # objective: one of domain.services.ENCODER_LOSSES's three friendly aliases
+    # (all trained on the exact same pairs, so switching between them is a
+    # config change, not a data-plumbing one; see that tuple's comment for what
+    # each does), or any other class name under `sentence_transformers.losses`
+    # (e.g. "CosineSimilarityLoss", "TripletLoss") for direct access to the
+    # rest of the package's built-in losses -- unlike the three aliases, those
+    # are not verified to match the (item, description) pair shape this
+    # package builds, so picking one is the caller's responsibility.
+    # `train_loss_params` passes straight to the loss constructor (e.g.
+    # {"scale": 10.0} to soften the similarity temperature, or
+    # {"mini_batch_size": 32} for the cached variant).
     train_epochs: int = 1
     train_batch_size: int = 64
     warmup_ratio: float = 0.1
+    train_loss: str = "multiple_negatives_symmetric_ranking"
+    train_loss_params: Dict[str, Any] = field(default_factory=dict)
     # Best-epoch selection. With train_epochs > 1, `train_holdout_ratio` of the
     # fine-tuning items are held out from the gradient updates and re-scored after
     # every epoch; the epoch scoring best on `train_select_metric` is the one
@@ -157,6 +170,17 @@ class FusionConfig:
     auto_scale_pos_weight: bool = True  # set scale_pos_weight = n_neg / n_pos at fit time
     # Generic params block read by non-xgboost backends (e.g. LightGBM).
     params: Dict[str, Any] = field(default_factory=dict)
+    # The loss/objective the fusion backend trains against, e.g. "binary:logistic"
+    # / "binary:hinge" (xgboost), "binary" / "cross_entropy" (lightgbm),
+    # "rank:pairwise" / "rank:ndcg" (xgb-ranker). None (default) leaves each
+    # backend's own default in place -- xgboost/lightgbm's implicit binary
+    # log-loss, or "rank:pairwise" for xgb-ranker. Merged into xgb_params/params
+    # as their "objective" key, which is not fusion-kind-specific and is left
+    # unvalidated here (pluggable backends may register kinds with objectives
+    # this package does not know about) -- an unrecognized value surfaces as a
+    # clear error from the backend library itself. An "objective" key already
+    # present in xgb_params/params wins over this field.
+    objective: Optional[str] = None
     # Feature columns withheld from the fusion model — this is what makes a
     # retrain-based ablation possible: "is the model better without this
     # column?", as opposed to the masking ablation's "what if this signal fails
@@ -408,6 +432,14 @@ class PipelineConfig:
                 f"one of {list(ENCODER_SELECTION_METRICS)}",
             ),
             (
+                "encoder.train_loss",
+                self.encoder.train_loss,
+                isinstance(self.encoder.train_loss, str) and self.encoder.train_loss.strip(),
+                f"a non-empty string -- one of {list(ENCODER_LOSSES)}, or any other "
+                "sentence_transformers.losses class name (not validated here; the "
+                "installed sentence-transformers version is what decides that)",
+            ),
+            (
                 "encoder.train_select_min_delta",
                 self.encoder.train_select_min_delta,
                 self.encoder.train_select_min_delta >= 0.0,
@@ -428,6 +460,13 @@ class PipelineConfig:
             # Membership in the schema is checked later, by fusion_feature_names,
             # which is the only place the *composed* schema (core + providers) is
             # known. Here we only reject shapes that are wrong on their face.
+            (
+                "fusion.objective",
+                self.fusion.objective,
+                self.fusion.objective is None
+                or (isinstance(self.fusion.objective, str) and self.fusion.objective.strip()),
+                "None or a non-empty objective string (backend-specific; not validated here)",
+            ),
             (
                 "fusion.drop_features",
                 self.fusion.drop_features,

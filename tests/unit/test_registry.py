@@ -51,6 +51,56 @@ def test_builtin_calibrator_resolves():
 
 
 # --------------------------------------------------------------------------- #
+# FusionConfig.objective: a config choice, not a hardcoded default
+# --------------------------------------------------------------------------- #
+def test_fusion_objective_merges_into_xgboost_params():
+    model = build_fusion(
+        FusionConfig(
+            kind="xgboost",
+            xgb_params={"n_estimators": 5},
+            objective="binary:hinge",
+            auto_scale_pos_weight=False,  # binary:hinge doesn't use scale_pos_weight
+        )
+    )
+    X = np.array([[0.0], [1.0], [0.0], [1.0]], dtype=np.float32)
+    y = np.array([0, 1, 0, 1])
+    model.fit(X, y)
+    assert model._model.get_params()["objective"] == "binary:hinge"
+
+
+def test_fusion_objective_none_leaves_backend_default():
+    model = build_fusion(FusionConfig(kind="xgboost", xgb_params={"n_estimators": 5}))
+    X = np.array([[0.0], [1.0], [0.0], [1.0]], dtype=np.float32)
+    y = np.array([0, 1, 0, 1])
+    model.fit(X, y)
+    assert model._model.get_params()["objective"] == "binary:logistic"
+
+
+def test_fusion_objective_explicit_param_wins_over_field():
+    """An "objective" already in xgb_params is a power-user override; the
+    friendly `objective` field must not clobber it."""
+    model = build_fusion(
+        FusionConfig(
+            kind="xgboost",
+            xgb_params={"n_estimators": 5, "objective": "binary:logitraw"},
+            objective="binary:hinge",
+        )
+    )
+    X = np.array([[0.0], [1.0], [0.0], [1.0]], dtype=np.float32)
+    y = np.array([0, 1, 0, 1])
+    model.fit(X, y)
+    assert model._model.get_params()["objective"] == "binary:logitraw"
+
+
+def test_fusion_objective_merges_into_xgbranker_params():
+    model = build_fusion(FusionConfig(kind="xgbranker", objective="rank:ndcg"))
+    X = np.array([[0.0], [1.0], [0.0], [1.0]], dtype=np.float32)
+    y = np.array([0, 1, 0, 1])
+    model.fit(X, y, groups=np.array([2, 2]))
+    assert model._model.get_params()["objective"] == "rank:ndcg"
+
+
+# --------------------------------------------------------------------------- #
 # Unknown kind → clear error listing registered names
 # --------------------------------------------------------------------------- #
 def test_unknown_fusion_kind_lists_registered():

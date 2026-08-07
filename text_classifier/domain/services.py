@@ -409,6 +409,39 @@ ENCODER_SELECTION_METRICS: Tuple[str, ...] = (
     "knn_acc@1",
 )
 
+# Fine-tuning losses. These three friendly aliases are all trained on the same
+# (item_text, description) pair examples train_encoder already builds -- picking
+# among them is a config change, not a data-plumbing one:
+#   multiple_negatives_symmetric_ranking -- the default. In-batch negatives
+#                   scored in both directions (item->description AND
+#                   description->item), which is what NoDuplicatesDataLoader's
+#                   same-class exclusion is for.
+#   multiple_negatives_ranking -- one-directional (item->description only).
+#                   Cheaper per step; a reasonable choice when descriptions
+#                   are too generic to usefully anchor the reverse direction.
+#   cached_multiple_negatives_ranking -- same objective as
+#                   multiple_negatives_ranking, computed over GradCache
+#                   mini-batches (train_loss_params["mini_batch_size"]) so a
+#                   large effective batch of in-batch negatives fits in memory
+#                   too small to hold it directly.
+#
+# `EncoderConfig.train_loss` is not restricted to these three: any class name
+# under `sentence_transformers.losses` (e.g. "CosineSimilarityLoss",
+# "TripletLoss", "ContrastiveLoss", "GISTEmbedLoss", ...) also resolves, via
+# infrastructure/encoder.py's `_build_train_loss`. This tuple exists for CLI
+# discoverability and lists only the losses verified compatible with the
+# (item_text, description) *pair* examples this package builds -- other
+# sentence-transformers losses expect a different input shape (an explicit
+# label/score, a triplet, a batch of same/different-class groups) that
+# train_encoder does not construct, and picking one outside this list is the
+# caller's responsibility to get right; see that loss's sentence-transformers
+# docs for what it expects before selecting it.
+ENCODER_LOSSES: Tuple[str, ...] = (
+    "multiple_negatives_symmetric_ranking",
+    "multiple_negatives_ranking",
+    "cached_multiple_negatives_ranking",
+)
+
 
 def encoder_retrieval_metrics(
     query_emb: np.ndarray,

@@ -1,10 +1,11 @@
 """Encoder adapters behind the TextEncoder port.
 
 - ``SentenceTransformerEncoder``: wraps a SentenceTransformer (torch + a model
-  download) and supports fine-tuning with MultipleNegativesSymmetricRankingLoss
-  over (item, class-description) pairs, scoring each epoch on a held-out slice
-  so a multi-epoch run keeps its *best* epoch rather than its last
-  (``EncoderEpochTracker``).
+  download) and supports fine-tuning over (item, class-description) pairs with
+  a pluggable loss (``EncoderConfig.train_loss``, default
+  MultipleNegativesSymmetricRankingLoss; see ``domain.services.ENCODER_LOSSES``),
+  scoring each epoch on a held-out slice so a multi-epoch run keeps its *best*
+  epoch rather than its last (``EncoderEpochTracker``).
 - ``TfidfEncoder``: a torch-free, air-gap-friendly alternative built on sklearn's
   TfidfVectorizer. Its vocabulary/IDF are corpus-dependent, so it is *fit* on a
   training corpus rather than loaded pretrained.
@@ -601,6 +602,45 @@ def _epoch_evaluator(tracker: EncoderEpochTracker) -> Any:
     return _EpochEvaluator()
 
 
+# EncoderConfig.train_loss friendly alias -> sentence_transformers.losses class
+# name. See domain.services.ENCODER_LOSSES for what each does.
+_TRAIN_LOSS_ALIASES = {
+    "multiple_negatives_symmetric_ranking": "MultipleNegativesSymmetricRankingLoss",
+    "multiple_negatives_ranking": "MultipleNegativesRankingLoss",
+    "cached_multiple_negatives_ranking": "CachedMultipleNegativesRankingLoss",
+}
+
+
+def _build_train_loss(name: str, model: Any, losses: Any, params: Dict[str, Any]) -> Any:
+    """Build the fine-tuning loss named by ``EncoderConfig.train_loss``.
+
+    ``name`` is either one of the three friendly aliases above -- verified
+    compatible with the (item_text, description) InputExample pairs
+    train_encoder builds, so those three are a pure constructor lookup -- or
+    any other class name under ``sentence_transformers.losses`` (e.g.
+    "CosineSimilarityLoss", "TripletLoss"), resolved directly. The package puts
+    no ceiling on which of its own losses you can reach for; it only vouches
+    for the three aliases actually matching the example shape this function
+    builds. Picking a raw class name that expects a different shape (a label,
+    a triplet, an explicit score) is on the caller -- it will fail loudly
+    inside sentence-transformers' own ``fit``, not silently mis-train.
+    """
+    class_name = _TRAIN_LOSS_ALIASES.get(name, name)
+    if class_name == "CachedMultipleNegativesRankingLoss":
+        params = dict(params)
+        params.setdefault("mini_batch_size", 32)
+    try:
+        loss_cls = getattr(losses, class_name)
+    except AttributeError:
+        raise ValueError(
+            f"unknown encoder.train_loss {name!r}: no sentence_transformers.losses.{class_name}. "
+            f"Built-in aliases: {sorted(_TRAIN_LOSS_ALIASES)}; any other "
+            "sentence_transformers.losses class name also works if its installed "
+            "version has one."
+        ) from None
+    return loss_cls(model, **params)
+
+
 def train_encoder(
     items: Sequence[LabeledItem],
     label_space: LabelSpace,
@@ -609,10 +649,11 @@ def train_encoder(
 ) -> SentenceTransformerEncoder:
     """Fine-tune a bi-encoder so items sit near their class description.
 
-    Uses MultipleNegativesSymmetricRankingLoss on (item_text, description) pairs.
-    NoDuplicatesDataLoader keeps two items of the same class out of one batch,
-    which is what prevents the symmetric in-batch negatives from treating an
-    item's own description as a negative for a same-class sibling.
+    Uses ``config.train_loss`` (default MultipleNegativesSymmetricRankingLoss) on
+    (item_text, description) pairs. NoDuplicatesDataLoader keeps two items of the
+    same class out of one batch, which is what prevents the in-batch negatives
+    from treating an item's own description as a negative for a same-class
+    sibling.
 
     **Which epoch you get back.** With ``train_epochs == 1`` (the default), or
     ``train_holdout_ratio == 0``, this is the state after the final epoch: every
@@ -665,7 +706,7 @@ def train_encoder(
 
     examples = [InputExample(texts=[items[i].text, descriptions[int(labels[i])]]) for i in fit_idx]
     loader = NoDuplicatesDataLoader(examples, batch_size=config.train_batch_size)
-    loss = losses.MultipleNegativesSymmetricRankingLoss(model)
+    loss = _build_train_loss(config.train_loss, model, losses, config.train_loss_params)
     steps_per_epoch = max(1, len(loader))
     warmup_steps = int(steps_per_epoch * config.train_epochs * config.warmup_ratio)
     objectives = [(loader, loss)]
