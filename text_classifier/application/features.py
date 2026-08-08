@@ -8,6 +8,7 @@ indexing. Queries are processed in chunks to bound peak memory.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Dict, Optional, Sequence, Set, Tuple, Union
 
 import warnings
@@ -18,6 +19,7 @@ import pandas as pd
 from ..domain import (
     ArrayOps,
     CandidatePolicy,
+    CandidateView,
     DenseRetriever,
     FEATURE_NAMES,
     FeatureContext,
@@ -36,14 +38,16 @@ from ..infrastructure.signals import (
     LexicalSignalProvider,
     _argmax_or_missing,  # noqa: F401 -- re-exported, see __all__ note below
     _scatter_knn,  # noqa: F401 -- re-exported, see __all__ note below
+    _topn_mask,
 )
 
 # Re-exported for callers that reach for it via the assembly module; the
 # canonical definition lives in the domain schema (``domain/services.py``).
-# `_scatter_knn`/`_argmax_or_missing` are re-exported for backward compatibility
-# — their implementation lives in `infrastructure/signals.py` (T34 phase 2), an
-# infrastructure adapter, so the two built-in `SignalProvider`s can use them
-# without `infrastructure` importing `application`.
+# `_scatter_knn`/`_argmax_or_missing`/`_topn_mask` are re-exported for backward
+# compatibility — their implementation lives in `infrastructure/signals.py`
+# (T34 phase 2; `_topn_mask` joined them in T33), an infrastructure adapter, so
+# the built-in and second-stage `SignalProvider`s can use them without
+# `infrastructure` importing `application`.
 __all__ = ["FeatureAssembler", "composed_feature_names"]
 
 
@@ -65,21 +69,6 @@ def _effective_names(
     core_needed = {n for n in names if n not in provider_names and n in needed}
     kept_providers = {n for n in provider_names if n in req}
     return [n for n in names if n in core_needed or n in kept_providers]
-
-
-def _topn_mask(
-    M: np.ndarray, n: int, positive_only: bool = False, ops: Optional[ArrayOps] = None
-) -> np.ndarray:
-    """Boolean (b, C) mask of each row's top-n columns. NaN ranks last; -inf
-    selections (all-missing) are dropped. Ties may admit slightly more than n."""
-    ops = ops or NumpyArrayOps()
-    b, C = M.shape
-    n = min(n, C)
-    Mf = ops.where(ops.isnan(M), -np.inf, M.astype(np.float64))
-    if positive_only:
-        Mf = ops.where(Mf > 0, Mf, -np.inf)
-    kth = np.partition(Mf, C - n, axis=1)[:, C - n][:, None]
-    return (Mf >= kth) & ops.isfinite(Mf)
 
 
 def _row_rank(M: np.ndarray, cand_mask: np.ndarray, ops: Optional[ArrayOps] = None) -> np.ndarray:
@@ -278,15 +267,25 @@ class FeatureAssembler:
                 LexicalSignalProvider(lexical, self._ops),
             )
 
-        # ---- run every signal provider unconditionally: the candidate mask is
-        # an unconditional dependency of the whole frame (T87's "candidates is
-        # never pruned" rule), so every signal that feeds it must run regardless
-        # of `requested`. Only each matrix's *generic derivations* below are
-        # gated by `_want`. ----
-        ctx = SignalContext(texts=texts, q_emb=q_emb, k=k, n_classes=C, self_ids=self_ids)
+        # ---- round one: every ordinary signal provider, run unconditionally.
+        # The candidate mask is an unconditional dependency of the whole frame
+        # (T87's "candidates is never pruned" rule), so every signal that feeds
+        # it must run regardless of `requested`. Only each matrix's *generic
+        # derivations* below are gated by `_want`. ----
+        ctx = SignalContext(
+            texts=texts,
+            q_emb=q_emb,
+            k=k,
+            n_classes=C,
+            label_space=self._space,
+            self_ids=self_ids,
+        )
         sig_matrices: Dict[str, SignalMatrix] = {}
         candidate_values = []
-        for provider in signal_providers:
+
+        def _collect(provider: SignalProvider, ctx: SignalContext) -> None:
+            """Run one provider and merge its matrices, rejecting a node name
+            two providers both claim (which would silently overwrite data)."""
             for sm in provider.build(ctx):
                 if sm.node in sig_matrices:
                     raise ValueError(
@@ -298,6 +297,24 @@ class FeatureAssembler:
                 if sm.node in provider.candidate_features():
                     candidate_values.append((sm.value, sm.topn_positive_only))
 
+        second_stage = []
+        for provider in signal_providers:
+            if getattr(provider, "needs_candidates", False):
+                # T33: runs below, once the shortlist it reranks exists. It may
+                # not also *select* candidates -- that would be circular, so it
+                # is rejected here rather than resolved in some arbitrary order.
+                if provider.candidate_features():
+                    raise ValueError(
+                        f"signal provider {provider.name!r} sets needs_candidates=True but "
+                        f"declares candidate_features {list(provider.candidate_features())}. "
+                        "A second-stage provider runs after candidate selection and so "
+                        "cannot contribute to it; declare no candidate features, or set "
+                        "needs_candidates=False to run in the first round."
+                    )
+                second_stage.append(provider)
+                continue
+            _collect(provider, ctx)
+
         # ---- candidate set = union of each declared candidate matrix's top-n ----
         mask = np.zeros((len(texts), C), dtype=bool)
         for value, positive_only in candidate_values:
@@ -308,6 +325,30 @@ class FeatureAssembler:
                 ["is_true"] if labels is not None else []
             )
             return pd.DataFrame(columns=empty_cols)
+
+        # ---- round two (T33): providers that rerank the shortlist. Deliberately
+        # *after* the empty-shortlist return above -- a reranker is the most
+        # expensive thing in the pipeline and there is nothing to rerank there.
+        # A provider whose every column is pruned is skipped outright: it feeds
+        # no candidate matrix (enforced above), so not running it cannot change
+        # any surviving column's value, and skipping is the whole point for a
+        # provider that calls a cross-encoder or an external service. ----
+        if second_stage:
+            stage_two_ctx = replace(
+                ctx,
+                candidates=CandidateView(
+                    mask=mask,
+                    rows=rows,
+                    cols=cols,
+                    signals={node: sm.value for node, sm in sig_matrices.items()},
+                ),
+            )
+            for provider in second_stage:
+                if needed is not None and not any(
+                    name in needed for name in provider.column_names()
+                ):
+                    continue
+                _collect(provider, stage_two_ctx)
 
         # ---- gather one value per (row, col) ----
         def g(M):  # gather helper

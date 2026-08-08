@@ -7,6 +7,12 @@ Hybrid retrieval-fusion text classifier with calibrated abstention. Five retriev
 signals → ~28 features per (item, candidate) → pointwise XGBoost fusion → isotonic
 calibration → tuned abstention threshold. Built for imbalanced data and air-gapped hosts.
 
+Signals are computed in **two rounds** (T33). Round one is the five built-ins:
+they score every class and their top-n form the candidate shortlist. Round two is
+providers declaring `needs_candidates` — a cross-encoder reranker today — which
+receive that shortlist and may only *reorder* it, never extend it. Candidate
+recall therefore stays a property of round one alone. Round two is off by default.
+
 ## Architecture (hexagonal / DDD)
 ```
 text_classifier/

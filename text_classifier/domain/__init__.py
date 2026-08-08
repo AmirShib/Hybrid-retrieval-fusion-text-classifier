@@ -9,12 +9,14 @@ from .models import (
 )
 from .ports import (
     ArrayOps,
+    CandidateView,
     ConfidenceCalibrator,
     DenseRetriever,
     FeatureContext,
     FeatureProvider,
     FusionModel,
     LexicalRetriever,
+    PairwiseReranker,
     SignalContext,
     SignalMatrix,
     SignalProvider,
@@ -52,6 +54,8 @@ __all__ = [
     "SignalProvider",
     "SignalContext",
     "SignalMatrix",
+    "CandidateView",
+    "PairwiseReranker",
     "FEATURE_NAMES",
     "FEATURE_DEPS",
     "composed_feature_names",

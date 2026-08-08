@@ -33,6 +33,27 @@ from ..domain import (
 from .array_ops import NumpyArrayOps
 
 
+def _topn_mask(
+    M: np.ndarray, n: int, positive_only: bool = False, ops: Optional[ArrayOps] = None
+) -> np.ndarray:
+    """Boolean (b, C) mask of each row's top-n columns. NaN ranks last; -inf
+    selections (all-missing) are dropped. Ties may admit slightly more than n.
+
+    Lives here rather than in ``application/features.py`` for the same reason
+    ``_scatter_knn`` does (see the module docstring): candidate selection is the
+    assembler's own use, but a second-stage ``SignalProvider`` (T33) needs the
+    identical top-n rule to pick which candidates are worth its cost, and an
+    infrastructure adapter must not import the application layer."""
+    ops = ops or NumpyArrayOps()
+    b, C = M.shape
+    n = min(n, C)
+    Mf = ops.where(ops.isnan(M), -np.inf, M.astype(np.float64))
+    if positive_only:
+        Mf = ops.where(Mf > 0, Mf, -np.inf)
+    kth = np.partition(Mf, C - n, axis=1)[:, C - n][:, None]
+    return (Mf >= kth) & ops.isfinite(Mf)
+
+
 def _scatter_knn(
     labels: np.ndarray, scores: np.ndarray, n_classes: int, ops: Optional[ArrayOps] = None
 ):

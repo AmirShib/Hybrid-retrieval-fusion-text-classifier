@@ -104,6 +104,133 @@ class EncoderConfig:
     reuse_query_embeddings: str = "auto"
 
 
+# --------------------------------------------------------------- cross-encoder
+# T33. Which class-side text a rendered evidence slot draws on. Each name maps to
+# a `ClassDefinition` accessor (see `infrastructure/reranker.py::_EVIDENCE`); the
+# tuple-valued ones ("examples"/"inclusions"/"exclusions"/"siblings") hold several
+# short strings and so support per-query `select`, while the scalar views
+# ("description"/"core") are a single document with nothing to choose between.
+CROSS_ENCODER_VIEWS = (
+    "description",
+    "core",
+    "examples",
+    "inclusions",
+    "exclusions",
+    "siblings",
+)
+# How to pick among a tuple-valued view's entries for one query. "best" is
+# query-adaptive (the entry most like the item text) and is the point of the
+# exercise: a class with six example phrases has six different doors in, and
+# which one fits depends on the query. For a *negative* view "best" also means
+# "the hardest negative" — the exclusion most at risk of being confused.
+CROSS_ENCODER_SELECT_MODES = ("best", "all", "first")
+
+
+@dataclass
+class EvidenceSpec:
+    """One rendered slot of a cross-encoder document (T33).
+
+    ``max_chars`` is a per-slot budget, not a document-level one, deliberately:
+    formal taxonomy definitions run to paragraphs, and truncating the *document*
+    would chop its tail — which in the natural ordering is the negative evidence,
+    silently deleting the one thing this signal exists to add. Budgeting per slot
+    keeps every slot represented in a long document."""
+
+    view: str = "description"
+    select: str = "best"
+    label: str = ""  # rendered prefix, e.g. "Excludes: "
+    max_chars: int = 300
+
+
+@dataclass
+class CrossEncoderDocument:
+    """One document scored per (item, candidate), and therefore one ``(b, C)``
+    signal matrix and one full set of derived columns (T33).
+
+    Splitting evidence across documents versus composing it into one is the
+    central knob here, and it is *config* rather than code because the right
+    answer depends on the backend. A stock relevance cross-encoder cannot know
+    that a span is a prohibition — overlap reads as relevance — so composing
+    exclusions into the positive document would invert the signal. An instructed
+    LLM judge or a purpose-trained cross-encoder can be told, and for those the
+    composed single-document form is better. Both are reachable from here."""
+
+    name: str = "pos"  # -> node "ce.<name>", column suffix
+    evidence: List[EvidenceSpec] = field(default_factory=lambda: [EvidenceSpec()])
+    instruction: str = ""  # prepended to the document; the LLM-judge affordance
+    join: str = "\n"
+    top_k: int = 10  # rerank only this many shortlisted candidates per item
+
+    def __post_init__(self) -> None:
+        self.evidence = [
+            EvidenceSpec(**e) if isinstance(e, dict) else e  # type: ignore[arg-type]
+            for e in self.evidence
+        ]
+
+
+def _default_documents() -> List[CrossEncoderDocument]:
+    """The recommended default: positive identity composed into one document,
+    negative evidence scored separately.
+
+    The negative is *not* composed in, for the backend reason in
+    ``CrossEncoderDocument``'s docstring. Read alone, a high ``ce_neg`` means
+    "this item resembles what the class rules out", which is unambiguous whatever
+    the backend — and it is separately visible to the fusion model, which matters
+    because "matched the description but got vetoed" is exactly when the system
+    should abstain rather than guess."""
+    return [
+        CrossEncoderDocument(
+            name="pos",
+            evidence=[
+                EvidenceSpec(view="core", select="first"),
+                EvidenceSpec(view="examples", select="best", label="For example: "),
+            ],
+        ),
+        CrossEncoderDocument(
+            name="neg",
+            evidence=[
+                EvidenceSpec(view="exclusions", select="best", label="Excludes: "),
+                EvidenceSpec(view="siblings", select="best", label="Distinguish from: "),
+            ],
+        ),
+    ]
+
+
+@dataclass
+class CrossEncoderConfig:
+    """The cross-encoder rerank signal (T33). Reached by adding
+    ``"cross-encoder"`` to ``PipelineConfig.signals``; this block alone does
+    nothing, so the default is inert and the system stays byte-for-byte
+    identical until the signal is switched on."""
+
+    # Registry key (see `register_reranker`). "token-overlap" is the offline,
+    # dependency-free stand-in — the reranker analogue of `encoder.kind
+    # = "hashing"` — and is the only backend registered today, hence the
+    # default. T33 phase 3 adds the real "cross-encoder" backend.
+    kind: str = "token-overlap"
+    model_name: str = ""  # backend-specific; unused by "token-overlap"
+    batch_size: int = 32
+    device: Optional[str] = None
+    # Which round-one signal ranks the shortlist to pick each document's
+    # `top_k`. Already computed, so consulting it is free.
+    prescore_node: str = "dense.desc"
+    documents: List[CrossEncoderDocument] = field(default_factory=_default_documents)
+    # Pairs of document names to emit an explicit difference column for
+    # (`ce_<a>_<b>_gap`). The fusion model splits on one feature at a time and
+    # cannot learn `ce_pos - ce_neg` itself, so the comparison that actually
+    # discriminates — "matches the definition, but matches the exclusions
+    # better" — has to be handed to it. Same reasoning as `desc_proto_gap`.
+    gaps: List[List[str]] = field(default_factory=lambda: [["pos", "neg"]])
+    params: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.documents = [
+            CrossEncoderDocument(**d) if isinstance(d, dict) else d  # type: ignore[arg-type]
+            for d in self.documents
+        ]
+        self.gaps = [list(g) for g in self.gaps]
+
+
 @dataclass
 class RetrievalConfig:
     k_neighbors: int = 20
@@ -145,6 +272,17 @@ class RetrievalConfig:
     # the original single-threaded behaviour, byte-for-byte; -1 uses
     # os.cpu_count().
     bm25_n_jobs: int = 1
+    # T33: the cross-encoder rerank signal's settings. Lives here (rather than on
+    # PipelineConfig) because `SignalProviderSpec.build` already receives a
+    # RetrievalConfig, so a signal backend reaches its own config without
+    # widening a spec signature shared with every other signal provider.
+    # Populated by default but *inert*: nothing reads it until "cross-encoder"
+    # is added to `PipelineConfig.signals`.
+    cross_encoder: CrossEncoderConfig = field(default_factory=CrossEncoderConfig)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.cross_encoder, dict):
+            self.cross_encoder = CrossEncoderConfig(**self.cross_encoder)
 
 
 @dataclass
@@ -345,6 +483,11 @@ class PipelineConfig:
         else:
             n_folds_ok = self.training.n_folds >= 3
             n_folds_constraint = ">= 3 (one train fold + one calibration fold + one test fold)"
+        # T33: hoisted so the cross-encoder checks below stay one-liners.
+        ce = self.retrieval.cross_encoder
+        ce_doc_names = {d.name for d in ce.documents}
+        ce_views = {e.view for d in ce.documents for e in d.evidence}
+        ce_selects = {e.select for d in ce.documents for e in d.evidence}
         checks = [
             # fold_roles() needs >=1 train fold + 1 calibration + 1 test; with
             # n_folds=2 the fusion training set is silently empty. External
@@ -490,6 +633,70 @@ class PipelineConfig:
                 self.signals,
                 len(set(self.signals)) == len(self.signals),
                 "free of duplicates",
+            ),
+            # T33. Checked unconditionally, not only when "cross-encoder" is in
+            # `signals`: a typo in a block that is currently switched off should
+            # surface now, not the day someone switches it on.
+            (
+                "retrieval.cross_encoder.batch_size",
+                ce.batch_size,
+                ce.batch_size >= 1,
+                ">= 1",
+            ),
+            (
+                "retrieval.cross_encoder.documents",
+                [d.name for d in ce.documents],
+                bool(ce.documents)
+                and all(isinstance(d.name, str) and d.name.strip() for d in ce.documents),
+                "a non-empty list of documents with non-empty names",
+            ),
+            (
+                "retrieval.cross_encoder.documents",
+                [d.name for d in ce.documents],
+                len(ce_doc_names) == len(ce.documents),
+                "free of duplicate document names (each names one signal node)",
+            ),
+            (
+                "retrieval.cross_encoder.documents[].top_k",
+                [d.top_k for d in ce.documents],
+                all(d.top_k >= 1 for d in ce.documents),
+                ">= 1 for every document",
+            ),
+            (
+                "retrieval.cross_encoder.documents[].evidence",
+                [len(d.evidence) for d in ce.documents],
+                all(d.evidence for d in ce.documents),
+                "at least one evidence slot per document",
+            ),
+            (
+                "retrieval.cross_encoder.documents[].evidence[].view",
+                sorted(ce_views),
+                ce_views <= set(CROSS_ENCODER_VIEWS),
+                f"drawn from {list(CROSS_ENCODER_VIEWS)}",
+            ),
+            (
+                "retrieval.cross_encoder.documents[].evidence[].select",
+                sorted(ce_selects),
+                ce_selects <= set(CROSS_ENCODER_SELECT_MODES),
+                f"one of {list(CROSS_ENCODER_SELECT_MODES)}",
+            ),
+            (
+                "retrieval.cross_encoder.documents[].evidence[].max_chars",
+                [e.max_chars for d in ce.documents for e in d.evidence],
+                all(e.max_chars >= 1 for d in ce.documents for e in d.evidence),
+                ">= 1 for every evidence slot",
+            ),
+            (
+                "retrieval.cross_encoder.gaps",
+                ce.gaps,
+                all(len(g) == 2 for g in ce.gaps),
+                "a list of [document_a, document_b] pairs",
+            ),
+            (
+                "retrieval.cross_encoder.gaps",
+                ce.gaps,
+                all(name in ce_doc_names for g in ce.gaps for name in g),
+                f"referring only to configured document names {sorted(ce_doc_names)}",
             ),
         ]
         problems = [

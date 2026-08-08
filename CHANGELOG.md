@@ -8,6 +8,48 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 
 ## [Unreleased]
 
+### Added
+- **Cross-encoder rerank signal (T33, phase 1) — opt-in, off by default.** Adds a
+  second signal *round* to `FeatureAssembler`: a `SignalProvider` may now declare
+  `needs_candidates = True` and run after candidate selection, receiving the
+  shortlist (`SignalContext.candidates`) instead of scoring all `C` classes. That
+  is what a reranker needs and what the assembler could not express — every
+  provider previously ran before the mask existed. A second-round provider must
+  declare no `candidate_features` (it cannot select what it consumes; the
+  assembler rejects the combination), and that restriction is what makes it safe
+  to skip such a provider entirely when every one of its columns is pruned — so
+  dropping the `ce_*` columns costs *zero* cross-encoder calls, asserted as a
+  call count.
+
+  Enabled with `"cross-encoder"` in `PipelineConfig.signals`. It is the first
+  consumer of the structured taxonomy fields: each candidate is scored against
+  documents rendered from `core`/`examples`/`inclusions`/`exclusions`/`siblings`
+  views, with the entry most like the query selected per item. The default plan
+  scores positive identity and negative evidence (`exclusions` +
+  `sibling_distinctions`) **separately**, plus an explicit `ce_pos_neg_gap`
+  difference column — a stock relevance cross-encoder cannot tell that a span is
+  a prohibition, so composing negatives into one document would invert the
+  signal; an instructed LLM judge or a purpose-trained model can, and reaching
+  that is a config change (`retrieval.cross_encoder.documents`), not a rewrite.
+  Backends plug in behind the new `PairwiseReranker` port; `token-overlap` (no
+  model, no network, deterministic) is the only one registered so far.
+
+  A class with no exclusions yields `NaN`, never `0.0` — an absent view is
+  absent, not evidence of a poor match (the `NaN` invariant, at the text layer).
+  With the signal off, output, schema and on-disk layout are byte-for-byte
+  unchanged; no torch is imported either way.
+
+### Fixed
+- **`fusion.drop_features` could not name a provider column.** `TrainingPipeline`
+  validated the drop list at construction against the *core-only* schema, before
+  any `FeatureProvider`/`SignalProvider` existed, so dropping a custom provider's
+  column raised "cannot drop unknown feature(s)" before the run started — even
+  though the per-fold and deployment paths both compute the correct composed
+  schema. Pre-existing since custom providers landed; surfaced by T33's `ce_*`
+  columns. The eager computation is removed (building providers early just to
+  read `column_names()` would load a real cross-encoder to validate a string);
+  the real schema is still computed and validated before any consumer reads it.
+
 ### Changed
 - **Retrieval-index construction extracted into `RetrievalIndexBuilder`
   (`application/indexing.py`)** — `TrainingPipeline` stated the same index-build

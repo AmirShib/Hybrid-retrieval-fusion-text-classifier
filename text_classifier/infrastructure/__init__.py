@@ -24,6 +24,7 @@ from .fusion import (
     XGBRankerFusionModel,
 )
 from .persistence import ArtifactRepository, DeployedArtifacts
+from .reranker import CrossEncoderSignalProvider, TokenOverlapReranker
 from .registry import (
     ArrayOpsSpec,
     CalibratorSpec,
@@ -32,6 +33,7 @@ from .registry import (
     FeatureProviderSpec,
     FusionSpec,
     LexicalRetrieverSpec,
+    RerankerSpec,
     SignalProviderSpec,
     array_ops_spec,
     build_array_ops,
@@ -54,8 +56,10 @@ from .registry import (
     register_feature_provider,
     register_fusion,
     register_lexical_retriever,
+    register_reranker,
     register_signal_provider,
     registered_array_ops_kinds,
+    reranker_spec,
     signal_provider_spec,
 )
 from .retrieval import (
@@ -88,6 +92,11 @@ __all__ = [
     "ArtifactRepository",
     "DeployedArtifacts",
     "ClassKeywordOverlapProvider",
+    "CrossEncoderSignalProvider",
+    "TokenOverlapReranker",
+    "RerankerSpec",
+    "register_reranker",
+    "reranker_spec",
     "EncoderSpec",
     "FusionSpec",
     "CalibratorSpec",

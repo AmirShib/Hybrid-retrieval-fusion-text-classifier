@@ -128,7 +128,19 @@ class TrainingPipeline:
         # composed feature schema (core + provider columns). Populated when the
         # deployment index is built; the fusion/eval steps select X by this list.
         self._providers: List[FeatureProvider] = []
-        self._feature_names: List[str] = fusion_feature_names(drop=self.cfg.fusion.drop_features)
+        # Deliberately *not* computed here. The composed schema is only knowable
+        # once the FeatureProviders and SignalProviders exist, and this used to
+        # be seeded with `fusion_feature_names(drop=...)` — the core-only
+        # schema — which rejected a `drop_features` entry naming any provider
+        # column before the run could start (a custom FeatureProvider's, or a
+        # signal's; T33's `ce_*` columns are what surfaced it). Building
+        # providers early just to read `column_names()` is not the fix either:
+        # a reranker or a corpus-fitted encoder would be constructed, and a real
+        # cross-encoder backend would load a model, purely to validate a string.
+        # `_build_oof` (per fold) and `_build_deployment_index` both compute and
+        # validate the real composed list, and every reader below runs after
+        # them, so the deferral costs no safety.
+        self._feature_names: List[str] = []
         # T34 phase 2: the SignalProviders that ship in the deployed model,
         # built once (on all training data) by `_build_deployment_index` and
         # reused by `_featurize_external`/the returned `DeployedArtifacts`,

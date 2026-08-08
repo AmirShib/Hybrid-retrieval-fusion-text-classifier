@@ -30,6 +30,7 @@ import numpy as np
 
 from ..config import (
     CalibrationConfig,
+    CrossEncoderConfig,
     EncoderConfig,
     FeatureProviderConfig,
     FeaturesConfig,
@@ -45,6 +46,7 @@ from ..domain import (
     LabeledItem,
     LabelSpace,
     LexicalRetriever,
+    PairwiseReranker,
     SignalProvider,
     TextEncoder,
 )
@@ -66,6 +68,7 @@ from .fusion import (
     XGBoostFusionModel,
     XGBRankerFusionModel,
 )
+from .reranker import CrossEncoderSignalProvider, TokenOverlapReranker
 from .retrieval import DenseRetrieverAdapter, LexicalRetrieverAdapter
 from .signals import DenseSignalProvider, LexicalSignalProvider
 
@@ -169,6 +172,21 @@ class SignalProviderSpec:
 
 
 @dataclass(frozen=True)
+class RerankerSpec:
+    """How to build/persist a ``PairwiseReranker`` (T33).
+
+    Separate from ``SignalProviderSpec`` on purpose: the *signal* decides which
+    pairs to score and what the columns are called, the *reranker* only scores
+    pairs. So swapping a stock cross-encoder for a fine-tuned one or an
+    instructed LLM judge is a `retrieval.cross_encoder.kind` change with no
+    effect on the schema, and one reranker backend can serve several document
+    plans."""
+
+    build: Callable[[CrossEncoderConfig], PairwiseReranker]
+    load: Callable[[str, CrossEncoderConfig], PairwiseReranker]
+
+
+@dataclass(frozen=True)
 class ArrayOpsSpec:
     """How to build an ``ArrayOps`` backend. Unlike the other specs there is
     nothing to persist: the backend is a pure execution choice (T84), never a
@@ -186,6 +204,7 @@ _ARRAY_OPS: Dict[str, ArrayOpsSpec] = {}
 _DENSE_RETRIEVERS: Dict[str, DenseRetrieverSpec] = {}
 _LEXICAL_RETRIEVERS: Dict[str, LexicalRetrieverSpec] = {}
 _SIGNAL_PROVIDERS: Dict[str, SignalProviderSpec] = {}
+_RERANKERS: Dict[str, RerankerSpec] = {}
 
 _T = TypeVar("_T")
 
@@ -220,6 +239,10 @@ def register_lexical_retriever(name: str, spec: LexicalRetrieverSpec) -> None:
 
 def register_signal_provider(name: str, spec: SignalProviderSpec) -> None:
     _SIGNAL_PROVIDERS[name] = spec
+
+
+def register_reranker(name: str, spec: RerankerSpec) -> None:
+    _RERANKERS[name] = spec
 
 
 def _lookup(registry: Mapping[str, _T], name: str, what: str) -> _T:
@@ -266,6 +289,14 @@ def lexical_retriever_spec(kind: str) -> LexicalRetrieverSpec:
 
 def signal_provider_spec(kind: str) -> SignalProviderSpec:
     return _lookup(_SIGNAL_PROVIDERS, kind, "signal provider")
+
+
+def reranker_spec(kind: str) -> RerankerSpec:
+    return _lookup(_RERANKERS, kind, "reranker")
+
+
+def build_reranker(config: CrossEncoderConfig) -> PairwiseReranker:
+    return reranker_spec(config.kind).build(config)
 
 
 # ------------------------------------------------------------------- factories
@@ -580,6 +611,35 @@ register_signal_provider(
         build=lambda cfg, dense, lexical, ops: LexicalSignalProvider(lexical, ops),
         load=lambda directory, cfg: LexicalSignalProvider(
             lexical_retriever_spec(cfg.lexical_kind).load(directory)
+        ),
+    ),
+)
+
+register_reranker(
+    "token-overlap",
+    RerankerSpec(
+        # The offline stand-in -- no model, no network, deterministic. The
+        # reranker counterpart of the "hashing" encoder kind, and what the
+        # test suite and `scripts/demo` exercise the second stage with.
+        build=lambda cfg: TokenOverlapReranker(),
+        load=lambda path, cfg: TokenOverlapReranker.load(path),
+    ),
+)
+
+register_signal_provider(
+    "cross-encoder",
+    SignalProviderSpec(
+        # T33. Ignores `dense`/`lexical`: it reranks candidates the shortlist
+        # already contains and reads its class-side text from the label space
+        # per chunk, so it wraps no retriever and holds no taxonomy state.
+        build=lambda cfg, dense, lexical, ops: CrossEncoderSignalProvider(
+            build_reranker(cfg.cross_encoder), cfg.cross_encoder, ops
+        ),
+        load=lambda directory, cfg: CrossEncoderSignalProvider(
+            reranker_spec(cfg.cross_encoder.kind).load(
+                os.path.join(directory, "signals", "cross-encoder"), cfg.cross_encoder
+            ),
+            cfg.cross_encoder,
         ),
     ),
 )

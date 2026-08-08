@@ -86,8 +86,14 @@ retrieval) each plug a real backend into that seam without touching the pipeline
 or persistence.
 
 **Optionality note (T33):** The cross-encoder is a 6th retrieval *signal*, not a
-fusion swap. It depends only on T03 (feature assembly). When absent (default), the
-system is byte-for-byte identical to today. T33 does NOT depend on T23.
+fusion swap. When absent (default), the system is byte-for-byte identical to
+today. T33 does NOT depend on T23. Its dependencies were **restated 2026-08-08**
+when the ticket was rewritten: T34 phase 2 (it is a `SignalProvider`), T87 (its
+demand gating is what makes turning it off free), and d4109d9 (the structured
+taxonomy fields are the texts it scores against — that commit shipped the data
+layer with no consumer, and this is the consumer). The rewritten ticket does not
+touch `FEATURE_NAMES`, `TrainingPipeline` or `ArtifactRepository`; its one
+structural change is a second, post-candidate stage in `FeatureAssembler`.
 
 ## Tier 3 — Retrieval & signals (T30 done; rest specified, pick up in any order)
 
@@ -100,7 +106,7 @@ signal once T34 phase 2 lands.
 | T30 | 3    | Vectorize `InferencePipeline.predict` (drop the `.iterrows()` loop)            | done |
 | T31 | 3    | Optional FAISS/ANN backend behind the `DenseRetriever` port (needs T23)        | todo |
 | T32 | ~~3~~ 8 | BM25 memory profile for large corpora — **re-scoped to memory + throughput, moved to Tier 8** | in-review |
-| T33 | 3    | Optional cross-encoder reranker as 6th retrieval signal (needs T03, optional)  | todo |
+| T33 | 3    | Cross-encoder rerank as a second-stage, multi-view signal (rewritten 2026-08-08) | todo |
 | T34 | 3    | Pluggable retrieval signals + retrievers behind the registry (needs T23, T03)  | in-review (phase 1 + phase 2 landed 2026-08-05) |
 | T35 | 3    | Language-neutral BM25 defaults (drop hidden English stopwords)                | done |
 | T81 | 3    | Competition features: per-candidate margins + per-query top1−top2 gap (needs T03) | in-review |

@@ -259,6 +259,7 @@ def test_builtin_providers_declare_every_column_they_name():
             q_emb=artifacts.encoder.encode_queries(texts),
             k=cfg.retrieval.k_neighbors,
             n_classes=artifacts.label_space.size,
+            label_space=artifacts.label_space,
         )
         for sm in provider.build(ctx):
             for derivation in sm.derive:
