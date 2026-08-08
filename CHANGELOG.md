@@ -40,6 +40,16 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
   unchanged; no torch is imported either way.
 
 ### Fixed
+- **`_topn_mask` (candidate selection) reached past the `ArrayOps` port and
+  raised under a torch backend.** It called `M.astype` (which torch tensors do
+  not have) and `np.partition` on what may be a tensor, then compared that numpy
+  result against the tensor it came from. Both are now port calls (`asarray`,
+  `topk` — the nth-best value is the same threshold `partition`'s pivot gave).
+  Latent rather than user-visible: `TrainingPipeline._assembler_ops` pins the
+  whole feature-assembly layer to numpy until T86, so nothing reached it. Numpy
+  output is unchanged — verified bit-identical over 6000 randomized cases
+  covering NaN, exact ties, all-NaN rows, all-non-positive rows and `k > C`, on
+  top of the golden-output benchmarks.
 - **`fusion.drop_features` could not name a provider column.** `TrainingPipeline`
   validated the drop list at construction against the *core-only* schema, before
   any `FeatureProvider`/`SignalProvider` existed, so dropping a custom provider's

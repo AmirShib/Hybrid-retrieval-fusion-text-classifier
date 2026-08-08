@@ -549,6 +549,54 @@ def test_enabling_the_signal_leaves_every_core_column_identical(tmp_path):
         ), f"core column {col} changed when the cross-encoder was enabled"
 
 
+def test_array_backend_parity():
+    """The provider computes through `ArrayOps`, so it produces identical
+    matrices under either backend.
+
+    The feature-assembly layer is pinned to numpy today by deliberate decision
+    (`TrainingPipeline._assembler_ops`, T85 — T86 is what makes it
+    backend-polymorphic), so this does not exercise a GPU path that exists yet.
+    It exists so the provider *moves with* T86 rather than becoming another site
+    that has to be rewritten: the two numeric steps (top-n selection, scattering
+    scores into the matrix) go through the port, and the only host transfers are
+    the two explicit `to_host` calls around the text rendering, which cannot run
+    on a device at all."""
+    torch = pytest.importorskip("torch")  # noqa: F841
+    from text_classifier.infrastructure.array_ops import NumpyArrayOps
+    from text_classifier.infrastructure.array_ops_torch import TorchArrayOps
+
+    space = LabelSpace(CLASSES)
+    texts = ["supermarket grocery food store", "bakery plant manufacture food", "garage repair"]
+    mask = np.ones((len(texts), len(CLASSES)), dtype=bool)
+    rows, cols = np.nonzero(mask)
+    cand = CandidateView(
+        mask=mask,
+        rows=rows,
+        cols=cols,
+        signals={"dense.desc": np.array([[0.9, 0.5, 0.1], [0.2, 0.8, 0.1], [0.1, 0.2, 0.7]])},
+    )
+
+    def _matrices(ops):
+        ctx = SignalContext(
+            texts=texts,
+            q_emb=np.zeros((len(texts), 4), dtype=np.float32),
+            k=5,
+            n_classes=len(CLASSES),
+            label_space=space,
+            candidates=cand,
+        )
+        provider = CrossEncoderSignalProvider(TokenOverlapReranker(), ops=ops)
+        return {m.node: m.value for m in provider.build(ctx)}
+
+    on_numpy = _matrices(NumpyArrayOps())
+    on_torch = _matrices(TorchArrayOps(device="cpu"))
+    assert set(on_numpy) == set(on_torch)
+    for node, value in on_numpy.items():
+        # Handed to the assembler on the host either way, matching `_scatter_knn`.
+        assert isinstance(on_torch[node], np.ndarray)
+        assert np.array_equal(value, on_torch[node], equal_nan=True), node
+
+
 def test_config_round_trip_with_and_without_the_block():
     default = PipelineConfig()
     assert PipelineConfig.from_dict(default.to_dict()) == default

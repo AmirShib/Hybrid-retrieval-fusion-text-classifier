@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -99,45 +99,72 @@ _EVIDENCE = {
 }
 
 
-def _select(entries: Sequence[str], spec: EvidenceSpec, query_tokens: frozenset) -> str:
-    """Render one evidence slot for one query.
+# One resolved evidence slot for one class. Either a finished string (the slot
+# does not depend on the query) or the candidates to choose between at scoring
+# time, pre-tokenized.
+_Slot = Union[str, Tuple[EvidenceSpec, Tuple[Tuple[str, frozenset], ...]]]
 
-    ``"best"`` is the query-adaptive mode and the reason this function takes a
-    query at all: a class with several example phrases has several different
-    doors in, and which one fits depends on the item being classified. For a
-    negative view it selects the *hardest* negative — the exclusion most like
-    the query is the one actually at risk of being confused with it.
+
+def _plan_class(definition: ClassDefinition, doc: CrossEncoderDocument) -> List[_Slot]:
+    """Resolve one class's slots for one document, independent of any query.
+
+    Everything that does not vary per query is finished here — including the
+    ``"first"``/``"all"`` modes, which never consult the query at all — and the
+    entries of a ``"best"`` slot are tokenized once. This runs ``C`` times per
+    chunk rather than once per scored *pair*, which is the difference between
+    tokenizing a taxonomy's evidence a few dozen times and tokenizing it tens of
+    thousands of times: the selection input depends only on the class, so doing
+    it per pair was pure repeat work."""
+    plan: List[_Slot] = []
+    for spec in doc.evidence:
+        entries = tuple(e for e in _EVIDENCE[spec.view](definition) if e)
+        if not entries:
+            plan.append("")  # absent view -> contributes nothing, never a bare label
+        elif spec.select == "all":
+            plan.append(spec.label + "; ".join(entries)[: spec.max_chars])
+        elif spec.select == "first" or len(entries) == 1:
+            plan.append(spec.label + entries[0][: spec.max_chars])
+        else:  # "best" -- the only query-dependent mode
+            plan.append((spec, tuple((e, _tokens(e)) for e in entries)))
+    return plan
+
+
+def _render_plan(plan: Sequence[_Slot], doc: CrossEncoderDocument, query_tokens: frozenset) -> str:
+    """Finish a planned document for one query, or ``""`` when this class has
+    nothing to say through any of the document's views.
+
+    An empty return is the caller's signal to leave the cell NaN rather than
+    score against a document that does not exist.
+
+    ``"best"`` is the query-adaptive mode and the reason this step takes a query
+    at all: a class with several example phrases has several different doors in,
+    and which one fits depends on the item being classified. For a negative view
+    it picks the *hardest* negative — the exclusion most like the query is the
+    one actually at risk of being confused with it.
 
     Selection is lexical (token overlap) rather than embedding-based because
     ``SignalProviderSpec.build`` receives no encoder; see T33's design note. It
     is a defensible selector for picking among a handful of short phrases, and
     it keeps this provider stateless with nothing to persist."""
-    if not entries:
-        return ""
-    if spec.select == "all":
-        text = "; ".join(entries)
-    elif spec.select == "first" or len(entries) == 1:
-        text = entries[0]
-    else:  # "best"
-        text = max(entries, key=lambda e: len(query_tokens & _tokens(e)))
-    return text[: spec.max_chars]
-
-
-def _render(definition: ClassDefinition, doc: CrossEncoderDocument, query_tokens: frozenset) -> str:
-    """The document text for one (query, class) pair, or ``""`` when this class
-    has nothing to say through any of the document's views.
-
-    An empty return is the caller's signal to leave the cell NaN rather than
-    score against a document that does not exist."""
     parts = []
-    for spec in doc.evidence:
-        rendered = _select(_EVIDENCE[spec.view](definition), spec, query_tokens)
-        if rendered:
-            parts.append(spec.label + rendered)
+    for slot in plan:
+        if isinstance(slot, str):
+            if slot:
+                parts.append(slot)
+            continue
+        spec, candidates = slot
+        text, _ = max(candidates, key=lambda e: len(query_tokens & e[1]))
+        parts.append(spec.label + text[: spec.max_chars])
     if not parts:
         return ""
     body = doc.join.join(parts)
     return f"{doc.instruction}{doc.join}{body}" if doc.instruction else body
+
+
+def _render(definition: ClassDefinition, doc: CrossEncoderDocument, query_tokens: frozenset) -> str:
+    """``_plan_class`` + ``_render_plan`` for a single class — the one-shot form,
+    for callers with no chunk to amortize the plan over (and for tests)."""
+    return _render_plan(_plan_class(definition, doc), doc, query_tokens)
 
 
 class CrossEncoderSignalProvider(SignalProvider):
@@ -225,12 +252,19 @@ class CrossEncoderSignalProvider(SignalProvider):
         definitions = ctx.label_space.definitions
         prescore = cand.signals.get(self._cfg.prescore_node)
 
-        values = {
-            doc.name: self._score_document(
-                doc, cand, prescore, ctx.texts, query_tokens, definitions, shape
+        # One top-n selection per *distinct* top_k rather than per document:
+        # documents sharing a top_k (the default pos/neg pair does) select the
+        # same cells, and the selection is an O(b*C) partition over the same
+        # prescore matrix. Keyed only by top_k because `prescore` is fixed for
+        # the whole provider.
+        grids: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
+        values = {}
+        for doc in self._cfg.documents:
+            if doc.top_k not in grids:
+                grids[doc.top_k] = self._rerank_grid(doc.top_k, cand, prescore)
+            values[doc.name] = self._score_document(
+                doc, grids[doc.top_k], ctx.texts, query_tokens, definitions, shape
             )
-            for doc in self._cfg.documents
-        }
         # Cross-document differences, gathered at the same (rows, cols) grid as
         # everything else. They belong to no single document, so they ride on
         # the first matrix as plain extra columns rather than being derived.
@@ -257,61 +291,93 @@ class CrossEncoderSignalProvider(SignalProvider):
     def _score_document(
         self,
         doc: CrossEncoderDocument,
-        cand,
-        prescore: Optional[np.ndarray],
+        grid: Tuple[np.ndarray, np.ndarray],
         texts: Sequence[str],
         query_tokens: List[frozenset],
         definitions: Sequence[ClassDefinition],
         shape: Tuple[int, int],
     ) -> np.ndarray:
         """One document's ``(b, C)`` matrix: NaN except where actually scored."""
-        M = np.full(shape, np.nan, dtype=np.float64)
-        rows, cols = self._rerank_grid(doc, cand, prescore)
-        if rows.size == 0:
-            return M
+        rows, cols = grid
+        # Resolve each class's slots once for this chunk, not once per pair --
+        # the evidence depends on the class alone (see `_plan_class`). Only the
+        # classes actually selected are planned.
+        plans = {int(c): _plan_class(definitions[c], doc) for c in np.unique(cols)}
 
         # Render the pairs for the selected cells. This is the one Python-level
         # loop in the provider, and it is the right trade: O(pairs) string
         # assembly feeding a model that costs orders of magnitude more per pair,
-        # doing work (text rendering) that does not vectorize anyway.
+        # doing work (text rendering) that cannot vectorize and cannot run on a
+        # device at all. Everything numeric on either side of it stays in the
+        # array backend.
         pairs: List[Tuple[str, str]] = []
         scored_rows: List[int] = []
         scored_cols: List[int] = []
         for r, c in zip(rows.tolist(), cols.tolist()):
-            document = _render(definitions[c], doc, query_tokens[r])
+            document = _render_plan(plans[c], doc, query_tokens[r])
             if not document:
                 continue  # class has nothing to say here -> stays NaN, never 0
             pairs.append((texts[r], document))
             scored_rows.append(r)
             scored_cols.append(c)
-        if not pairs:
-            return M
 
-        scores = np.asarray(self._reranker.score(pairs), dtype=np.float64)
-        if scores.shape != (len(pairs),):
+        scores = np.asarray(self._reranker.score(pairs), dtype=np.float64) if pairs else []
+        if pairs and np.shape(scores) != (len(pairs),):
             raise ValueError(
-                f"{type(self._reranker).__name__}.score returned shape {scores.shape} for "
+                f"{type(self._reranker).__name__}.score returned shape {np.shape(scores)} for "
                 f"{len(pairs)} pairs; expected exactly one score per pair, i.e. "
                 f"({len(pairs)},). PairwiseReranker.score must preserve input order and "
                 "length."
             )
-        M[scored_rows, scored_cols] = scores
-        return M
+        return self._scatter(shape, scored_rows, scored_cols, scores)
+
+    def _scatter(self, shape, rows, cols, values) -> np.ndarray:
+        """Place ``values`` at ``(rows, cols)`` in an otherwise-NaN ``(b, C)``
+        matrix, through the array backend.
+
+        Routed through ``ArrayOps.scatter_add`` rather than fancy-index
+        assignment so the matrix is built wherever the configured backend lives
+        (T84/T85) instead of forcing a numpy allocation into an otherwise
+        device-resident pipeline. The scored-cell mask comes from a second
+        scatter of ones, exactly as ``_scatter_knn`` distinguishes "summed to
+        zero" from "never written" — a cell nothing wrote must stay NaN, never
+        become the 0.0 the accumulator started at.
+
+        The trailing ``to_host`` matches ``_scatter_knn``'s: the assembler's
+        derivation kernels are not device-resident yet (T86), so every signal
+        matrix is handed over on the host today. When that changes this call is
+        the single line to revisit — which is exactly why the port makes it the
+        one sanctioned exit."""
+        ops = self._ops
+        empty = len(rows) == 0
+        total = ops.zeros(shape, dtype=np.float64)
+        count = ops.zeros(shape, dtype=np.float64)
+        if not empty:
+            total = ops.scatter_add(total, rows, cols, values)
+            count = ops.scatter_add(count, rows, cols, np.ones(len(rows), dtype=np.float64))
+        return ops.to_host(ops.where(count > 0, total, np.nan))
 
     def _rerank_grid(
-        self, doc: CrossEncoderDocument, cand, prescore: Optional[np.ndarray]
+        self, top_k: int, cand, prescore: Optional[np.ndarray]
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Which shortlisted cells this document reranks: the ``top_k`` best per
-        query by ``prescore_node``, intersected with the shortlist.
+        """Which shortlisted cells to rerank: the ``top_k`` best per query by
+        ``prescore_node``, intersected with the shortlist.
 
         Falls back to the whole shortlist when the prescoring node is absent
         (a config where the ranking signal was switched off) — correct, just
         more expensive, and the alternative would be silently reranking nothing.
-        """
+
+        The ``to_host`` here is deliberate and is the provider's *only* other
+        exit from the array backend: the selection itself is computed by the
+        backend (``_topn_mask`` takes ``ops``), but the resulting indices drive
+        a Python loop over text, so they have to land on the host. Doing it as
+        one explicit call keeps the transfer greppable rather than smuggled in
+        by an implicit ``np.asarray`` somewhere in the loop."""
         if prescore is None:
             return cand.rows, cand.cols
-        selected = cand.mask & _topn_mask(prescore, doc.top_k, ops=self._ops)
-        return np.nonzero(selected)
+        ops = self._ops
+        selected = ops.asarray(cand.mask) & _topn_mask(prescore, top_k, ops=ops)
+        return np.nonzero(ops.to_host(selected))
 
     # ---- persistence ------------------------------------------------------
     def save(self, path: str) -> None:

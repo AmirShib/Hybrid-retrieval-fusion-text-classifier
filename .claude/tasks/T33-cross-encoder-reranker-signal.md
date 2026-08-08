@@ -361,6 +361,64 @@ Notes on what deviated or was learned:
   round-one matrices is what lets `top_k` be selected against an already-computed
   ranking rather than an arbitrary slice of the shortlist, at zero cost.
 
+### Array-backend discipline (reviewed 2026-08-08)
+
+The provider computes through `ArrayOps`, not raw numpy: the two numeric steps
+(the top-n selection and scattering scores into the `(b, C)` matrix) are port
+calls, and the matrix is built by `scatter_add` onto `zeros` — with a second
+scatter of ones as the written-cell mask, exactly as `_scatter_knn` separates
+"summed to zero" from "never written" — rather than by allocating `np.full` and
+fancy-index assigning into it.
+
+**This does not exercise a device path that exists yet, and the ticket should
+not claim it does.** `TrainingPipeline._assembler_ops` (`training.py:118-123`)
+pins the entire feature-assembly layer to numpy by T85's own deliberate
+decision; T86 is what makes it backend-polymorphic. So the provider runs on the
+host today like every other signal, and its matrices are handed over on the host
+(the trailing `to_host`, matching `_scatter_knn`). The point of the routing is
+that this provider *moves with* T86 instead of becoming another site that has to
+be rewritten.
+
+Two host transfers are structural, not incidental, and are single explicit
+`to_host` calls so they stay greppable: the rerank grid's indices, and the score
+writeback. Between them sits the pair-rendering loop, which builds *strings* —
+that cannot vectorize and cannot run on a device at all.
+
+Found while auditing this: **`_topn_mask` itself was not port-clean** and raised
+under a torch backend (`M.astype`, and `np.partition` on a possible tensor whose
+numpy result then failed to compare against it). Since it drives candidate
+selection for every signal, that made `array_backend="torch"` broken for the
+assembler in principle — latent only because of the numpy pin above. Fixed via
+`asarray`/`topk`; numpy output verified bit-identical over 6000 randomized cases
+(NaN, exact ties, all-NaN rows, all-non-positive rows, `k > C`).
+
+**Deliberately not touched:** `FeatureAssembler`'s own mask accumulation
+(`mask = np.zeros(...)`; `mask |= ...`; `np.nonzero(mask)`) and the derivation
+kernels (`_row_rank`/`_row_minmax`/`_row_margin`, which allocate raw numpy and
+index it with port results). Those are T86's scope, and half-migrating them
+would leave the layer in a worse state than either end.
+
+**For phase 3 the real device question is different**: the `(b, C)` bookkeeping
+here is small, but the cross-encoder *model* must run on GPU or the signal is
+unusable at any scale. `CrossEncoderConfig.device` exists for that and should
+default to the same `resolve_device` the encoder uses, so the two agree without
+extra config — the same alignment `TorchArrayOps` documents.
+
+### Efficiency (reviewed 2026-08-08)
+
+Two repeat-work items removed in the same pass:
+
+- **Evidence is resolved per class, not per pair.** `_select` used to tokenize
+  every entry of a view for every scored `(query, class)` pair, but the entries
+  depend only on the class. `_plan_class` now runs once per selected class per
+  chunk, and finishes the `"first"`/`"all"` modes outright since they never
+  consult the query. For a 4096-item chunk at `top_k=10` over ~3 entries that is
+  ~120k tokenizations replaced by a few dozen.
+- **One top-n selection per distinct `top_k`, not per document.** The default
+  `pos`/`neg` pair shares a `top_k` and therefore selects the same cells; the
+  grid is computed once and reused, instead of repeating an `O(b*C)` partition
+  over the same prescore matrix per document.
+
 ## Tests
 
 ### Offline (always run)

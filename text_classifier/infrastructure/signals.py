@@ -43,14 +43,23 @@ def _topn_mask(
     ``_scatter_knn`` does (see the module docstring): candidate selection is the
     assembler's own use, but a second-stage ``SignalProvider`` (T33) needs the
     identical top-n rule to pick which candidates are worth its cost, and an
-    infrastructure adapter must not import the application layer."""
+    infrastructure adapter must not import the application layer.
+
+    Fully routed through ``ArrayOps``. It previously reached past the port twice
+    -- ``M.astype`` (which torch tensors do not have) and ``np.partition`` on
+    what may be a tensor, whose numpy result then failed to compare against the
+    tensor it was derived from -- so this kernel, and therefore candidate
+    selection itself, raised under ``array_backend="torch"``. ``topk``'s
+    nth-best value is the same threshold ``partition``'s pivot gave (both are
+    the nth largest in the row), so the numpy backend is bit-identical."""
     ops = ops or NumpyArrayOps()
-    b, C = M.shape
+    C = M.shape[1]
     n = min(n, C)
-    Mf = ops.where(ops.isnan(M), -np.inf, M.astype(np.float64))
+    Mf = ops.where(ops.isnan(M), -np.inf, ops.asarray(M, dtype=np.float64))
     if positive_only:
         Mf = ops.where(Mf > 0, Mf, -np.inf)
-    kth = np.partition(Mf, C - n, axis=1)[:, C - n][:, None]
+    best, _ = ops.topk(Mf, n, axis=1)
+    kth = best[:, n - 1 : n]  # (b, 1): the nth-best value in each row
     return (Mf >= kth) & ops.isfinite(Mf)
 
 
