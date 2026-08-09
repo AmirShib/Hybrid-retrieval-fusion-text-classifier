@@ -27,7 +27,7 @@ import logging
 import os
 import pickle
 from dataclasses import dataclass, field, replace
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -35,8 +35,10 @@ from .._version import __version__
 from ..config import FeatureProviderConfig, PipelineConfig
 from ..domain import (
     AbstentionPolicy,
+    ArrayOps,
     ClassDefinition,
     ConfidenceCalibrator,
+    DenseRetriever,
     FeatureProvider,
     FusionModel,
     LabeledItem,
@@ -45,7 +47,9 @@ from ..domain import (
     TextEncoder,
     fusion_feature_names,
 )
+from .array_ops import resolve_array_backend
 from .registry import (
+    build_array_ops,
     build_signal_providers,
     calibrator_spec,
     dense_retriever_spec,
@@ -175,6 +179,13 @@ class DeployedArtifacts:
     # this in, defaulting to the two built-ins) — the default kept as an empty
     # list here only so direct construction (e.g. in tests) stays valid.
     signal_providers: List[SignalProvider] = field(default_factory=list)
+    # The array backend `dense` and `encoder` were actually placed on, as
+    # *resolved* by `ArtifactRepository.load` — not the request recorded in
+    # `config.array_backend`, which may still say "auto". This is the outcome,
+    # so it is the field to log or assert on when confirming where the dense
+    # matmuls run. Defaults to "numpy" for artifacts built directly (tests, and
+    # `TrainingPipeline`'s in-memory hand-off, which keeps its own backend).
+    array_backend: str = "numpy"
 
     def with_added_classes(self, new_classes: Sequence[NewClass]) -> "DeployedArtifacts":
         """Widen this model's label space with new classes, **without retraining**.
@@ -512,7 +523,12 @@ class ArtifactRepository:
             providers.append(spec.load(os.path.join(directory, entry["path"]), pc))
         return providers
 
-    def load(self, directory: str, device: Optional[str] = None) -> DeployedArtifacts:
+    def load(
+        self,
+        directory: str,
+        device: Optional[str] = None,
+        array_backend: Optional[str] = None,
+    ) -> DeployedArtifacts:
         """Load a trained model directory.
 
         ``device`` (e.g. ``"cuda"``, ``"cpu"``) overrides auto-detection for both
@@ -521,6 +537,18 @@ class ArtifactRepository:
         than letting each component probe ``torch.cuda.is_available()`` for
         itself. ``None`` (the default) keeps auto-detection: the persisted
         ``encoder.device`` (usually unset) and per-call fusion auto-detection.
+
+        ``array_backend`` is the *other* half of "run this on the GPU", and the
+        two are not interchangeable: ``device`` says where the encoder's forward
+        pass and the fusion booster run, while ``array_backend`` says which
+        array library carries everything between them -- the dense index and its
+        matmuls. Pinning ``device="cuda"`` alone leaves the dense retrieval
+        stages on numpy and forces the encoder to copy every batch back to the
+        host, so the GPU encoder feeds a CPU retriever. ``None`` (the default)
+        defers to the persisted ``config.array_backend``; ``"auto"`` resolves
+        from this model's own scale; an explicit ``"numpy"``/``"torch"`` wins
+        outright, matching ``resolve_array_backend``'s explicit-beats-detected
+        rule.
         """
         if not os.path.isdir(directory):
             raise FileNotFoundError(f"model directory not found: {directory!r}")
@@ -576,7 +604,16 @@ class ArtifactRepository:
             if components["lexical"] is None
             else self._load_lexical(directory, components["lexical"])
         )
+        ops = self._resolve_array_ops(config, array_backend, label_space, dense)
+        dense, encoder = self._place_on_backend(ops, dense, encoder)
         # The real SignalProviders, wrapping the now-loaded dense/lexical.
+        #
+        # Deliberately *not* given `ops`: a SignalProvider hands its matrices
+        # straight to `FeatureAssembler`, whose kernels are still numpy-only
+        # (T86's scope), so a device-backed provider would round-trip every
+        # `(b, C)` matrix for nothing. This mirrors `TrainingPipeline` exactly,
+        # which threads its resolved backend into the encoder and the dense
+        # retriever but always passes `_assembler_ops` (numpy) here.
         signal_providers = load_signal_providers(
             directory, config.retrieval, components["signals"], dense, lexical
         )
@@ -600,7 +637,80 @@ class ArtifactRepository:
             abstention,
             feature_providers=feature_providers,
             signal_providers=signal_providers,
+            array_backend=ops.name,
         )
+
+    @staticmethod
+    def _resolve_array_ops(
+        config: PipelineConfig,
+        requested: Optional[str],
+        label_space: LabelSpace,
+        dense: DenseRetriever,
+    ) -> ArrayOps:
+        """Pick the array backend for this deployment.
+
+        Resolution order matches ``TrainingPipeline.run``: an explicit request
+        wins, otherwise ``"auto"`` falls to ``resolve_array_backend``'s measured
+        crossover (T83). ``requested=None`` means "no caller preference", so the
+        model's own persisted ``config.array_backend`` decides -- a model trained
+        with ``array_backend="torch"`` deploys the same way without the operator
+        having to say so twice.
+
+        **The scale fed to the crossover is the index, not the batch.** At
+        training ``n_items`` is the corpus; the inference-time analogue is the
+        example pool baked into ``dense.npz``, *not* ``len(texts)`` in the call
+        about to be made. Sizing off the batch would put a 64-row request far
+        below the crossover and pick numpy no matter how large the index it is
+        about to search -- exactly backwards, since the per-query cost scales
+        with the index and the label space, not with how many queries arrive at
+        once. This is also why the backend is resolved *after* ``dense`` is
+        loaded: the deciding number is not knowable until the arrays are open.
+
+        That count is read as ``class_freq.sum()`` -- per-class example counts,
+        which is the whole indexed pool -- rather than off the built-in
+        adapter's ``DenseState``. ``class_freq`` is on the ``DenseRetriever``
+        port; ``state`` is not, and a registered custom retriever (T34 phase 1)
+        need not have one.
+        """
+        if requested is None:
+            requested = config.array_backend
+        backend = resolve_array_backend(
+            None if requested == "auto" else requested,
+            n_items=int(np.asarray(dense.class_freq).sum()),
+            n_classes=label_space.size,
+            k_neighbors=config.retrieval.k_neighbors,
+        )
+        return build_array_ops(backend)
+
+    @staticmethod
+    def _place_on_backend(
+        ops: ArrayOps, dense: DenseRetriever, encoder: TextEncoder
+    ) -> Tuple[DenseRetriever, TextEncoder]:
+        """Move the index and the encoder's output onto ``ops``.
+
+        Both are no-ops for the numpy backend, so the default load path is
+        byte-for-byte what it was. For a device backend the pair has to move
+        *together*: uploading the index alone would leave a numpy-emitting
+        encoder paying a per-batch upload of its queries, and switching the
+        encoder alone would hand device tensors to a host-resident index.
+
+        Duck-typed on both sides rather than widened into the ports, matching
+        the precedent ``TrainingPipeline`` already set for
+        ``set_array_backend``: a custom ``DenseRetriever`` or a torch-free
+        encoder (``HashingEncoder``, ``TfidfEncoder``) simply keeps emitting
+        host arrays, which ``TorchArrayOps`` uploads on first touch. Correct,
+        just one transfer per call rather than none."""
+        if hasattr(dense, "with_array_ops"):
+            dense = dense.with_array_ops(ops)
+        if hasattr(encoder, "set_array_backend"):
+            encoder.set_array_backend(ops.name)
+        elif ops.name != "numpy":
+            log.info(
+                "%s cannot emit %s arrays; query embeddings will be uploaded per batch",
+                type(encoder).__name__,
+                ops.name,
+            )
+        return dense, encoder
 
     @staticmethod
     def _components_from_meta(meta: Dict) -> Dict[str, Any]:

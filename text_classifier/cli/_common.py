@@ -17,6 +17,7 @@ import pandas as pd
 from ..application.evaluation import json_safe
 from ..config import PipelineConfig
 from ..domain import ClassDefinition, LabeledItem, LabelSpace
+from ..infrastructure.registry import registered_array_ops_kinds
 
 
 def configure_logging(level: str = "INFO") -> None:
@@ -33,6 +34,34 @@ def add_logging_arg(parser) -> None:
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="logging verbosity (default: INFO)",
+    )
+
+
+def add_placement_args(parser) -> None:
+    """``--device``/``--array-backend``, shared by every CLI that loads a model
+    directory for inference.
+
+    Two knobs, not one, because they place different things and neither implies
+    the other: ``--device`` pins the encoder's forward pass and the fusion
+    booster, while ``--array-backend`` decides what carries the dense index and
+    its matmuls in between. ``--device cuda`` on its own leaves retrieval on
+    numpy and makes the GPU encoder copy every batch back to the host to feed
+    it."""
+    parser.add_argument(
+        "--device",
+        default=None,
+        help="pin the encoder and fusion model to this device (e.g. 'cuda', 'cpu', "
+        "'cuda:1'), overriding auto-detection. Default: auto-detect (GPU if visible "
+        "on this host, else CPU).",
+    )
+    parser.add_argument(
+        "--array-backend",
+        default=None,
+        choices=sorted(registered_array_ops_kinds()) + ["auto"],
+        help="which array library carries dense retrieval: 'numpy' (host) or 'torch' "
+        "(device-resident — the index is uploaded once at load and every query "
+        "matmul runs there). 'auto' picks from this model's scale. Default: whatever "
+        "the model was trained with (its config's array_backend).",
     )
 
 

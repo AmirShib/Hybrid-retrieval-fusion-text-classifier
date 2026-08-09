@@ -206,3 +206,35 @@ all unverified from this machine. `tests/unit/test_array_ops_torch.py` and
 `tests/integration/test_device_parity.py` cover CPU-torch correctness and
 parity, which is the GPU-free half of the ticket's testing strategy — a
 CUDA-host re-run is what closes the rest.
+
+## Addendum (2026-08-09): placing *inference*
+
+Everything above is a training-pipeline profile, and the two knobs a deployment
+has are not interchangeable:
+
+| Flag | Places |
+|---|---|
+| `--device cuda` | encoder forward pass (stage 1), fusion booster (stage 9) |
+| `--array-backend torch` | dense index + its matmuls (stages 2, 3, 4, 6) |
+
+`--device` alone gives you the worst of both: a GPU encoder that copies every
+batch to the host (`convert_to_numpy=True`) so a numpy retriever can search a
+host-resident index, then a host feature matrix uploaded again inside XGBoost.
+The stages this document marks **Go** are exactly the ones `--device` does not
+move.
+
+**Sizing the `auto` crossover at inference.** The thresholds above
+(`n_items ≳ 100,000` or `n_classes ≳ 500`) are stated in corpus terms. The
+inference-time reading of `n_items` is the **example pool in `dense.npz`** — the
+thing being searched — not the number of texts in the call. Per-query cost
+scales with the index and the label space; batch size only sets how many times
+that cost is paid. `ArtifactRepository.load` therefore resolves the backend
+*after* opening the index, using `class_freq.sum()`.
+
+**Unchanged from the main document:** BM25 (stage 5) stays host-permanent, and
+the assembler's leaf ops (stage 7) are still host-side pending T86 — so a
+device-resident inference run today moves stages 2/3/4/6 and pays one
+`(chunk, C)`-or-smaller D2H at each public retriever method. The stage-7 finding
+above (largest single stage at `C ≳ 5,000`) still argues for T86 as the next
+move, and the go/no-go remains **unmeasured on a real GPU host**: this addendum
+describes placement, not a measured speedup.

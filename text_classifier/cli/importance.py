@@ -31,6 +31,7 @@ import argparse
 from .. import InferencePipeline
 from ._common import (
     add_logging_arg,
+    add_placement_args,
     configure_logging,
     pct,
     read_items,
@@ -49,11 +50,14 @@ def main() -> None:
     p.add_argument("--text-col", default="text")
     p.add_argument("--label-col", default="label")
     p.add_argument("--top", type=int, default=10, help="rows to print per table (default: 10)")
+    add_placement_args(p)
     add_logging_arg(p)
     args = p.parse_args()
     configure_logging(args.log_level)
 
-    pipeline = InferencePipeline.from_directory(args.model)
+    pipeline = InferencePipeline.from_directory(
+        args.model, device=args.device, array_backend=args.array_backend
+    )
     items = read_items(args.input, args.text_col, args.label_col)
     texts = [it.text for it in items]
     true_keys = [it.label for it in items]

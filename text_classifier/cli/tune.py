@@ -33,7 +33,14 @@ from .. import InferencePipeline
 from ..application.evaluation import build_manifest, write_evaluation_artifacts
 from ..application.tuning import retune
 from ..infrastructure import ArtifactRepository
-from ._common import add_logging_arg, configure_logging, pct, read_items, write_json_report
+from ._common import (
+    add_logging_arg,
+    add_placement_args,
+    configure_logging,
+    pct,
+    read_items,
+    write_json_report,
+)
 
 
 def main() -> None:
@@ -62,11 +69,14 @@ def main() -> None:
     p.add_argument("--output", default=None, help="optional path to also write the JSON report")
     p.add_argument("--text-col", default="text")
     p.add_argument("--label-col", default="label")
+    add_placement_args(p)
     add_logging_arg(p)
     args = p.parse_args()
     configure_logging(args.log_level)
 
-    pipeline = InferencePipeline.from_directory(args.model)
+    pipeline = InferencePipeline.from_directory(
+        args.model, device=args.device, array_backend=args.array_backend
+    )
     artifacts = pipeline.artifacts
     items = read_items(args.input, args.text_col, args.label_col)
 

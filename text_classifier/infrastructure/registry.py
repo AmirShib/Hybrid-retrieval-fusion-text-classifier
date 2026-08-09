@@ -556,8 +556,23 @@ def _build_torch_array_ops() -> ArrayOps:
     is actually called -- registration itself (below) is metadata only, so
     listing "torch" as a registered kind never imports torch (see
     ``array_ops.py::resolve_array_backend``, which checks ``torch_installed()``
-    -- a non-importing probe -- rather than registry membership)."""
-    from .array_ops_torch import TorchArrayOps
+    -- a non-importing probe -- rather than registry membership).
+
+    A missing torch is reported as an actionable ``ImportError`` rather than a
+    bare ``ModuleNotFoundError`` from three frames down: reaching here means
+    someone *asked* for this backend explicitly (``--array-backend torch``, or
+    ``array_backend="torch"`` in a config), since auto-resolution probes
+    ``torch_installed()`` first and never gets this far without it. The right
+    answer is an install hint, not a traceback."""
+    try:
+        from .array_ops_torch import TorchArrayOps
+    except ImportError as exc:
+        raise ImportError(
+            "array_backend='torch' was requested, but torch is not installed. "
+            "Install it with `pip install 'text-classifier[sentence-transformers]'` "
+            "(which pulls in torch), or use array_backend='numpy'/'auto' to run "
+            "dense retrieval on the host."
+        ) from exc
 
     return TorchArrayOps()
 

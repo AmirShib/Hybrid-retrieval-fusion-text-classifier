@@ -30,6 +30,27 @@ which loops over features doing `feats.copy()` and then calls `_score_decisions`
 which copies *again*. For the 36-column core schema that is ~72 full copies of the
 entire feature table to produce one report.
 
+## Partially addressed 2026-08-09 (the copies, not the transfer)
+
+The **materialization** half of "Why" above has been cut down without waiting
+for `FeatureBlock`, because it needed no port or return-type change:
+
+- `add_confidence` shallow-copies instead of deep-copying (`scoring.py`). The
+  caller's frame is still returned without `conf` — nothing mutates an existing
+  column, only a new one is appended — so the contract is unchanged. 61ms → 0.5ms
+  on a 500k × 36 frame.
+- `ablation_report` masks one column of a single float32 matrix in place and
+  restores it, instead of `feats.copy()` per feature into a scorer that copied
+  again. The ~72 full copies this ticket counts are gone; it also accepts the
+  matrix `global_feature_importance` already built, so `importance_report`
+  materializes one rather than two.
+
+Neither touches **the transfer**, which is still this ticket's whole point: the
+feature matrix is still built host-side and still handed to a `device="cuda"`
+booster that uploads it internally. `FeatureBlock` + the fusion adapters'
+device-array path remain exactly as designed below. What changed is that the
+pandas waste is no longer a reason to rush it.
+
 ## Design
 
 **1. A `FeatureBlock` return type.** `FeatureAssembler.assemble` returns a small

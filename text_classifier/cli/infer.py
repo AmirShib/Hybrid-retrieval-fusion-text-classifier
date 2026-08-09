@@ -35,7 +35,7 @@ import json
 import pandas as pd
 
 from .. import InferencePipeline
-from ._common import add_logging_arg, configure_logging, read_texts
+from ._common import add_logging_arg, add_placement_args, configure_logging, read_texts
 
 
 def main() -> None:
@@ -46,13 +46,7 @@ def main() -> None:
     p.add_argument("--input", required=True)
     p.add_argument("--output", required=True)
     p.add_argument("--text-col", default="text")
-    p.add_argument(
-        "--device",
-        default=None,
-        help="pin inference to this device (e.g. 'cuda', 'cpu', 'cuda:1'), overriding "
-        "auto-detection for both the encoder and the fusion model. Default: auto-detect "
-        "(GPU if visible on this host, else CPU).",
-    )
+    add_placement_args(p)
     p.add_argument(
         "--top-k",
         type=int,
@@ -92,7 +86,9 @@ def main() -> None:
 
     _, texts = read_texts(args.input, args.text_col)
 
-    pipeline = InferencePipeline.from_directory(args.model, device=args.device)
+    pipeline = InferencePipeline.from_directory(
+        args.model, device=args.device, array_backend=args.array_backend
+    )
     preds = pipeline.predict(texts)
 
     out = pd.DataFrame(

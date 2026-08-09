@@ -578,6 +578,26 @@ where wall-clock actually goes, stage by stage, across a synthetic scale grid
 (`scripts/profile_devices.py`), and states which stages should run on which
 device and why — the measure-first gate before any kernel moves to a GPU.
 
+Running inference on a GPU takes **two** flags, because they place different
+things:
+
+```bash
+text-classifier-infer --model model_dir/ --input new.csv --output preds.csv \
+    --device cuda --array-backend torch
+```
+
+* `--device` pins the encoder's forward pass and the fusion booster.
+* `--array-backend torch` makes the dense index device-resident: it is uploaded
+  once when the model loads, and every query's matmul/top-k runs there. Without
+  it, `--device cuda` gives you a GPU encoder that copies each batch back to the
+  host to feed a numpy retriever. Default is whatever the model was trained
+  with; `auto` picks from the model's own scale (index size and class count)
+  against the crossover in `docs/device-policy.md`.
+
+BM25 stays on the host by design — sparse mat-mul plus a Python/C tokenizer, and
+the largest single stage in the profile at low-to-mid class count. The same two
+flags work on `-eval`, `-tune` and `-importance`.
+
 **Project layout** (domain-driven / hexagonal):
 
 ```

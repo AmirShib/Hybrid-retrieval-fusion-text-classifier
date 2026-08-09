@@ -61,16 +61,34 @@ class InferencePipeline:
             self._providers, artifacts.config.fusion.drop_features, artifacts.signal_providers
         )
         self._assembled_names = composed_feature_names(self._providers, artifacts.signal_providers)
+        # Class keys as an array once, not once per call: every public method
+        # maps candidate indices back to keys with fancy indexing, and rebuilding
+        # this object array per batch is pure overhead that grows with the label
+        # space. The label space is immutable for the life of a pipeline
+        # (`with_added_classes` returns a *new* pipeline), so caching is safe.
+        self._keys = np.asarray(artifacts.label_space.keys)
 
     @classmethod
-    def from_directory(cls, directory: str, device: Optional[str] = None) -> "InferencePipeline":
+    def from_directory(
+        cls,
+        directory: str,
+        device: Optional[str] = None,
+        array_backend: Optional[str] = None,
+    ) -> "InferencePipeline":
         """Load a trained model directory for inference.
 
         ``device`` (e.g. ``"cuda"``, ``"cpu"``) pins both the encoder and the
         fusion model to that device, overriding auto-detection. ``None`` (the
         default) auto-detects: GPU if one is visible on this host, else CPU.
+
+        ``array_backend`` (``"numpy"``/``"torch"``/``"auto"``) selects what
+        carries the retrieval stages *between* those two — the dense index and
+        its matmuls. ``device`` alone does not move them: it places the encoder
+        and the booster, and everything in between stays on the host. ``None``
+        (the default) defers to the model's persisted ``config.array_backend``.
+        See ``ArtifactRepository.load`` for the full resolution rule.
         """
-        return cls(ArtifactRepository().load(directory, device=device))
+        return cls(ArtifactRepository().load(directory, device=device, array_backend=array_backend))
 
     @property
     def label_space(self) -> LabelSpace:
@@ -97,8 +115,11 @@ class InferencePipeline:
         return InferencePipeline(self._a.with_added_classes(new_classes))
 
     def _featurize(
-        self, texts: List[str], requested: Sequence[str]
-    ) -> Tuple[np.ndarray, pd.DataFrame]:
+        self,
+        texts: List[str],
+        requested: Sequence[str],
+        neighbor_sink: Optional[Dict[str, Tuple[np.ndarray, np.ndarray]]] = None,
+    ) -> Tuple[Any, pd.DataFrame]:
         """Encode ``texts`` and assemble their (item, candidate) feature table.
 
         The single encode → assemble pass every public method on this class
@@ -112,6 +133,15 @@ class InferencePipeline:
         Callers must have validated ``texts`` first (``_validate_texts``): this
         is where encoding actually begins, and a non-string input must fail
         before it, not inside the encoder.
+
+        The returned embeddings are whatever the encoder's array backend
+        produces — a numpy array by default, a resident torch tensor under
+        ``array_backend="torch"`` — hence the ``Any``. Consumers must route
+        through the retriever (which is on the same backend) rather than
+        assuming numpy.
+
+        ``neighbor_sink``, when given, collects the kNN arrays the signal
+        providers already retrieved; see ``FeatureAssembler.assemble``.
         """
         a = self._a
         q_emb = a.encoder.encode_queries(texts)
@@ -127,6 +157,7 @@ class InferencePipeline:
             providers=self._providers,
             requested=requested,
             signal_providers=a.signal_providers,
+            neighbor_sink=neighbor_sink,
         )
         return q_emb, feats
 
@@ -163,7 +194,7 @@ class InferencePipeline:
         margins = decided["margin"].to_numpy(dtype=np.float64)
         second_candidates = decided["second_candidate"].to_numpy(dtype=np.float64)
         accepted = a.abstention.accept(confidences, candidates)
-        top_keys = np.asarray(a.label_space.keys)[candidates]
+        top_keys = self._keys[candidates]
 
         for item_id, top_key, conf, margin, ok, second in zip(
             item_ids, top_keys, confidences, margins, accepted, second_candidates
@@ -199,7 +230,7 @@ class InferencePipeline:
         item_ids = ranked["item_id"].to_numpy(dtype=np.intp)
         candidates = ranked["candidate"].to_numpy(dtype=np.intp)
         confidences = ranked["conf"].to_numpy(dtype=np.float64)
-        keys = np.asarray(a.label_space.keys)[candidates]
+        keys = self._keys[candidates]
 
         for item_id, key, conf in zip(item_ids, keys, confidences):
             results[item_id].append((str(key), float(conf)))
@@ -240,7 +271,7 @@ class InferencePipeline:
         )
 
         item_ids = scored["item_id"].to_numpy(dtype=np.intp)
-        keys = np.asarray(a.label_space.keys)
+        keys = self._keys
         out = pd.DataFrame(
             {
                 "item_id": item_ids,
@@ -287,12 +318,22 @@ class InferencePipeline:
             }
             return {"importance": None, "ablation": {"baseline": empty, "ablations": []}}
 
+        # One feature matrix for both halves of the report. `ablation_report`
+        # masks a column at a time and restores it, so `X` comes back
+        # unchanged; building it twice would double peak memory for no gain
+        # (3M x 36 float32 on a 100k-item set).
         X = select_feature_columns(
             feats, self._feature_names, context="importance_report"
-        ).to_numpy(dtype=np.float32)
+        ).to_numpy(dtype=np.float32, copy=True)
         importance = global_feature_importance(a.fusion, X, self._feature_names)
         ablation = ablation_report(
-            feats, a.fusion, a.calibrator, a.abstention, self._feature_names, true_idx_by_item
+            feats,
+            a.fusion,
+            a.calibrator,
+            a.abstention,
+            self._feature_names,
+            true_idx_by_item,
+            X=X,
         )
         return {"importance": importance, "ablation": ablation}
 
@@ -333,8 +374,12 @@ class InferencePipeline:
         keys = a.label_space.keys
         descriptions = a.label_space.descriptions
 
-        q_emb, feats = self._featurize(texts, self._assembled_names)
-        neighbors = self._neighbor_evidence(texts, q_emb, keys, n_neighbors)
+        # One retrieval pass, not two: the assembler's dense/BM25 signals are
+        # computed *from* these kNN results, so the sink hands back what was
+        # already found instead of `_neighbor_evidence` searching again.
+        retrieved: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+        q_emb, feats = self._featurize(texts, self._assembled_names, neighbor_sink=retrieved)
+        neighbors = self._neighbor_evidence(texts, q_emb, keys, n_neighbors, retrieved)
 
         # Default: every item abstains with no candidates (covers items whose
         # features surfaced nothing, which are absent from the scored frame).
@@ -431,9 +476,10 @@ class InferencePipeline:
     def _neighbor_evidence(
         self,
         texts: Sequence[str],
-        q_emb: np.ndarray,
+        q_emb: Any,
         keys: Sequence[str],
         n_neighbors: int,
+        retrieved: Optional[Dict[str, Tuple[np.ndarray, np.ndarray]]] = None,
     ) -> List[Dict[str, Any]]:
         """Per-item nearest dense + lexical example neighbors as ``{label_key,
         score}``. Padding (label ``< 0`` / NaN score) is dropped. Neighbor texts
@@ -442,11 +488,27 @@ class InferencePipeline:
 
         ``a.lexical`` is ``None`` for a model trained with "lexical" excluded
         from ``config.signals`` (no BM25 index was ever built); every item's
-        ``"lexical"`` neighbor list is then empty rather than an error."""
+        ``"lexical"`` neighbor list is then empty rather than an error.
+
+        ``retrieved`` is the assembler's neighbor sink (see
+        ``FeatureAssembler.assemble``): the very same kNN results the
+        ``dense.knn``/``bm25.knn`` signals were built from, on this same batch
+        at this same ``k``. Using them makes this method free. Falling back to
+        querying the retriever is a real path, not dead code — a model
+        configured without the built-in ``dense``/``lexical`` signal providers
+        has no sink entry to reuse — but on the default configuration it never
+        runs, and re-querying would double the two most expensive stages in the
+        pipeline (BM25 kNN and dense top-k, per T83)."""
         a = self._a
         k = a.config.retrieval.k_neighbors
-        d_lab, d_sim = a.dense.knn_example_labels(q_emb, k)
-        if a.lexical is not None:
+        retrieved = retrieved or {}
+        if "dense.knn" in retrieved:
+            d_lab, d_sim = retrieved["dense.knn"]
+        else:
+            d_lab, d_sim = a.dense.knn_example_labels(q_emb, k)
+        if "bm25.knn" in retrieved:
+            b_lab, b_sco = retrieved["bm25.knn"]
+        elif a.lexical is not None:
             b_lab, b_sco = a.lexical.knn_example_labels(list(texts), k)
         else:
             b_lab = b_sco = None

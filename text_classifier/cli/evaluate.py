@@ -31,6 +31,7 @@ from ..application.evaluation import build_manifest, evaluate_decisions
 from ..application.signal_report import signal_report
 from ._common import (
     add_logging_arg,
+    add_placement_args,
     configure_logging,
     num,
     pct,
@@ -75,11 +76,14 @@ def main() -> None:
         "model are added description-only (no retrain) so a test set with new "
         "labels can be scored. Such classes are low-confidence and prone to abstain.",
     )
+    add_placement_args(p)
     add_logging_arg(p)
     args = p.parse_args()
     configure_logging(args.log_level)
 
-    pipeline = InferencePipeline.from_directory(args.model)
+    pipeline = InferencePipeline.from_directory(
+        args.model, device=args.device, array_backend=args.array_backend
+    )
 
     if args.classes:
         pipeline = _extend_with_new_classes(pipeline, args.classes)

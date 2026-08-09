@@ -9,6 +9,37 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 ## [Unreleased]
 
 ### Added
+- **Inference can now actually run device-resident (`--array-backend`).**
+  `ArtifactRepository.load` resolved no array backend at all: `--device cuda`
+  set `config.encoder.device` and the XGBoost booster's `device=`, and
+  everything between them stayed on host numpy. The dense index loaded from
+  `dense.npz` was built with `NumpyArrayOps` and never uploaded, so
+  `_dense_topk`/`prototype_similarity`/`description_similarity` — the stages
+  `docs/device-policy.md` marks "Go" — ran on the CPU while a GPU encoder
+  copied every batch back to the host to feed them. The persisted
+  `config.array_backend` was deserialized and then never consulted (a model dir
+  edited to say `"torch"` loaded fine on a host with no torch installed, which
+  is how you could tell).
+
+  `load` now takes `array_backend` alongside `device` and threads the resolved
+  backend into both the encoder (`set_array_backend`) and the dense index
+  (`DenseRetrieverAdapter.with_array_ops`, which uploads the corpus once at
+  load, not per query). `None` defers to the model's persisted setting, `auto`
+  resolves from the model's own scale, explicit wins — the same
+  explicit-beats-detected rule `TrainingPipeline` follows. Exposed as
+  `--array-backend` on `infer`/`evaluate`/`tune`/`importance`, and as
+  `InferencePipeline.from_directory(..., array_backend=...)`; the resolved
+  outcome is recorded on `DeployedArtifacts.array_backend`.
+
+  The crossover is sized off the **index**, not the incoming batch: at
+  inference the analogue of training's `n_items` is the example pool baked into
+  `dense.npz`, and sizing off a 64-row request would pick numpy no matter how
+  large the index it was about to search. Signal providers are deliberately
+  left on numpy, mirroring `TrainingPipeline`'s `_assembler_ops`, because
+  `FeatureAssembler`'s kernels are still host-only (T86).
+
+  Default behaviour is unchanged: with no request and an `"auto"` config, a
+  corpus below the crossover resolves to numpy and no torch is imported.
 - **Cross-encoder rerank signal (T33, phase 1) — opt-in, off by default.** Adds a
   second signal *round* to `FeatureAssembler`: a `SignalProvider` may now declare
   `needs_candidates = True` and run after candidate selection, receiving the
@@ -39,7 +70,40 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
   With the signal off, output, schema and on-disk layout are byte-for-byte
   unchanged; no torch is imported either way.
 
+### Changed
+- **Inference stops recomputing work it already has.** Three redundancies on
+  the inference path, all of which produced the right answer the expensive way:
+  - `explain_records` ran the dense **and** BM25 kNN searches twice — once
+    inside the assembler to build the `dense.knn`/`bm25.knn` signals, then
+    again in `_neighbor_evidence` for the explanation payload, with the same
+    queries at the same `k`. Those are the two most expensive stages in the
+    profile. `SignalMatrix` gained an optional `neighbors` field carrying the
+    pre-scatter `(b, k)` arrays, and `FeatureAssembler.assemble` an opt-in
+    `neighbor_sink`, so the evidence is the same arrays the signals were built
+    from. Falls back to querying the retriever when a model runs without the
+    built-in signal providers.
+  - `add_confidence` deep-copied the entire feature frame to append one column.
+    It is a shallow copy now — the caller's frame is still left without `conf`,
+    since nothing mutates an existing column. On a 500k × 36 frame that is
+    61ms → 0.5ms per scoring call.
+  - `ablation_report` copied the frame per feature and then called
+    `add_confidence`, which copied it again: ~72 full copies of the feature
+    table for one report on the core schema. It now masks one column of a
+    single matrix in place and restores it, and can share that matrix with
+    `global_feature_importance` instead of each building its own.
+
+  No output changes: the decision collapse still runs through `top_per_item`,
+  on a three-column frame rather than a reimplementation.
+
 ### Fixed
+- **`DenseRetrieverAdapter`'s taxonomy-update paths crashed on a device-resident
+  index.** `with_added_classes`/`with_updated_descriptions`/`with_added_examples`
+  extend the index with `np.concatenate` and fancy-index assignment, which a
+  resident torch tensor does not support. Unreachable before (only training
+  could produce such an index, and it never updates one); reachable as soon as
+  inference could load one. They now extend host-side and re-upload, a
+  once-per-deployment round trip rather than a second backend-polymorphic
+  implementation of each.
 - **`_topn_mask` (candidate selection) reached past the `ArrayOps` port and
   raised under a torch backend.** It called `M.astype` (which torch tensors do
   not have) and `np.partition` on what may be a tensor, then compared that numpy

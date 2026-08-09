@@ -232,6 +232,11 @@ class DenseSignalProvider(SignalProvider):
                 top1_check_valid=False,
                 extra_columns={"d_knn_max": d_max, "d_knn_count": d_cnt},
                 extra_scalars={"abs_top_dense_sim": abs_top_dense},
+                # The pre-scatter neighbors, so `explain_records` can report
+                # them without a second `knn_example_labels` call (see
+                # `SignalMatrix.neighbors`). Already computed above; publishing
+                # them costs a reference.
+                neighbors=(dn_lab, dn_sim),
             ),
         ]
 
@@ -335,6 +340,7 @@ class LexicalSignalProvider(SignalProvider):
                 top1_check_valid=True,
                 extra_columns={"b_knn_max": b_max, "b_knn_count": b_cnt},
                 extra_scalars={"abs_top_bm25": abs_top_bm25},
+                neighbors=(bn_lab, bn_sco),  # see DenseSignalProvider's note
             ),
         ]
 

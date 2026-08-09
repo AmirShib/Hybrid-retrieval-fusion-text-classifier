@@ -325,6 +325,11 @@ class TrainingPipeline:
             abstention,
             feature_providers=self._providers,
             signal_providers=self._signal_providers,
+            # The backend this run resolved (`self._ops`), so an in-memory
+            # hand-off to InferencePipeline reports the same placement a
+            # reload would — `self._assembler_ops` is a separate, always-numpy
+            # instance and is deliberately not what is recorded here.
+            array_backend=self._ops.name,
         )
         if output_dir:
             repo = ArtifactRepository()

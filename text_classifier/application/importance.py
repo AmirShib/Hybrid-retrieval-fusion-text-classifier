@@ -27,7 +27,7 @@ import numpy as np
 import pandas as pd
 
 from ..domain import AbstentionPolicy, ConfidenceCalibrator, FusionModel
-from .scoring import add_confidence, select_feature_columns, top_per_item
+from .scoring import select_feature_columns, top_per_item
 
 
 def global_feature_importance(
@@ -64,16 +64,26 @@ def global_feature_importance(
     return rows
 
 
-def _score_decisions(
-    feats: pd.DataFrame,
+def _score_matrix(
+    X: np.ndarray,
+    item_id: np.ndarray,
+    candidate: np.ndarray,
     fusion: FusionModel,
     calibrator: ConfidenceCalibrator,
     abstention: AbstentionPolicy,
-    feature_names: Sequence[str],
     true_idx_by_item: np.ndarray,
 ) -> Dict[str, Any]:
-    scored = add_confidence(feats, fusion, calibrator, feature_names)
-    decided = top_per_item(scored)
+    """Decision quality for one already-assembled feature matrix.
+
+    Takes ``X`` plus the two identity columns rather than the full feature
+    frame, so an ablation sweep can re-score a *mutated copy of one column*
+    instead of duplicating the whole table per feature. The decision layer
+    still runs through ``top_per_item`` on a three-column frame — those are the
+    only columns it reads, so the collapse (including its tie-breaking) is the
+    same one ``predict`` performs, not a reimplementation that could drift."""
+    raw = fusion.predict_proba(X)
+    conf = calibrator.transform(raw, classes=candidate)
+    decided = top_per_item(pd.DataFrame({"item_id": item_id, "candidate": candidate, "conf": conf}))
     item_ids = decided["item_id"].to_numpy(dtype=np.intp)
     candidates = decided["candidate"].to_numpy(dtype=np.intp)
     confidences = decided["conf"].to_numpy(dtype=np.float64)
@@ -96,6 +106,8 @@ def ablation_report(
     abstention: AbstentionPolicy,
     feature_names: Sequence[str],
     true_idx_by_item: np.ndarray,
+    *,
+    X: Optional[np.ndarray] = None,
 ) -> Dict[str, Any]:
     """Per-feature ablation against the already-trained ``fusion``/``calibrator``.
 
@@ -113,28 +125,48 @@ def ablation_report(
     Returns ``{"baseline": {...}, "ablations": [...]}``; ``ablations`` is sorted
     by ``delta_accuracy_if_no_abstain`` ascending — the most damaging removals
     (largest accuracy drop) first.
+
+    ``X`` lets a caller that has already materialized the feature matrix (in
+    ``feature_names`` order, float32) hand it over instead of having this build
+    a second one — ``InferencePipeline.importance_report`` needs the identical
+    matrix for ``global_feature_importance``. It is masked and restored column
+    by column here, so it is returned to the caller unchanged; pass ``None``
+    (the default) to have it built internally.
+
+    One matrix, masked in place, is the whole point: the previous shape of this
+    loop copied the entire feature frame per feature and then copied it again
+    inside scoring, which on the ~36-column core schema meant ~72 full copies of
+    the table to produce one report.
     """
     # Fail fast, naming exactly what's missing, rather than a bare KeyError on
-    # the first `feats[name]` below.
-    select_feature_columns(feats, feature_names, context="ablation_report")
+    # the column selection below.
+    selected = select_feature_columns(feats, feature_names, context="ablation_report")
+    if X is None:
+        # copy=True: the sweep mutates this in place, and `to_numpy` is free to
+        # hand back a view onto the frame's own block for a single-dtype frame.
+        X = selected.to_numpy(dtype=np.float32, copy=True)
+    item_id = feats["item_id"].to_numpy()
+    candidate = feats["candidate"].to_numpy()
 
-    baseline = _score_decisions(
-        feats, fusion, calibrator, abstention, feature_names, true_idx_by_item
+    baseline = _score_matrix(
+        X, item_id, candidate, fusion, calibrator, abstention, true_idx_by_item
     )
     base_acc = baseline["accuracy_if_no_abstain"] or 0.0
     base_acc_on_acc = baseline["accuracy_on_accepted"] or 0.0
     base_cov = baseline["coverage"] or 0.0
 
     rows: List[Dict[str, Any]] = []
-    for name in feature_names:
-        n_present = int(feats[name].notna().sum())
+    for j, name in enumerate(feature_names):
+        column = X[:, j]
+        n_present = int(np.count_nonzero(~np.isnan(column)))
         if n_present == 0:
             continue
-        ablated_feats = feats.copy()
-        ablated_feats[name] = np.nan
-        ablated = _score_decisions(
-            ablated_feats, fusion, calibrator, abstention, feature_names, true_idx_by_item
+        saved = column.copy()
+        X[:, j] = np.nan
+        ablated = _score_matrix(
+            X, item_id, candidate, fusion, calibrator, abstention, true_idx_by_item
         )
+        X[:, j] = saved
         acc = ablated["accuracy_if_no_abstain"] or 0.0
         acc_on_acc = ablated["accuracy_on_accepted"] or 0.0
         cov = ablated["coverage"] or 0.0

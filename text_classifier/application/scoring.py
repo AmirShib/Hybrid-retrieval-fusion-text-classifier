@@ -48,11 +48,19 @@ def add_confidence(
 
     ``feature_names`` is the effective feature schema (core + any custom-provider
     columns); it must match the order the fusion model was trained on. Defaults to
-    the core ``FEATURE_NAMES`` so callers with no custom providers are unaffected."""
+    the core ``FEATURE_NAMES`` so callers with no custom providers are unaffected.
+
+    The returned frame is a *shallow* copy: it carries every input column plus
+    ``conf``, and the caller's frame is left without ``conf``, exactly as a deep
+    copy left it — but the ~36 float columns are shared rather than duplicated.
+    Nothing here mutates an existing column (only a new one is appended), which
+    is what makes sharing safe. A deep copy meant every scoring call duplicated
+    the whole feature table; on a 100k-item corpus at ~30 candidates each that is
+    a 3M x 36 float32 matrix copied to add one column."""
     cols = list(feature_names) if feature_names is not None else FEATURE_NAMES
     X = select_feature_columns(features, cols, context="add_confidence").to_numpy(dtype=np.float32)
     raw = fusion.predict_proba(X)
-    out = features.copy()
+    out = features.copy(deep=False)
     out["conf"] = calibrator.transform(raw, classes=features["candidate"].to_numpy())
     return out
 

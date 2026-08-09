@@ -70,6 +70,58 @@ section):**
   All torch-gated tests skip cleanly when torch isn't installed. Full suite
   (794 tests) green alongside them.
 
+## Progress (2026-08-09) — the inference half
+
+The work above placed the *training* pipeline's encoder and dense index on the
+resolved backend. `ArtifactRepository.load` did none of it, so a deployed model
+could not reach any of it: `--device cuda` set `encoder.device` and the booster's
+`device=`, and the index loaded from `dense.npz` stayed `NumpyArrayOps` with
+host arrays. The persisted `config.array_backend` was read into the config
+object and never consulted again — a model dir hand-edited to `"torch"` loaded
+clean on a torch-free host, which is how the gap was confirmed rather than
+inferred.
+
+Landed:
+
+- `ArtifactRepository.load(directory, device=..., array_backend=...)`, resolving
+  through the same `resolve_array_backend` + explicit-beats-detected rule
+  `TrainingPipeline.run` uses, and threading the result into the encoder
+  (`set_array_backend`) and the index. `None` = defer to the model's persisted
+  setting; `"auto"` = resolve from scale; explicit wins. Recorded on
+  `DeployedArtifacts.array_backend` (the *outcome*, distinct from the config's
+  *request*).
+- `DenseRetrieverAdapter.from_state` uploads its three float arrays through the
+  ops on the way in, and `with_array_ops` re-materializes an already-loaded
+  index onto a different backend. The corpus is uploaded **once at load**, never
+  per query — asserted as an `asarray` call count, not a timing.
+- **Why `with_array_ops` and not an `array_ops` parameter on
+  `DenseRetrieverSpec.load`:** the deciding scale is the index's own example
+  count, which is not knowable until the arrays are open. Load with the default
+  backend, resolve, then place. The registry contract is unchanged.
+- **The crossover is sized off the index, not the batch.** Training's `n_items`
+  is the corpus; the inference analogue is the example pool in `dense.npz`, read
+  as `class_freq.sum()` (on the `DenseRetriever` port — `state` is not, and a
+  custom registered retriever need not have one). Sizing off `len(texts)` would
+  put every ordinary request below the crossover regardless of index size.
+- Signal providers stay on `NumpyArrayOps`, mirroring `TrainingPipeline`'s
+  `_assembler_ops` exactly. Same T86 boundary, same reason.
+- `with_added_classes`/`with_updated_descriptions`/`with_added_examples` now
+  extend host-side and re-upload. They use `np.concatenate` and fancy-index
+  assignment, which a resident tensor does not support — previously unreachable
+  (only training made such an index, and it never updates one), reachable the
+  moment inference could load one.
+- `--array-backend` on `infer`/`evaluate`/`tune`/`importance` via a shared
+  `add_placement_args`; `--device` reaches the latter three for the first time.
+- Tests: `tests/integration/test_inference_placement.py`. The torch backend is
+  exercised through a recording `ArrayOps` double that is numerically
+  `NumpyArrayOps` under a different `name`, so the *placement contract* is
+  testable on any host — a GPU is needed to measure the win, not to verify the
+  wiring. Real-torch parity remains `test_device_parity.py`'s job.
+
+**Still not done here:** the per-chunk `to_host` at each public
+`DenseRetrieverAdapter` method, and the host feature matrix handed to a
+`device="cuda"` booster. Both are T86, unchanged in scope.
+
 **A second, unplanned fix, found while implementing this ticket.** T84's
 `resolve_array_backend` short-circuited on registry membership ("torch" not
 registered ⇒ numpy, skip every probe) specifically to keep an ordinary numpy

@@ -722,7 +722,17 @@ class DenseRetrieverAdapter(DenseRetriever):
         chunk: int = 256,
         array_ops: Optional[ArrayOps] = None,
     ) -> "DenseRetrieverAdapter":
-        return cls(
+        """Rebuild an adapter from the arrays ``to_state`` produced (an
+        ``npz`` on disk, in practice).
+
+        The three float arrays are handed to ``array_ops`` on the way in, so a
+        device backend uploads the corpus **once, here**, and every query
+        afterward runs against the resident copy -- the load-time counterpart of
+        ``build_from_embeddings``, where residency instead comes for free from a
+        torch-backend encoder. For ``NumpyArrayOps`` (the default, and every
+        pre-T85 caller) ``asarray`` on an existing array is a no-op, so nothing
+        is copied and the numpy path is unchanged."""
+        adapter = cls(
             DenseState(
                 arrays["example_emb"],
                 arrays["example_labels"],
@@ -732,6 +742,67 @@ class DenseRetrieverAdapter(DenseRetriever):
             ),
             chunk,
             array_ops,
+        )
+        adapter._s = adapter._resident(adapter._s)
+        return adapter
+
+    @property
+    def array_backend(self) -> str:
+        """Name of the array backend this index is resident on (``"numpy"`` /
+        ``"torch"``) -- what a caller logs or asserts on to confirm where the
+        dense-side matmuls will actually run."""
+        return self._ops.name
+
+    def with_array_ops(self, array_ops: ArrayOps) -> "DenseRetrieverAdapter":
+        """Return this index re-materialized on ``array_ops``.
+
+        ``self`` is returned unchanged when the backend already matches, so the
+        default numpy path costs nothing and stays object-identical. Otherwise
+        the state round-trips host-side (``to_state``) and is uploaded onto the
+        new backend by ``from_state`` -- one transfer of the corpus, at load
+        time, not per query.
+
+        Exists because the backend cannot be chosen before the index is read:
+        the scale that decides it (``example_emb``'s row count) is only known
+        once the arrays are open. ``ArtifactRepository.load`` therefore loads
+        with the default backend and calls this, rather than the registry's
+        ``DenseRetrieverSpec.load`` taking an ``array_ops`` it could not yet
+        resolve."""
+        if array_ops.name == self._ops.name:
+            return self
+        return DenseRetrieverAdapter.from_state(self.to_state(), self._chunk, array_ops)
+
+    def _resident(self, state: DenseState) -> DenseState:
+        """``state`` with its three float arrays on this adapter's backend.
+
+        ``example_labels``/``class_freq`` stay host numpy by design (see
+        ``DenseState``): they are index/count bookkeeping, consumed by numpy
+        fancy-indexing in ``knn_example_labels`` and by ``class_log_freq``, and
+        uploading them would only force a download at first use."""
+        ops = self._ops
+        return DenseState(
+            ops.asarray(state.example_emb),
+            state.example_labels,
+            ops.asarray(state.prototypes),
+            ops.asarray(state.description_emb),
+            state.class_freq,
+        )
+
+    def _host_state(self) -> DenseState:
+        """This index's state pulled host-side. The ``with_added_*`` /
+        ``with_updated_*`` methods below extend the index with numpy
+        (``np.concatenate``, fancy-index assignment, ``np.linalg.norm``), which
+        a resident torch tensor does not support; they run on this and
+        re-upload through ``_resident``. Extension is a once-per-deployment
+        operation, never a per-query one, so a single round trip is the right
+        trade against a second, backend-polymorphic implementation of each."""
+        s = self._s
+        return DenseState(
+            self._ops.to_host(s.example_emb),
+            s.example_labels,
+            self._ops.to_host(s.prototypes),
+            self._ops.to_host(s.description_emb),
+            s.class_freq,
         )
 
     def knn_example_labels(
@@ -829,10 +900,11 @@ class DenseRetrieverAdapter(DenseRetriever):
         and carries no prototype/kNN support. The example pool is reused verbatim.
         """
         new_descriptions = list(new_descriptions)
-        s = self._s
         if not new_descriptions:
-            return DenseRetrieverAdapter(s, self._chunk, self._ops)
-        new_desc = np.asarray(encoder.encode_documents(new_descriptions), dtype=np.float32)
+            return DenseRetrieverAdapter(self._s, self._chunk, self._ops)
+        # Host-side extension, then one re-upload (see `_host_state`).
+        s = self._host_state()
+        new_desc = self._ops.to_host(encoder.encode_documents(new_descriptions)).astype(np.float32)
         dim = s.description_emb.shape[1]
         if new_desc.shape[1] != dim:
             raise ValueError(
@@ -848,7 +920,7 @@ class DenseRetrieverAdapter(DenseRetriever):
         extended = DenseState(
             s.example_emb, s.example_labels, prototypes, description_emb, class_freq
         )
-        return DenseRetrieverAdapter(extended, self._chunk, self._ops)
+        return DenseRetrieverAdapter(self._resident(extended), self._chunk, self._ops)
 
     def with_updated_descriptions(
         self, encoder: TextEncoder, edits: dict
@@ -860,15 +932,17 @@ class DenseRetrieverAdapter(DenseRetriever):
         row not named in ``edits`` is untouched."""
         if not edits:
             return DenseRetrieverAdapter(self._s, self._chunk, self._ops)
-        s = self._s
+        s = self._host_state()  # host-side edit, then one re-upload (see `_host_state`)
         idxs = list(edits.keys())
-        new_rows = np.asarray(encoder.encode_documents([edits[i] for i in idxs]), dtype=np.float32)
+        new_rows = self._ops.to_host(encoder.encode_documents([edits[i] for i in idxs])).astype(
+            np.float32
+        )
         description_emb = s.description_emb.copy()
         description_emb[idxs] = new_rows
         updated = DenseState(
             s.example_emb, s.example_labels, s.prototypes, description_emb, s.class_freq
         )
-        return DenseRetrieverAdapter(updated, self._chunk, self._ops)
+        return DenseRetrieverAdapter(self._resident(updated), self._chunk, self._ops)
 
     def with_added_examples(
         self,
@@ -889,14 +963,14 @@ class DenseRetrieverAdapter(DenseRetriever):
         identical to a from-scratch build over the same merged corpus.
         Description embeddings are untouched; see ``with_added_classes``/
         ``with_updated_descriptions`` for those."""
-        s = self._s
+        s = self._host_state()  # host-side merge, then one re-upload (see `_host_state`)
         new_texts = list(new_texts)
         if new_texts:
-            new_emb = np.asarray(encoder.encode_documents(new_texts), dtype=np.float32)
+            new_emb = self._ops.to_host(encoder.encode_documents(new_texts)).astype(np.float32)
         else:
             new_emb = np.zeros((0, s.example_emb.shape[1]), dtype=s.example_emb.dtype)
         merged_emb = np.concatenate([s.example_emb, new_emb], axis=0)
         merged_labels = np.concatenate([s.example_labels, np.asarray(new_labels, dtype=np.int64)])
         proto, freq = _prototypes_and_freq(merged_emb, merged_labels, n_classes, self._ops)
         updated = DenseState(merged_emb, merged_labels, proto, s.description_emb, freq)
-        return DenseRetrieverAdapter(updated, self._chunk, self._ops)
+        return DenseRetrieverAdapter(self._resident(updated), self._chunk, self._ops)

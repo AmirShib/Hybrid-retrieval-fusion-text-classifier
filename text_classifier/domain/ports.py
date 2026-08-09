@@ -293,6 +293,16 @@ class SignalMatrix:
       every candidate row of that query (e.g. ``abs_top_dense_sim``).
     - ``topn_positive_only``: whether this matrix's contribution to the
       candidate top-n union drops non-positive values (``bm25.desc`` today).
+    - ``neighbors``: for a kNN-style matrix, the ``(b, k)`` ``(labels, scores)``
+      pair this node aggregated into ``value``, before the per-class scatter
+      collapsed it. Optional and purely a by-product: no feature column reads
+      it, and a provider that omits it is fully conformant. It exists so an
+      explanation payload can report *which* examples were retrieved without
+      re-running the search that already found them — the aggregate ``(b, C)``
+      matrix cannot be inverted back to neighbors, and re-querying the
+      retriever is the single most expensive stage in the pipeline (T83). A
+      label ``< 0`` / NaN score is padding, exactly as the retrieval ports
+      define it.
     """
 
     node: str
@@ -306,6 +316,7 @@ class SignalMatrix:
     extra_columns: Dict[str, np.ndarray] = field(default_factory=dict)
     extra_scalars: Dict[str, np.ndarray] = field(default_factory=dict)
     topn_positive_only: bool = False
+    neighbors: Optional[Tuple[np.ndarray, np.ndarray]] = None
 
     def column_for(self, derivation: str) -> Optional[str]:
         """The output column name for ``derivation`` on this matrix, or ``None``

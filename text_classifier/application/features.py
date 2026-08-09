@@ -71,6 +71,32 @@ def _effective_names(
     return [n for n in names if n in core_needed or n in kept_providers]
 
 
+def _merge_neighbors(
+    per_chunk: Sequence[Dict[str, Tuple[np.ndarray, np.ndarray]]],
+) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
+    """Concatenate each node's per-chunk ``(labels, scores)`` back into whole-
+    batch ``(n_queries, k)`` arrays, so the result is indexed by the same row
+    numbers the caller passed in.
+
+    A node missing from *any* chunk is dropped rather than partially merged:
+    a partial array would silently misalign every row after the gap, which is
+    far worse than the caller's documented fallback of querying the retriever
+    itself. No built-in provider is conditional per chunk, so this is a guard
+    against a future/custom provider, not an expected path."""
+    if not per_chunk:
+        return {}
+    common = set(per_chunk[0])
+    for captured in per_chunk[1:]:
+        common &= set(captured)
+    return {
+        node: (
+            np.concatenate([captured[node][0] for captured in per_chunk], axis=0),
+            np.concatenate([captured[node][1] for captured in per_chunk], axis=0),
+        )
+        for node in common
+    }
+
+
 def _row_rank(M: np.ndarray, cand_mask: np.ndarray, ops: Optional[ArrayOps] = None) -> np.ndarray:
     """Dense descending rank (1 = best) within each row's candidate set."""
     ops = ops or NumpyArrayOps()
@@ -177,6 +203,7 @@ class FeatureAssembler:
         self_ids: Optional[np.ndarray] = None,
         requested: Optional[Sequence[str]] = None,
         signal_providers: Optional[Sequence[SignalProvider]] = None,
+        neighbor_sink: Optional[Dict[str, Tuple[np.ndarray, np.ndarray]]] = None,
     ) -> pd.DataFrame:
         """Assemble the (item, candidate) feature table.
 
@@ -206,12 +233,27 @@ class FeatureAssembler:
         ``dense``/``lexical`` — byte-for-byte the previous, hardcoded behaviour.
         A caller that configures extra signals passes its own list here; ``dense``/
         ``lexical`` are still required for ``class_freq`` and remain the objects the
-        default providers wrap when ``signal_providers`` is left unset."""
+        default providers wrap when ``signal_providers`` is left unset.
+
+        ``neighbor_sink`` is an opt-in out-parameter: pass a dict and it is
+        filled with ``{node: (labels, scores)}``, the ``(n_queries, k)``
+        neighbor arrays each kNN-style signal already retrieved (see
+        ``SignalMatrix.neighbors``), concatenated across chunks. ``None`` (the
+        default, every caller that does not need them) collects nothing and
+        costs nothing. It exists so a caller needing *both* features and
+        neighbor evidence — ``InferencePipeline.explain_records`` — pays for
+        one retrieval pass instead of two; the arrays are ``(n, k)``, orders of
+        magnitude smaller than the ``(n, C)`` signal matrices, so accumulating
+        them across chunks does not undo the chunking's memory bound."""
         frames = []
         ids = np.asarray(query_ids)
         sids = None if self_ids is None else np.asarray(self_ids)
+        chunk_neighbors: list = []
         for s in range(0, len(query_texts), chunk):
             sl = slice(s, s + chunk)
+            captured: Optional[Dict[str, Tuple[np.ndarray, np.ndarray]]] = (
+                None if neighbor_sink is None else {}
+            )
             frames.append(
                 self._assemble_chunk(
                     list(query_texts[sl]),
@@ -225,8 +267,13 @@ class FeatureAssembler:
                     None if sids is None else sids[sl],
                     requested,
                     signal_providers,
+                    captured,
                 )
             )
+            if captured is not None:
+                chunk_neighbors.append(captured)
+        if neighbor_sink is not None:
+            neighbor_sink.update(_merge_neighbors(chunk_neighbors))
         if frames:
             return pd.concat(frames, ignore_index=True)
         return pd.DataFrame(columns=_effective_names(providers, requested, signal_providers or ()))
@@ -244,6 +291,7 @@ class FeatureAssembler:
         self_ids=None,
         requested: Optional[Sequence[str]] = None,
         signal_providers: Optional[Sequence[SignalProvider]] = None,
+        neighbor_sink: Optional[Dict[str, Tuple[np.ndarray, np.ndarray]]] = None,
     ) -> pd.DataFrame:
         C = self._space.size
         n = self._policy.top_n_per_signal
@@ -296,6 +344,12 @@ class FeatureAssembler:
                 sig_matrices[sm.node] = sm
                 if sm.node in provider.candidate_features():
                     candidate_values.append((sm.value, sm.topn_positive_only))
+                # Captured here, inside `_collect`, so it happens for both
+                # rounds *and* before the empty-shortlist early return below —
+                # an item that surfaced no candidate still has neighbors, and
+                # `explain_records` reports them.
+                if neighbor_sink is not None and sm.neighbors is not None:
+                    neighbor_sink[sm.node] = sm.neighbors
 
         second_stage = []
         for provider in signal_providers:
