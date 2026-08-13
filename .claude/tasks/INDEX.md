@@ -47,7 +47,7 @@ make the signal-provider refactor a safe refactor instead of a rewrite-and-pray.
 | 2 | Trust & packaging | T63, T67, T08 (docs after the Phase-1 surface settles) |
 | 3 | Operational capabilities (strictly ordered) | T66 → T43 → T68 → T69, then T29 |
 | 4 | Architecture & retrieval | T34 (phase 1 → 2) → T31, T33; T32 when corpus size demands |
-| 5 | Science & long-tail | T45, T40; T70 → T71; T72, T75; T76 last (gated, measure-first) |
+| 5 | Science & long-tail | T45, T40; T70 → T71; T72, T75; T76 last (gated, measure-first). T91 is independent — it touches only the decision layer |
 | 8 | **Execution model & feature decoupling (current priority)** | T88 → T87 → T83, T34-p1, T63 → T84 → T85 → T86; T34-p2 last. T89 → T90 slot in anywhere after T88 (independent of the device track) |
 
 ## Tier 1 — Tests (detailed, do first)
@@ -172,6 +172,7 @@ existing one. T70 is the high-value capability; T71 is a design spike gated on i
 | T76 | Numpy-only inference path: drop pandas from the hot loop — *gated on T34*       | todo   | T34, T75     |
 | T77 | User-provided validation/test splits (`--val-items` / `--test-items`)          | done   | T61          |
 | T79 | Expose the fitted retrievers to custom feature providers (`ctx.dense`/`ctx.lexical`) | todo | T70    |
+| T91 | Conformal risk control: a finite-sample guarantee on accuracy-on-accepted       | todo   | T66          |
 
 ## Tier 8 — Execution model & feature decoupling (current priority)
 

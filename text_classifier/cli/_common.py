@@ -122,9 +122,26 @@ def signed_num(x) -> str:
     return f"{x:+.4f}"
 
 
-def _read_csv(path: str, kind: str) -> pd.DataFrame:
+def _read_csv(path: str, kind: str, dtype: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
+    """``pd.read_csv`` with actionable errors, and no type inference on the
+    columns named in ``dtype``.
+
+    ``dtype`` exists for one reason: class keys and item labels are *identifiers*,
+    not numbers. Official statistical classifications are full of zero-padded
+    numeric codes — ISCO's armed-forces groups (``0110``, ``0210``, ``0310``),
+    COICOP divisions (``01``), NACE/ISIC, SIC — and pandas' inference turns a
+    column of those into int64, silently dropping the leading zero. The label
+    then no longer matches the key it was written against, and the failure
+    surfaces much later as "item label is not defined in the LabelSpace" (or,
+    worse, as two distinct classes colliding). Reading identifier columns as
+    strings keeps the file's own bytes authoritative.
+
+    A name in ``dtype`` that is not a column in the file is ignored by pandas,
+    which is what we want: the missing-column check runs afterwards and produces
+    a far better message than a read error would.
+    """
     try:
-        return pd.read_csv(path)
+        return pd.read_csv(path, dtype=dtype)
     except FileNotFoundError:
         raise SystemExit(f"error: {kind} file not found: {path!r}")
     except Exception as exc:  # malformed CSV, encoding, etc.
@@ -230,7 +247,7 @@ def read_label_space(path: str, key_col: str = "key", desc_col: str = "descripti
     if path.lower().endswith((".jsonl", ".ndjson")):
         return _label_space_from_jsonl(path)
 
-    df = _read_csv(path, "classes")
+    df = _read_csv(path, "classes", dtype={key_col: str})
     _require_columns(df, [key_col, desc_col], path, "classes")
     present_scalars = [c for c in _CLASS_SCALAR_COLS if c in df.columns]
     present_tuples = [c for c in _CLASS_TUPLE_COLS if c in df.columns]
@@ -256,7 +273,7 @@ def read_label_space(path: str, key_col: str = "key", desc_col: str = "descripti
 
 def read_items(path: str, text_col: str = "text", label_col: str = "label") -> List[LabeledItem]:
     """Read a labeled items CSV into LabeledItems, with clear errors."""
-    df = _read_csv(path, "items")
+    df = _read_csv(path, "items", dtype={label_col: str})
     _require_columns(df, [text_col, label_col], path, "items")
     try:
         return [

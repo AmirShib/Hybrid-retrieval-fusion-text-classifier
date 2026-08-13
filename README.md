@@ -33,7 +33,7 @@ no downloads, nothing to configure.
 
 ## What it looks like in practice
 
-Two runnable examples live in [`examples/`](examples/); each has its own
+Three runnable examples live in [`examples/`](examples/); each has its own
 README with the exact commands to reproduce it.
 
 **[CLINC150](examples/clinc150/)** — 150 user intents, plus a set of queries
@@ -59,6 +59,17 @@ taxonomy: the full pipeline reaches **~61% coverage at ~90%
 accuracy-on-accepted** on the held-out split — meaning roughly 61% of a real
 product catalog gets auto-coded at production-grade precision, and the rest is
 queued for a human to check.
+
+**[ISCO-08](examples/isco/)** — coding job titles to the ILO's international
+occupation classification: **436 classes, 7,002 labeled items**, both built from
+public ILO workbooks so the numbers are reproducible by anyone. This is the
+official-statistics case the package was shaped by — a real taxonomy, naturally
+imbalanced (median 13 examples per class, a tail down to 1), with rich official
+class descriptions. With the offline TF-IDF encoder — the floor, no semantics at
+all — it auto-codes **33% of the workload at 95% accuracy**, and fusion beats the
+best single retrieval signal by 14 points. Each item also carries its code under
+the *previous* revision of the taxonomy, so the "what happens when the
+classification changes" experiment comes with the dataset.
 
 The risk–coverage trade-off is the actual product here: every trained model
 ships an `evaluation.json` with the full curve, so you set the operating point

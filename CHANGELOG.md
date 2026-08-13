@@ -9,6 +9,22 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 ## [Unreleased]
 
 ### Added
+- **`examples/isco/` — ISCO-08 occupation coding, the reference benchmark for
+  official statistical classification.** `prepare.py` downloads two public ILO
+  workbooks and builds a 436-class / 7,002-item labeled benchmark: the ISCO-08
+  structure (definitions, task lists, included and excluded occupations, all four
+  hierarchy levels) becomes `classes.csv` + `classes.jsonl`, and the ILO's own
+  alphabetical coding index becomes `items.csv`. Naturally imbalanced (median 13
+  titles per class, tail to 1, head to 113), and every item carries its ISCO-88
+  code alongside its ISCO-08 one, so `--target isco88` produces the taxonomy-
+  revision experiment on real data. `--level` selects the hierarchy level and
+  `--min-examples` drops items (never classes) from classes too thin to stratify.
+  Runs fully offline after the download, with the TF-IDF encoder. See the
+  example's README for measured results.
+
+- **`docs/publication-plan.md`** — an assessment of what here is publishable,
+  where, and what work stands between the current state and a submission.
+
 - **Cross-encoder rerank signal (T33, phase 1) — opt-in, off by default.** Adds a
   second signal *round* to `FeatureAssembler`: a `SignalProvider` may now declare
   `needs_candidates = True` and run after candidate selection, receiving the
@@ -40,6 +56,18 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
   unchanged; no torch is imported either way.
 
 ### Fixed
+- **Zero-padded class keys and item labels lost their leading zeros on CSV
+  read.** `pd.read_csv` inferred a column of codes like `0110` as int64, so
+  `classes.csv` and `items.csv` stopped agreeing on the same class and the
+  failure surfaced much later — and misleadingly — as "item label(s) are not
+  defined in the LabelSpace". This hit every official statistical classification
+  with numeric codes: ISCO-08's armed-forces unit groups (`0110`/`0210`/`0310`),
+  COICOP divisions, NACE/ISIC, SIC. The key and label columns are now read as
+  strings, so the file's own bytes stay authoritative; the column names follow
+  `--key-col`/`--label-col` rather than being hardcoded, and a name that is not
+  present in the file is ignored so the existing missing-column error is still
+  what users see. Non-numeric keys and every other column are unaffected.
+
 - **`_topn_mask` (candidate selection) reached past the `ArrayOps` port and
   raised under a torch backend.** It called `M.astype` (which torch tensors do
   not have) and `np.partition` on what may be a tensor, then compared that numpy
