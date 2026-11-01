@@ -840,7 +840,15 @@ def _training_arguments(
                 "save_only_model": True,
             }
         )
-    return args_cls(**kwargs)
+    args = args_cls(**kwargs)
+    if not hasattr(args, "save_safetensors"):
+        # transformers 5 dropped this argument (it always writes safetensors), but
+        # sentence-transformers up to at least 5.2 still reads it when it saves a
+        # checkpoint -- which best-epoch selection does every epoch. Without it,
+        # every selecting fine-tune dies with an AttributeError. Safetensors is
+        # what was being written anyway, so supplying the old default is faithful.
+        args.save_safetensors = True
+    return args
 
 
 def _device_notes(config: EncoderConfig) -> None:

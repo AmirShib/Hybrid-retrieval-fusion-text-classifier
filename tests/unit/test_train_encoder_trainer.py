@@ -284,6 +284,12 @@ class TestTrainingArguments:
         assert args.save_only_model  # no optimizer-state pickles
         assert args.save_total_limit == 1
 
+    def test_save_safetensors_is_always_present_for_the_checkpoint_writer(self, tmp_path):
+        """transformers 5 removed this argument but sentence-transformers (5.2, at
+        least) reads it on every checkpoint save; selection checkpoints every epoch."""
+        args = enc._training_arguments(_config("x"), str(tmp_path), "eval_desc_cosine_accuracy@1")
+        assert args.save_safetensors is True
+
     def test_cpu_device_pins_the_trainer_to_cpu(self, tmp_path):
         assert enc._training_arguments(_config("x", device="cpu"), str(tmp_path), None).use_cpu
 

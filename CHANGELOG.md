@@ -96,6 +96,12 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
     behind a `train` extra, so a locked install previously lacked them; the
     hash-locked `requirements.lock` is regenerated and gains 18 packages (no
     existing pin moved).
+  - **Compatibility, tested:** sentence-transformers 6.2.0, 5.6.0 (the locked
+    version) and 5.2.0, the last on both transformers 4.57 and 5.22. 5.2.0 on
+    transformers 5 needed a shim: its Trainer reads `args.save_safetensors` when
+    writing a checkpoint, which transformers 5 removed, so every best-epoch
+    fine-tune died with an `AttributeError`; the argument is now supplied when
+    absent.
   - **Device handling differs:** the Trainer places the model itself.
     `encoder.device="cpu"` still pins to CPU, but a CUDA index (`"cuda:1"`) is not
     honoured and several visible GPUs are all used (`DataParallel`). Both warn;
