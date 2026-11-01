@@ -26,7 +26,10 @@ Multi-epoch encoder fine-tuning picks its own best epoch: with
 fine-tuning items is withheld from the gradient updates and re-scored after every
 epoch, and the best-scoring epoch is the one saved (per-epoch table:
 `<out>/encoder/encoder_training.json`). `--encoder-patience` stops early once the
-metric stalls.
+metric stalls. `--encoder-lr` / `--encoder-weight-decay` set the fine-tune's step
+size and decay, `--encoder-max-seq-length` the truncation length (otherwise the
+model's own default, which silently cuts longer texts off), and `--encoder-pooling`
+rebuilds the model with a different pooling mode.
 
 Every field of `PipelineConfig` (fusion kind + xgb_params, calibration kind,
 bm25_token_kwargs, encoder params, ...) is reachable via `--config config.json`
@@ -43,7 +46,7 @@ import logging
 
 from .. import TrainingPipeline
 from ..config import REUSE_QUERY_EMBEDDINGS_MODES
-from ..domain import ENCODER_LOSSES, ENCODER_SELECTION_METRICS
+from ..domain import ENCODER_LOSSES, ENCODER_POOLING_MODES, ENCODER_SELECTION_METRICS
 from ..infrastructure.registry import encoder_spec
 from ._common import (
     add_config_args,
@@ -109,9 +112,39 @@ def main() -> None:
         default=None,
         choices=list(ENCODER_SELECTION_METRICS),
         help="held-out metric the best epoch is chosen by (default: desc_acc@1, "
-        "nearest class description is the true class). 'knn_acc@1' scores nearest "
-        "labeled example instead — closer to the d_knn_* signals, but it re-encodes "
-        "the fine-tuning pool every epoch",
+        "nearest class description is the true class). 'desc_mrr' is its smoother "
+        "full-ranking cousin. 'knn_acc@1' scores nearest labeled example instead — "
+        "closer to the d_knn_* signals, but it re-encodes the fine-tuning pool every "
+        "epoch",
+    )
+    p.add_argument(
+        "--encoder-lr",
+        type=float,
+        default=None,
+        help="fine-tuning learning rate (default: 2e-5, the value the library's own fit() used)",
+    )
+    p.add_argument(
+        "--encoder-weight-decay",
+        type=float,
+        default=None,
+        help="fine-tuning weight decay (default: 0.01, as the library's own fit() used)",
+    )
+    p.add_argument(
+        "--encoder-max-seq-length",
+        type=int,
+        default=None,
+        help="truncate texts to this many tokens, when fine-tuning and when encoding "
+        "(default: the model's own limit, often 128-512 -- longer texts are cut off "
+        "silently). Persisted with the saved model",
+    )
+    p.add_argument(
+        "--encoder-pooling",
+        default=None,
+        choices=list(ENCODER_POOLING_MODES),
+        help="rebuild the encoder as its Transformer plus this pooling mode (default: "
+        "keep the model's own pooling -- mean for a plain Hugging Face checkpoint). "
+        "Drops any post-pooling module (Dense/Normalize) the model had, and a model "
+        "trained with a different pooling needs fine-tuning to adapt",
     )
     p.add_argument(
         "--encoder-patience",
@@ -235,6 +268,14 @@ def main() -> None:
         cfg.encoder.train_select_metric = args.encoder_select_metric
     if args.encoder_patience is not None:
         cfg.encoder.train_early_stopping_patience = args.encoder_patience
+    if args.encoder_lr is not None:
+        cfg.encoder.learning_rate = args.encoder_lr
+    if args.encoder_weight_decay is not None:
+        cfg.encoder.weight_decay = args.encoder_weight_decay
+    if args.encoder_max_seq_length is not None:
+        cfg.encoder.max_seq_length = args.encoder_max_seq_length
+    if args.encoder_pooling is not None:
+        cfg.encoder.pooling_mode = args.encoder_pooling
     if args.reuse_query_embeddings is not None:
         cfg.encoder.reuse_query_embeddings = args.reuse_query_embeddings
     if args.folds is not None:

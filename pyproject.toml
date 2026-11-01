@@ -53,7 +53,13 @@ lightgbm = ["lightgbm"]
 # array_backend="torch"/"auto") needs -- it deliberately does not get its own
 # "gpu" extra: torch is already exactly one install away via this one, and a
 # second extra pinning the same dependency would only be a second name for it.
-sentence-transformers = ["sentence-transformers>=2.2"]
+#
+# Fine-tuning runs through SentenceTransformerTrainer, which needs >=3.0 and the
+# `datasets` + `accelerate` packages. Those are hard dependencies of 3.x but moved
+# behind sentence-transformers' own `train` extra from 4.x on, so the extra is named
+# here: without it a locked install imports fine and then fails on the first
+# `datasets.Dataset`. (pip merely warns that a 3.x release has no `train` extra.)
+sentence-transformers = ["sentence-transformers[train]>=3.0"]
 
 [project.urls]
 Repository = "https://github.com/amirshib/hybrid-retrieval-fusion-text-classifier"
@@ -107,6 +113,8 @@ module = [
     "xgboost.*",
     "lightgbm.*",
     "sentence_transformers.*",
+    "datasets.*",
+    "accelerate.*",
     "sklearn.*",
     "scipy.*",
     "joblib.*",

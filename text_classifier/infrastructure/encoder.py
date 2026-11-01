@@ -3,9 +3,11 @@
 - ``SentenceTransformerEncoder``: wraps a SentenceTransformer (torch + a model
   download) and supports fine-tuning over (item, class-description) pairs with
   a pluggable loss (``EncoderConfig.train_loss``, default
-  MultipleNegativesSymmetricRankingLoss; see ``domain.services.ENCODER_LOSSES``),
-  scoring each epoch on a held-out slice so a multi-epoch run keeps its *best*
-  epoch rather than its last (``EncoderEpochTracker``).
+  MultipleNegativesSymmetricRankingLoss; see ``domain.services.ENCODER_LOSSES``)
+  through ``SentenceTransformerTrainer``. Each epoch is scored on a held-out slice
+  by ``InformationRetrievalEvaluator``, so a multi-epoch run keeps its *best* epoch
+  rather than its last. Pooling and truncation length are configurable
+  (``EncoderConfig.pooling_mode`` / ``max_seq_length``).
 - ``TfidfEncoder``: a torch-free, air-gap-friendly alternative built on sklearn's
   TfidfVectorizer. Its vocabulary/IDF are corpus-dependent, so it is *fit* on a
   training corpus rather than loaded pretrained.
@@ -25,18 +27,12 @@ import os
 import pickle
 import shutil
 import tempfile
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
 from ..config import EncoderConfig
-from ..domain import (
-    EpochSelectionPolicy,
-    LabeledItem,
-    LabelSpace,
-    TextEncoder,
-    encoder_retrieval_metrics,
-)
+from ..domain import ENCODER_SELECTION_METRICS, LabeledItem, LabelSpace, TextEncoder
 from .device import resolve_device
 
 if TYPE_CHECKING:  # torch-free at runtime; the type is only for checkers
@@ -153,8 +149,16 @@ class SentenceTransformerEncoder(TextEncoder):
         batch_size: int = 64,
         device=None,
         config: Optional[EncoderConfig] = None,
+        apply_model_overrides: bool = False,
         **kwargs,
     ) -> "SentenceTransformerEncoder":
+        """Load a model by name or from a saved directory.
+
+        ``apply_model_overrides`` applies ``config.pooling_mode`` and
+        ``config.max_seq_length`` to the loaded model. It is for *building* an
+        encoder from a pretrained checkpoint, and is off by default because this
+        method also reloads a model dir this package saved, which already carries
+        the pooling it was trained with and the sequence length it was saved at."""
         SentenceTransformer = _require_sentence_transformers().SentenceTransformer
 
         # device=None lets SentenceTransformer do its own auto-detection (which,
@@ -165,11 +169,10 @@ class SentenceTransformerEncoder(TextEncoder):
             "loading SentenceTransformer encoder on device=%s",
             resolve_device(device, mps_ok=True),
         )
-        return cls(
-            SentenceTransformer(model_name_or_path, device=device, **kwargs),
-            batch_size,
-            **_encode_options(config),
-        )
+        model = SentenceTransformer(model_name_or_path, device=device, **kwargs)
+        if apply_model_overrides and config is not None:
+            model = _apply_model_overrides(model, config)
+        return cls(model, batch_size, **_encode_options(config))
 
     @property
     def model(self):
@@ -451,157 +454,6 @@ def _stratified_holdout(
     )
 
 
-class EncoderEpochTracker:
-    """Scores a fine-tune's held-out slice after each epoch and remembers the best.
-
-    Framework-free by construction. It drives three collaborators:
-
-    - ``encoder`` — a ``TextEncoder`` *view of the model being trained*, so the
-      holdout is embedded through the same role/prompt logic used at inference
-      time (and picks up the live weights on every call);
-    - ``policy`` — an ``EpochSelectionPolicy``, which owns the entire "is this
-      epoch better / should we stop" rule;
-    - ``snapshot`` — a callback that persists the current weights wherever the
-      caller can reload them from, invoked exactly on the epochs that set a new
-      best.
-
-    That split leaves the torch-specific glue in ``train_encoder`` down to "call
-    ``observe`` once per epoch", and lets the whole selection loop be tested with
-    a stub encoder and no ML framework installed.
-
-    ``observe`` tolerates being called twice on unchanged weights (some
-    sentence-transformers versions can invoke an evaluator at both a step
-    boundary and the epoch end): the repeat is ignored, because counting it would
-    shift the epoch numbering and, with patience, stop training for no reason.
-    """
-
-    def __init__(
-        self,
-        encoder: TextEncoder,
-        holdout_texts: Sequence[str],
-        holdout_labels: np.ndarray,
-        descriptions: Sequence[str],
-        policy: EpochSelectionPolicy,
-        snapshot: Callable[[], None],
-        pool_texts: Optional[Sequence[str]] = None,
-        pool_labels: Optional[np.ndarray] = None,
-    ) -> None:
-        self._encoder = encoder
-        self._holdout_texts = list(holdout_texts)
-        self._holdout_labels = np.asarray(holdout_labels, dtype=np.intp)
-        self._descriptions = list(descriptions)
-        self.policy = policy
-        self._snapshot = snapshot
-        self._pool_texts = None if pool_texts is None else list(pool_texts)
-        self._pool_labels = None if pool_labels is None else np.asarray(pool_labels, dtype=np.intp)
-        self.history: List[Dict[str, float]] = []
-        self._last_emb: Optional[np.ndarray] = None
-
-    def observe(self) -> Optional[float]:
-        """Score the current weights; snapshot them if this is the best epoch yet.
-
-        Returns the selection metric for this epoch, or ``None`` if the call was a
-        repeat on weights that have not changed since the last one.
-        """
-        query_emb = self._encoder.encode_queries(self._holdout_texts)
-        if self._last_emb is not None and np.array_equal(query_emb, self._last_emb):
-            return None
-        self._last_emb = query_emb
-
-        pool_emb = None
-        if self._pool_texts is not None:
-            pool_emb = self._encoder.encode_documents(self._pool_texts)
-        metrics = encoder_retrieval_metrics(
-            query_emb,
-            self._encoder.encode_documents(self._descriptions),
-            self._holdout_labels,
-            pool_emb=pool_emb,
-            pool_labels=self._pool_labels,
-        )
-        self.history.append(metrics)
-        epoch = len(self.history)
-        # The policy is the single source of truth for "best": ask it about the
-        # whole history rather than tracking an incumbent here, so selection during
-        # training and selection re-derived from a persisted history cannot drift.
-        is_best = self.policy.best_epoch(self.history) == epoch
-        if is_best:
-            self._snapshot()
-        logger.info(
-            "encoder epoch %d: %s%s",
-            epoch,
-            ", ".join(f"{name}={value:.4f}" for name, value in metrics.items()),
-            " (best so far)" if is_best else "",
-        )
-        return self.policy.score(metrics)
-
-    @property
-    def best_epoch(self) -> int:
-        """1-based best epoch, or 0 if no epoch produced a usable score."""
-        return self.policy.best_epoch(self.history)
-
-    @property
-    def stop_requested(self) -> bool:
-        return self.policy.should_stop(self.history)
-
-    def report(self) -> Dict[str, Any]:
-        """JSON-clean record of the selection: what was measured, and what won."""
-        return {
-            "select_metric": self.policy.metric,
-            "select_min_delta": self.policy.min_delta,
-            "early_stopping_patience": self.policy.patience,
-            "n_holdout_items": len(self._holdout_texts),
-            "best_epoch": self.best_epoch,
-            "epochs": [
-                {"epoch": epoch, **metrics} for epoch, metrics in enumerate(self.history, start=1)
-            ],
-        }
-
-
-class _StopFineTuning(Exception):
-    """Internal signal that unwinds out of ``SentenceTransformer.fit`` to stop early.
-
-    An evaluator has no other way to end training, and nothing in the
-    sentence-transformers/transformers call chain catches it. Safe to raise: the
-    best epoch's weights are already snapshotted, and the in-memory model is left
-    holding the epoch that was just scored.
-    """
-
-
-def _epoch_evaluator(tracker: EncoderEpochTracker) -> Any:
-    """Wrap ``tracker`` in a sentence-transformers evaluator.
-
-    ``fit`` runs an evaluator once at the end of every epoch — v2 from its own
-    training loop, v3+ from an ``EvaluatorCallback`` — and accepts a bare float
-    return in both, so the hook is just "score the holdout, hand back the number".
-    We pass ``evaluation_steps=0`` at the call site so there is no second,
-    step-triggered call per epoch.
-
-    The class is defined inside the function to keep importing this module
-    torch-free. Subclassing ``SentenceEvaluator`` is required, not cosmetic: the
-    v3+ trainer wraps anything that is not a ``BaseEvaluator`` in a
-    ``SequentialEvaluator``. The base's own defaults for ``greater_is_better`` /
-    ``primary_metric`` are left alone — with ``save_best_model=False`` and no
-    ``callback``, nothing on the fit path reads them.
-    """
-    from sentence_transformers.evaluation import SentenceEvaluator
-
-    class _EpochEvaluator(SentenceEvaluator):
-        def __call__(
-            self, model: Any, output_path: Optional[str] = None, epoch: int = -1, steps: int = -1
-        ) -> float:
-            score = tracker.observe()
-            if score is None:  # repeat call on unchanged weights
-                return float("nan")
-            if tracker.stop_requested:
-                raise _StopFineTuning(
-                    f"no improvement in {tracker.policy.metric} for "
-                    f"{tracker.policy.patience} epoch(s)"
-                )
-            return score
-
-    return _EpochEvaluator()
-
-
 # EncoderConfig.train_loss friendly alias -> sentence_transformers.losses class
 # name. See domain.services.ENCODER_LOSSES for what each does.
 _TRAIN_LOSS_ALIASES = {
@@ -641,6 +493,455 @@ def _build_train_loss(name: str, model: Any, losses: Any, params: Dict[str, Any]
     return loss_cls(model, **params)
 
 
+# ------------------------------------------------------------ model construction
+def _import_first(candidates: Sequence[str], name: str) -> Any:
+    """``name`` from the first of ``candidates`` (module paths) that provides it.
+
+    sentence-transformers has moved its evaluators and training arguments between
+    releases (the old paths still work in 6.x but warn that they are deprecated),
+    so the newest location is tried first -- no deprecation warning on a current
+    install, and the old path on an older one."""
+    import importlib
+
+    for module in candidates:
+        try:
+            return getattr(importlib.import_module(module), name)
+        except (ImportError, AttributeError):
+            continue
+    raise ImportError(
+        f"could not import {name!r} from sentence-transformers (tried {list(candidates)}); "
+        "fine-tuning needs sentence-transformers>=3.0 -- "
+        "pip install -U 'text-classifier[sentence-transformers]'"
+    )
+
+
+def _pooling_mode_of(pooling: Any) -> str:
+    """The mode string of a ``Pooling`` module, across sentence-transformers
+    releases: older ones expose ``get_pooling_mode_str()`` (booleans underneath),
+    6.x a plain ``pooling_mode`` attribute (a string, or a tuple when several modes
+    are concatenated). ``"?"`` if neither is there."""
+    getter = getattr(pooling, "get_pooling_mode_str", None)
+    if callable(getter):
+        return str(getter())
+    mode = getattr(pooling, "pooling_mode", None)
+    if isinstance(mode, (list, tuple)):
+        return "+".join(str(m) for m in mode)
+    return str(mode) if mode is not None else "?"
+
+
+def _embedding_dim(module: Any) -> Optional[int]:
+    """A Transformer module's output width, or ``None`` if it has no such notion.
+    6.x renamed ``get_word_embedding_dimension`` to ``get_embedding_dimension``."""
+    for name in ("get_embedding_dimension", "get_word_embedding_dimension"):
+        getter = getattr(module, name, None)
+        if callable(getter):
+            return int(getter())
+    return None
+
+
+def _st_module(new: str, old: str) -> Any:
+    """A sentence-transformers submodule, preferring its newest location.
+
+    Releases since 5.x have moved ``models``/``losses`` under
+    ``sentence_transformers.sentence_transformer`` and deprecate the old paths
+    (still importable, but they warn on every import); 3.x/4.x only have the old
+    ones."""
+    import importlib
+
+    for module in (new, old):
+        try:
+            return importlib.import_module(module)
+        except ImportError:
+            continue
+    raise ImportError(f"could not import {old} (also tried {new})")
+
+
+def _losses_module() -> Any:
+    """``sentence_transformers.losses``, from wherever this release keeps it."""
+    return _st_module(
+        "sentence_transformers.sentence_transformer.losses", "sentence_transformers.losses"
+    )
+
+
+def _models_module() -> Any:
+    """The Transformer/Pooling/Normalize module classes (``models`` in older
+    releases, ``sentence_transformer.modules`` in newer ones)."""
+    return _st_module(
+        "sentence_transformers.sentence_transformer.modules", "sentence_transformers.models"
+    )
+
+
+def _with_pooling(model: "SentenceTransformer", mode: str) -> "SentenceTransformer":
+    """Rebuild ``model`` as its first (Transformer) module plus ``Pooling(mode)``.
+
+    Anything the model had *after* its pooling -- a ``Dense`` projection, a
+    ``Normalize`` layer -- is dropped, because it was sized for the old pooling's
+    output and has no meaning on the new one; both that and replacing a pooling
+    the model already shipped with are logged, as they change what the model
+    computes before any fine-tuning has had a chance to adapt it."""
+    from sentence_transformers import SentenceTransformer
+
+    models = _models_module()
+    modules = list(model)
+    first = modules[0]
+    width = _embedding_dim(first)
+    if width is None:
+        raise ValueError(
+            f"encoder.pooling_mode={mode!r} needs a model whose first module is a "
+            f"Transformer (token embeddings to pool); this one starts with "
+            f"{type(first).__name__}. Leave pooling_mode unset for it."
+        )
+    previous = [m for m in modules if isinstance(m, models.Pooling)]
+    dropped = [type(m).__name__ for m in modules[1:] if not isinstance(m, models.Pooling)]
+    if previous:
+        current = _pooling_mode_of(previous[0])
+        if current != mode:
+            logger.warning(
+                "encoder.pooling_mode=%r replaces the model's own pooling (%s); quality "
+                "will not match the original until the encoder is fine-tuned",
+                mode,
+                current,
+            )
+    if dropped:
+        logger.warning(
+            "encoder.pooling_mode=%r rebuilds the model as Transformer + Pooling and "
+            "drops its post-pooling module(s): %s",
+            mode,
+            ", ".join(dropped),
+        )
+    try:
+        pooling = models.Pooling(width, pooling_mode=mode)
+    except (ValueError, TypeError, AssertionError) as exc:
+        import sentence_transformers
+
+        raise ValueError(
+            f"encoder.pooling_mode={mode!r} is not supported by the installed "
+            f"sentence-transformers {sentence_transformers.__version__}: {exc}"
+        ) from exc
+    rebuilt = SentenceTransformer(modules=[first, pooling], device=str(model.device))
+    # The model-level settings live outside the modules (they come from
+    # config_sentence_transformers.json); carry them over so `query_prompt_name` /
+    # `document_prompt_name` keep resolving against the model's own prompts.
+    for attr in ("prompts", "default_prompt_name"):
+        if hasattr(model, attr):
+            setattr(rebuilt, attr, getattr(model, attr))
+    return rebuilt
+
+
+def _set_max_seq_length(model: "SentenceTransformer", max_seq_length: int) -> None:
+    """Set the model's truncation length, warning when it exceeds what the
+    underlying transformer's position embeddings can address."""
+    limit = getattr(
+        getattr(getattr(model[0], "auto_model", None), "config", None),
+        "max_position_embeddings",
+        None,
+    )
+    if isinstance(limit, int) and max_seq_length > limit:
+        logger.warning(
+            "encoder.max_seq_length=%d exceeds the model's max_position_embeddings=%d; "
+            "encoding longer texts is likely to fail",
+            max_seq_length,
+            limit,
+        )
+    model.max_seq_length = max_seq_length
+
+
+def _apply_model_overrides(model: "SentenceTransformer", config: EncoderConfig):
+    """Apply ``EncoderConfig.pooling_mode`` / ``max_seq_length`` to a freshly
+    loaded model. Both default to ``None``, which changes nothing."""
+    if config.pooling_mode is not None:
+        model = _with_pooling(model, config.pooling_mode)
+    if config.max_seq_length is not None:
+        _set_max_seq_length(model, config.max_seq_length)
+    return model
+
+
+# ------------------------------------------------------------------- fine-tuning
+def _selection_key(metric: str, n_classes: int) -> str:
+    """The Trainer metric name an ``ENCODER_SELECTION_METRICS`` entry is reported
+    under: ``eval_`` + the evaluator's ``name`` + ``_cosine_`` + the IR metric.
+    ``desc_mrr`` is read at ``k = n_classes`` so it is a full-ranking MRR, not
+    one truncated at the evaluator's default depth of 10."""
+    return {
+        "desc_acc@1": "eval_desc_cosine_accuracy@1",
+        "desc_mrr": f"eval_desc_cosine_mrr@{n_classes}",
+        "knn_acc@1": "eval_knn_cosine_accuracy@1",
+    }[metric]
+
+
+def _build_epoch_evaluator(
+    config: EncoderConfig,
+    texts: Sequence[str],
+    labels: np.ndarray,
+    fit_idx: np.ndarray,
+    holdout_idx: np.ndarray,
+    descriptions: Sequence[str],
+    *,
+    with_knn: bool,
+) -> Any:
+    """The per-epoch scorer: ``InformationRetrievalEvaluator``\\ s over the holdout.
+
+    ``desc`` -- queries are the held-out items, the corpus is the class
+    descriptions, and the one relevant document is the item's own class: its
+    ``accuracy@1`` is "nearest description is the true class" and its ``mrr@C`` is
+    the full-rank reciprocal rank. ``knn`` (only when selecting on it, since it
+    re-encodes the fine-tuning pool every epoch) uses the *fit* items as the
+    corpus, with every pool item of the query's class relevant: ``accuracy@1`` is
+    then "nearest labeled example shares the label". The pool excludes the
+    holdout by construction, or each query would retrieve itself.
+
+    Prompts follow the encoder's own query/document roles (queries are the items,
+    documents the descriptions and examples), so what is scored is what the
+    deployed encoder will actually compute.
+    """
+    from sentence_transformers.util import cos_sim
+
+    IR = _import_first(
+        (
+            "sentence_transformers.sentence_transformer.evaluation",
+            "sentence_transformers.evaluation",
+        ),
+        "InformationRetrievalEvaluator",
+    )
+    Sequential = _import_first(
+        (
+            "sentence_transformers.sentence_transformer.evaluation",
+            "sentence_transformers.evaluation",
+        ),
+        "SequentialEvaluator",
+    )
+
+    extra: Dict[str, Any] = {}
+    q_prompt, q_name = SentenceTransformerEncoder._effective_prompt(
+        config.query_prompt, config.query_prompt_name
+    )
+    d_prompt, d_name = SentenceTransformerEncoder._effective_prompt(
+        config.document_prompt, config.document_prompt_name
+    )
+    for key, value in (
+        ("query_prompt", q_prompt),
+        ("query_prompt_name", q_name),
+        ("corpus_prompt", d_prompt),
+        ("corpus_prompt_name", d_name),
+        ("truncate_dim", config.encode_kwargs.get("truncate_dim")),
+    ):
+        if value is not None:
+            extra[key] = value
+
+    def evaluator(name, queries, corpus, relevant, mrr_k):
+        return IR(
+            queries,
+            corpus,
+            relevant,
+            name=name,
+            accuracy_at_k=[1],
+            precision_recall_at_k=[1],
+            mrr_at_k=[mrr_k],
+            ndcg_at_k=[1],
+            map_at_k=[1],
+            score_functions={"cosine": cos_sim},
+            main_score_function="cosine",
+            batch_size=config.encode_batch_size,
+            show_progress_bar=False,
+            write_csv=False,
+            **extra,
+        )
+
+    queries = {f"q{k}": texts[int(i)] for k, i in enumerate(holdout_idx)}
+    holdout_labels = [int(labels[int(i)]) for i in holdout_idx]
+
+    desc_corpus = {f"c{c}": descriptions[c] for c in range(len(descriptions))}
+    desc_relevant = {f"q{k}": {f"c{lab}"} for k, lab in enumerate(holdout_labels)}
+    evaluators = [evaluator("desc", queries, desc_corpus, desc_relevant, len(descriptions))]
+
+    if with_knn:
+        pool = {f"p{k}": texts[int(i)] for k, i in enumerate(fit_idx)}
+        by_class: Dict[int, set] = {}
+        for k, i in enumerate(fit_idx):
+            by_class.setdefault(int(labels[int(i)]), set()).add(f"p{k}")
+        # One shared set per class, not one per query: the evaluator only reads
+        # them, and a copy per held-out item would cost O(holdout * pool / classes).
+        knn_relevant = {f"q{k}": by_class.get(lab, set()) for k, lab in enumerate(holdout_labels)}
+        evaluators.append(evaluator("knn", queries, pool, knn_relevant, 1))
+
+    return evaluators[0] if len(evaluators) == 1 else Sequential(evaluators)
+
+
+def _warmup_kwargs(ratio: float) -> Dict[str, Any]:
+    """The Trainer argument carrying a warmup *fraction* of the total steps.
+
+    transformers 5 deprecates ``warmup_ratio`` in favour of a float
+    ``warmup_steps``; transformers 4 only understands the former."""
+    try:
+        import transformers
+
+        major = int(transformers.__version__.split(".")[0])
+    except Exception:
+        major = 4
+    return {"warmup_steps": ratio} if major >= 5 else {"warmup_ratio": ratio}
+
+
+def _training_arguments(
+    config: EncoderConfig, output_dir: str, select_metric_key: Optional[str]
+) -> Any:
+    """``SentenceTransformerTrainingArguments`` for one fine-tune.
+
+    ``batch_sampler=NO_DUPLICATES`` keeps two items of one class out of the same
+    batch (they share the description text, which is what the sampler detects), so
+    an in-batch negative is never an item's own description. With
+    ``select_metric_key`` the Trainer evaluates and checkpoints once per epoch and
+    reloads the best one at the end; without it nothing is evaluated or written
+    and the last epoch is kept."""
+    import dataclasses
+
+    st = _require_sentence_transformers()
+    BatchSamplers = _import_first(
+        (
+            "sentence_transformers.sentence_transformer.training_args",
+            "sentence_transformers.training_args",
+        ),
+        "BatchSamplers",
+    )
+    args_cls = st.SentenceTransformerTrainingArguments
+    names = {f.name for f in dataclasses.fields(args_cls)}
+
+    def first_present(*candidates: str) -> str:
+        return next(c for c in candidates if c in names)
+
+    kwargs: Dict[str, Any] = {
+        "output_dir": output_dir,
+        "num_train_epochs": config.train_epochs,
+        "per_device_train_batch_size": config.train_batch_size,
+        "learning_rate": config.learning_rate,
+        "weight_decay": config.weight_decay,
+        "batch_sampler": BatchSamplers.NO_DUPLICATES,
+        "report_to": "none",  # nothing is sent anywhere: the host may be air-gapped
+        "disable_tqdm": True,
+        "logging_strategy": "no",
+        **_warmup_kwargs(config.warmup_ratio),
+    }
+    if config.device == "cpu":
+        kwargs["use_cpu"] = True
+    if select_metric_key is None:
+        kwargs[first_present("eval_strategy", "evaluation_strategy")] = "no"
+        kwargs["save_strategy"] = "no"
+    else:
+        kwargs.update(
+            {
+                first_present("eval_strategy", "evaluation_strategy"): "epoch",
+                "save_strategy": "epoch",
+                "load_best_model_at_end": True,
+                "metric_for_best_model": select_metric_key,
+                "greater_is_better": True,
+                "save_total_limit": 1,
+                # Skip optimizer/scheduler/RNG state: those are torch pickles, and
+                # the checkpoint only ever needs the weights (it lives in a temp
+                # dir that is removed; the model dir is written by model.save()).
+                "save_only_model": True,
+            }
+        )
+    return args_cls(**kwargs)
+
+
+def _device_notes(config: EncoderConfig) -> None:
+    """Warn about the two ways the Trainer's device handling differs from
+    ``SentenceTransformer(device=...)``, which this package used to rely on."""
+    device = config.device
+    if device and device.startswith("cuda:"):
+        logger.warning(
+            "encoder.device=%r: the Trainer places the model itself and does not honour a "
+            "CUDA device index; set CUDA_VISIBLE_DEVICES to pin a specific GPU",
+            device,
+        )
+    elif device != "cpu":
+        try:
+            import torch
+
+            n_gpus = torch.cuda.device_count()
+        except Exception:
+            n_gpus = 0
+        if n_gpus > 1:
+            logger.warning(
+                "%d CUDA devices are visible and the Trainer will use all of them "
+                "(DataParallel), which shrinks each replica's batch of in-batch "
+                "negatives; set CUDA_VISIBLE_DEVICES to a single GPU to avoid that",
+                n_gpus,
+            )
+
+
+def _log_epoch_callback() -> Any:
+    """A ``TrainerCallback`` that logs each epoch's held-out scores (the line the
+    old per-epoch tracker used to emit). Defined inside the function so importing
+    this module stays torch-free."""
+    from transformers import TrainerCallback
+
+    class _LogEpoch(TrainerCallback):
+        def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+            shown = {
+                k[len("eval_") :]: v
+                for k, v in (metrics or {}).items()
+                if k.startswith("eval_") and "cosine" in k
+            }
+            logger.info(
+                "encoder epoch %s: %s",
+                int(round(state.epoch or 0)),
+                ", ".join(f"{k}={v:.4f}" for k, v in sorted(shown.items())),
+            )
+
+    return _LogEpoch()
+
+
+def _training_history(
+    trainer: Any, config: EncoderConfig, n_classes: int, n_fit: int, n_holdout: int
+) -> Dict[str, Any]:
+    """JSON-clean record of a selected fine-tune, read off the Trainer's log.
+
+    The per-epoch table is keyed by this package's metric names
+    (``ENCODER_SELECTION_METRICS``), not the evaluator's. ``best_epoch`` is the
+    epoch whose checkpoint the Trainer reloaded; ties go to the earlier epoch
+    because the Trainer only replaces its best on a strict improvement."""
+    evals = [
+        entry
+        for entry in trainer.state.log_history
+        if any(key.startswith("eval_") for key in entry)
+    ]
+    epochs: List[Dict[str, Any]] = []
+    for number, entry in enumerate(evals, start=1):
+        record: Dict[str, Any] = {"epoch": number}
+        for metric in ENCODER_SELECTION_METRICS:
+            key = _selection_key(metric, n_classes)
+            if key in entry:
+                record[metric] = float(entry[key])
+        epochs.append(record)
+
+    best_epoch = 0
+    checkpoint = trainer.state.best_model_checkpoint
+    if checkpoint:
+        try:
+            step = int(os.path.basename(os.path.normpath(checkpoint)).rsplit("-", 1)[-1])
+            best_epoch = next(
+                (n for n, entry in enumerate(evals, start=1) if entry.get("step") == step), 0
+            )
+        except ValueError:
+            best_epoch = 0
+    if best_epoch == 0 and epochs:
+        scores = [e.get(config.train_select_metric, float("nan")) for e in epochs]
+        best_epoch = int(np.nanargmax(scores)) + 1 if not np.all(np.isnan(scores)) else 0
+
+    return {
+        "select_metric": config.train_select_metric,
+        "select_min_delta": config.train_select_min_delta,
+        "early_stopping_patience": config.train_early_stopping_patience,
+        "n_holdout_items": n_holdout,
+        "best_epoch": best_epoch,
+        "epochs": epochs,
+        "n_fit_items": n_fit,
+        "epochs_requested": config.train_epochs,
+        "epochs_run": len(epochs),
+        "early_stopped": len(epochs) < config.train_epochs,
+    }
+
+
 def train_encoder(
     items: Sequence[LabeledItem],
     label_space: LabelSpace,
@@ -649,22 +950,26 @@ def train_encoder(
 ) -> SentenceTransformerEncoder:
     """Fine-tune a bi-encoder so items sit near their class description.
 
-    Uses ``config.train_loss`` (default MultipleNegativesSymmetricRankingLoss) on
-    (item_text, description) pairs. NoDuplicatesDataLoader keeps two items of the
-    same class out of one batch, which is what prevents the in-batch negatives
-    from treating an item's own description as a negative for a same-class
-    sibling.
+    Runs a ``SentenceTransformerTrainer`` with ``config.train_loss`` (default
+    MultipleNegativesSymmetricRankingLoss) on (item_text, description) pairs,
+    ``config.learning_rate`` / ``weight_decay``, and the ``NO_DUPLICATES`` batch
+    sampler, which keeps two items of the same class out of one batch -- what
+    prevents the in-batch negatives from treating an item's own description as a
+    negative for a same-class sibling.
 
     **Which epoch you get back.** With ``train_epochs == 1`` (the default), or
     ``train_holdout_ratio == 0``, this is the state after the final epoch: every
     item trains, nothing is measured, and there is nothing to choose between.
     Otherwise a stratified ``train_holdout_ratio`` of ``items`` is withheld from
-    the gradient updates and re-scored after every epoch, and the epoch scoring
-    best on ``train_select_metric`` is what is returned and saved — so raising
-    ``train_epochs`` to 10 or 20 stops being a gamble on the last epoch being the
-    good one. ``train_early_stopping_patience`` cuts the run short once the metric
-    stalls. The per-epoch table travels with the encoder as ``training_history``
-    and is written into the saved encoder directory.
+    the gradient updates and scored after every epoch by
+    ``InformationRetrievalEvaluator``; the Trainer reloads the best epoch's
+    weights at the end (``load_best_model_at_end``), so raising ``train_epochs``
+    to 10 or 20 stops being a gamble on the last epoch being the good one.
+    ``train_early_stopping_patience`` cuts the run short once the metric stalls
+    (``train_select_min_delta`` is the improvement it must beat to count as
+    progress -- it does not change which epoch is *picked*, only when to give up).
+    The per-epoch table travels with the encoder as ``training_history`` and is
+    written into the saved encoder directory.
 
     Leakage note: the holdout is carved out of the caller's ``items``, which in
     the out-of-fold loop are already one fold's *training* rows. Withheld from the
@@ -672,10 +977,18 @@ def train_encoder(
     not entitled to, and the rows the fusion model trains on are untouched.
     """
     st = _require_sentence_transformers()
-    InputExample, SentenceTransformer, losses = st.InputExample, st.SentenceTransformer, st.losses
-    from sentence_transformers.datasets import NoDuplicatesDataLoader
+    if not hasattr(st, "SentenceTransformerTrainer"):
+        raise ImportError(
+            f"fine-tuning needs sentence-transformers>=3.0 (found {st.__version__}): "
+            "pip install -U 'text-classifier[sentence-transformers]'"
+        )
+    from datasets import Dataset
+    from transformers import EarlyStoppingCallback
+
+    losses = _losses_module()
 
     items = list(items)
+    texts = [it.text for it in items]
     labels = np.asarray(label_space.encode_labels([it.label for it in items]), dtype=np.int64)
     descriptions = label_space.descriptions
 
@@ -695,133 +1008,93 @@ def train_encoder(
         )
         fit_idx = np.arange(len(items), dtype=np.intp)
         holdout_idx = np.empty(0, dtype=np.intp)
+    selecting = len(holdout_idx) > 0
 
     logger.info(
         "fine-tuning SentenceTransformer encoder on device=%s",
         resolve_device(config.device, mps_ok=True),
     )
-    model = SentenceTransformer(config.model_name_or_path, device=config.device, **config.params)
+    _device_notes(config)
+    model = _apply_model_overrides(
+        st.SentenceTransformer(config.model_name_or_path, device=config.device, **config.params),
+        config,
+    )
     encode_options = _encode_options(config)
     encoder = SentenceTransformerEncoder(model, config.encode_batch_size, **encode_options)
 
-    examples = [InputExample(texts=[items[i].text, descriptions[int(labels[i])]]) for i in fit_idx]
-    loader = NoDuplicatesDataLoader(examples, batch_size=config.train_batch_size)
-    loss = _build_train_loss(config.train_loss, model, losses, config.train_loss_params)
-    steps_per_epoch = max(1, len(loader))
-    warmup_steps = int(steps_per_epoch * config.train_epochs * config.warmup_ratio)
-    objectives = [(loader, loss)]
-
-    if len(holdout_idx) == 0:
-        model.fit(
-            train_objectives=objectives,
-            epochs=config.train_epochs,
-            warmup_steps=warmup_steps,
-            output_path=output_path,
-            show_progress_bar=False,
-        )
-        return encoder
-
-    policy = EpochSelectionPolicy(
-        metric=config.train_select_metric,
-        min_delta=config.train_select_min_delta,
-        patience=config.train_early_stopping_patience,
+    train_dataset = Dataset.from_dict(
+        {
+            "anchor": [texts[int(i)] for i in fit_idx],
+            "positive": [descriptions[int(labels[int(i)])] for i in fit_idx],
+        }
     )
-    # The nearest-example metric needs the fine-tuning pool re-encoded every epoch;
-    # only pay for that when it is what we are selecting on. The pool deliberately
-    # excludes the holdout items, or each would retrieve itself as its own neighbor.
-    pool_texts = pool_labels = None
-    if policy.metric.startswith("knn"):
-        pool_texts = [items[i].text for i in fit_idx]
-        pool_labels = labels[fit_idx]
+    loss = _build_train_loss(config.train_loss, model, losses, config.train_loss_params)
 
-    snapshot_dir = tempfile.mkdtemp(prefix="tc-encoder-epoch-")
-    try:
-        tracker = EncoderEpochTracker(
-            encoder,
-            [items[i].text for i in holdout_idx],
-            labels[holdout_idx],
+    evaluator = None
+    callbacks: List[Any] = []
+    select_key = None
+    if selecting:
+        select_key = _selection_key(config.train_select_metric, len(descriptions))
+        evaluator = _build_epoch_evaluator(
+            config,
+            texts,
+            labels,
+            fit_idx,
+            holdout_idx,
             descriptions,
-            policy,
-            snapshot=lambda: model.save(snapshot_dir),
-            pool_texts=pool_texts,
-            pool_labels=pool_labels,
+            with_knn=config.train_select_metric.startswith("knn"),
         )
+        callbacks.append(_log_epoch_callback())
+        if config.train_early_stopping_patience > 0:
+            callbacks.append(
+                EarlyStoppingCallback(
+                    early_stopping_patience=config.train_early_stopping_patience,
+                    early_stopping_threshold=config.train_select_min_delta,
+                )
+            )
         logger.info(
             "fine-tuning %d epoch(s) on %d item(s); selecting the best epoch by %s "
             "on a %d-item holdout",
             config.train_epochs,
             len(fit_idx),
-            policy.metric,
+            config.train_select_metric,
             len(holdout_idx),
         )
-        early_stopped = False
-        try:
-            model.fit(
-                train_objectives=objectives,
-                epochs=config.train_epochs,
-                warmup_steps=warmup_steps,
-                evaluator=_epoch_evaluator(tracker),
-                evaluation_steps=0,  # exactly one evaluator call per epoch
-                save_best_model=False,  # we select and persist the best epoch ourselves
-                output_path=None,  # written below, after the best epoch is restored
-                show_progress_bar=False,
-            )
-        except _StopFineTuning as stop:
-            early_stopped = True
-            logger.info("stopped fine-tuning after epoch %d: %s", len(tracker.history), stop)
 
-        selected = _select_epoch(tracker, encoder, snapshot_dir, config, encode_options)
-        selected.training_history = {
-            **tracker.report(),
-            "n_fit_items": int(len(fit_idx)),
-            "epochs_requested": config.train_epochs,
-            "epochs_run": len(tracker.history),
-            "early_stopped": early_stopped,
-        }
+    work_dir = tempfile.mkdtemp(prefix="tc-encoder-train-")
+    try:
+        trainer = st.SentenceTransformerTrainer(
+            model=model,
+            args=_training_arguments(config, work_dir, select_key),
+            train_dataset=train_dataset,
+            loss=loss,
+            evaluator=evaluator,
+            callbacks=callbacks,
+        )
+        trainer.train()
+        if selecting:
+            history = _training_history(
+                trainer, config, len(descriptions), len(fit_idx), len(holdout_idx)
+            )
+            encoder.training_history = history
+            if history["early_stopped"]:
+                logger.info(
+                    "stopped fine-tuning after epoch %d of %d: no improvement in %s for %d "
+                    "epoch(s)",
+                    history["epochs_run"],
+                    config.train_epochs,
+                    config.train_select_metric,
+                    config.train_early_stopping_patience,
+                )
+            logger.info(
+                "kept epoch %d of %d (%s)",
+                history["best_epoch"],
+                history["epochs_run"],
+                config.train_select_metric,
+            )
     finally:
-        shutil.rmtree(snapshot_dir, ignore_errors=True)
+        shutil.rmtree(work_dir, ignore_errors=True)
 
     if output_path:
-        selected.save(output_path)
-    return selected
-
-
-def _select_epoch(
-    tracker: EncoderEpochTracker,
-    trained: SentenceTransformerEncoder,
-    snapshot_dir: str,
-    config: EncoderConfig,
-    encode_options: Dict[str, Any],
-) -> SentenceTransformerEncoder:
-    """Return the encoder for the best epoch, reloading the snapshot if needed.
-
-    ``fit`` leaves the in-memory model on the epoch it last ran, so when that is
-    also the best epoch (the common "still improving at the end" case, and the
-    case where nothing was scoreable) there is nothing to do. Otherwise the best
-    epoch's weights are on disk and are reloaded from there.
-    """
-    from sentence_transformers import SentenceTransformer
-
-    best, last = tracker.best_epoch, len(tracker.history)
-    if best == 0:
-        logger.warning(
-            "no epoch produced a usable %s score; keeping the last epoch",
-            config.train_select_metric,
-        )
-        return trained
-    if best == last:
-        logger.info("best epoch is the last one (%d); keeping the trained model", best)
-        return trained
-    logger.info(
-        "restoring epoch %d of %d (best %s=%.4f; last epoch scored %.4f)",
-        best,
-        last,
-        config.train_select_metric,
-        tracker.history[best - 1][config.train_select_metric],
-        tracker.history[last - 1][config.train_select_metric],
-    )
-    return SentenceTransformerEncoder(
-        SentenceTransformer(snapshot_dir, device=config.device, **config.params),
-        config.encode_batch_size,
-        **encode_options,
-    )
+        encoder.save(output_path)
+    return encoder

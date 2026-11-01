@@ -323,19 +323,53 @@ to `model_dir/encoder/encoder_training.json`:
 {
   "select_metric": "desc_acc@1", "best_epoch": 6, "epochs_run": 9,
   "early_stopped": true, "n_fit_items": 4212, "n_holdout_items": 468,
-  "epochs": [{"epoch": 1, "desc_acc@1": 0.61, "desc_mrr": 0.72, "desc_pos_sim": 0.44}, "..."]
+  "epochs": [{"epoch": 1, "desc_acc@1": 0.61, "desc_mrr": 0.72}, "..."]
 }
 ```
 
 `--encoder-select-metric` chooses what "best" means: `desc_acc@1` (default —
 the item's nearest class description *is* its class, the direct analogue of the
 `d_desc_sim` signal), `desc_mrr` (smoother, better at separating epochs on a
-small holdout), `desc_pos_sim` (a diagnostic — it can rise while ranking
-degrades), or `knn_acc@1` (nearest labeled *example* shares the label, closest
-to the `d_knn_*` signals, but it re-encodes the fine-tuning pool every epoch).
-Set `--encoder-epoch-holdout 0` to disable selection entirely: every item trains
-and the final epoch wins, as before. Selection is inert at the default
+small holdout), or `knn_acc@1` (nearest labeled *example* shares the label,
+closest to the `d_knn_*` signals, but it re-encodes the fine-tuning pool every
+epoch). Set `--encoder-epoch-holdout 0` to disable selection entirely: every item
+trains and the final epoch wins, as before. Selection is inert at the default
 `--encoder-epochs 1` — one epoch, nothing to choose between.
+
+Fine-tuning runs through sentence-transformers' `SentenceTransformerTrainer`. The
+batch sampler is `NO_DUPLICATES` (two items of one class never share a batch, so
+an item's own description is never one of its in-batch negatives), each epoch is
+scored by an `InformationRetrievalEvaluator` over the holdout, and the Trainer
+reloads the best epoch's weights at the end. `--encoder-patience` is the
+Trainer's early-stopping patience, and `train_select_min_delta` the improvement
+that counts as progress for it. Everything the Trainer writes along the way goes
+to a temporary directory that is removed afterwards; the saved model directory
+comes only from `model.save()`, so it stays pickle-free.
+
+**Tuning the fine-tune and the model it builds.** All of these default to "leave
+the model alone", so an existing config trains exactly as before:
+
+| Setting (`encoder.*` / CLI flag) | Default | Effect |
+|---|---|---|
+| `learning_rate` / `--encoder-lr` | `2e-5` | AdamW step size (the library's own `fit()` default) |
+| `weight_decay` / `--encoder-weight-decay` | `0.01` | AdamW decay (likewise) |
+| `train_loss` / `--encoder-loss` | `multiple_negatives_symmetric_ranking` | or `multiple_negatives_ranking`, or `cached_multiple_negatives_ranking` for a large effective batch on a small GPU |
+| `train_loss_params` | `{}` | passed to the loss, e.g. `{"scale": 10.0}` (the temperature) or `{"mini_batch_size": 32}` |
+| `max_seq_length` / `--encoder-max-seq-length` | model's own | truncation length in tokens, when training *and* encoding; persisted with the saved model. Otherwise longer texts are silently cut at the model default |
+| `pooling_mode` / `--encoder-pooling` | model's own | `mean`, `cls`, `max`, `lasttoken`, `weightedmean` or `mean_sqrt_len_tokens` |
+
+`pooling_mode` rebuilds the model as its Transformer plus a fresh pooling layer.
+That drops any module the model had after pooling (a `Dense` projection, a
+`Normalize` layer), and a model trained with a different pooling will not match
+its original quality until it is fine-tuned — the encoder logs a warning in both
+cases. It applies when the encoder is built or fine-tuned, never when a saved
+model directory is reloaded (which already carries its own pooling).
+
+**Devices.** The Trainer places the model itself, so `encoder.device="cpu"` pins
+it to the CPU but a CUDA *index* (`"cuda:1"`) is not honoured: set
+`CUDA_VISIBLE_DEVICES` to pin a GPU. With several GPUs visible the Trainer uses
+all of them, which shrinks each replica's in-batch negatives — set
+`CUDA_VISIBLE_DEVICES` to one device to avoid that. Both cases log a warning.
 
 The holdout is carved out of the items the encoder was already entitled to (in
 the out-of-fold loop, one fold's training rows), so it does not weaken the

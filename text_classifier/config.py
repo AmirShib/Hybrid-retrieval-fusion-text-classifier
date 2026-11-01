@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Type, TypeVar
 # The domain layer owns the set of encoder-epoch metrics; import it rather than
 # restate it, so a new metric is valid in config the moment it can be measured.
 # (Acyclic: `domain` imports neither config nor infrastructure.)
-from .domain.services import ENCODER_LOSSES, ENCODER_SELECTION_METRICS
+from .domain.services import ENCODER_LOSSES, ENCODER_POOLING_MODES, ENCODER_SELECTION_METRICS
 
 _T = TypeVar("_T")
 
@@ -24,6 +24,22 @@ class EncoderConfig:
     model_name_or_path: str = "sentence-transformers/all-MiniLM-L6-v2"
     encode_batch_size: int = 64
     device: Optional[str] = None
+    # Pooling. None (the default) keeps whatever Pooling module the model ships
+    # with -- mean pooling for a plain Hugging Face checkpoint -- so behaviour is
+    # unchanged. A mode from domain.services.ENCODER_POOLING_MODES rebuilds the
+    # model as its Transformer module plus a fresh `models.Pooling(mode)`. That
+    # DROPS any module the model had after its pooling (a Dense projection, a
+    # Normalize layer), and swapping the pooling of a model trained with another
+    # one costs quality until it is fine-tuned -- the encoder logs a warning in
+    # both cases. Applied when the encoder is built and when it is fine-tuned,
+    # never on reloading a saved model dir (which already carries its pooling).
+    pooling_mode: Optional[str] = None
+    # Truncation length in tokens. `max_seq_length` is a property of the loaded
+    # model, not a constructor argument, so `params` cannot set it; None keeps the
+    # model's own default (often 128-512), silently cutting longer texts off. It
+    # applies to fine-tuning and to encoding alike, and is persisted with the
+    # model, so a saved dir encodes at the length it was trained at.
+    max_seq_length: Optional[int] = None
     # fine-tuning, on item<->description pairs. `train_loss` selects the
     # objective: one of domain.services.ENCODER_LOSSES's three friendly aliases
     # (all trained on the exact same pairs, so switching between them is a
@@ -39,6 +55,11 @@ class EncoderConfig:
     train_epochs: int = 1
     train_batch_size: int = 64
     warmup_ratio: float = 0.1
+    # AdamW step size and decay for the fine-tune. The defaults are the values the
+    # library's own `model.fit` used (lr 2e-5, weight decay 0.01), so a config that
+    # never sets them trains as before.
+    learning_rate: float = 2e-5
+    weight_decay: float = 0.01
     train_loss: str = "multiple_negatives_symmetric_ranking"
     train_loss_params: Dict[str, Any] = field(default_factory=dict)
     # Best-epoch selection. With train_epochs > 1, `train_holdout_ratio` of the
@@ -573,6 +594,36 @@ class PipelineConfig:
                 self.encoder.train_select_metric,
                 self.encoder.train_select_metric in ENCODER_SELECTION_METRICS,
                 f"one of {list(ENCODER_SELECTION_METRICS)}",
+            ),
+            (
+                "encoder.pooling_mode",
+                self.encoder.pooling_mode,
+                self.encoder.pooling_mode is None
+                or self.encoder.pooling_mode in ENCODER_POOLING_MODES,
+                f"None (keep the model's own pooling) or one of {list(ENCODER_POOLING_MODES)}",
+            ),
+            (
+                "encoder.max_seq_length",
+                self.encoder.max_seq_length,
+                self.encoder.max_seq_length is None
+                or (
+                    isinstance(self.encoder.max_seq_length, int)
+                    and not isinstance(self.encoder.max_seq_length, bool)
+                    and self.encoder.max_seq_length >= 1
+                ),
+                "None (keep the model's default) or an integer >= 1",
+            ),
+            (
+                "encoder.learning_rate",
+                self.encoder.learning_rate,
+                self.encoder.learning_rate > 0.0,
+                "> 0",
+            ),
+            (
+                "encoder.weight_decay",
+                self.encoder.weight_decay,
+                self.encoder.weight_decay >= 0.0,
+                ">= 0",
             ),
             (
                 "encoder.train_loss",

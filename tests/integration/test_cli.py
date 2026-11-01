@@ -439,3 +439,57 @@ class TestInferCliTopK:
                     "0",
                 ]
             )
+
+
+class TestEncoderTrainingFlags:
+    """--encoder-lr / --encoder-weight-decay / --encoder-max-seq-length /
+    --encoder-pooling reach the config, with the usual defaults < --config < flags
+    precedence. Inspected through --dump-config, so no torch is touched."""
+
+    def _dump(self, capsys, *argv):
+        _run(["train", "--dump-config", *argv])
+        return json.loads(capsys.readouterr().out)["encoder"]
+
+    def test_defaults_leave_the_models_behaviour_alone(self, capsys):
+        enc = self._dump(capsys)
+        assert enc["pooling_mode"] is None and enc["max_seq_length"] is None
+        assert enc["learning_rate"] == 2e-5 and enc["weight_decay"] == 0.01
+
+    def test_flags_set_the_fields(self, capsys):
+        enc = self._dump(
+            capsys,
+            "--encoder-lr", "5e-5",
+            "--encoder-weight-decay", "0.1",
+            "--encoder-max-seq-length", "256",
+            "--encoder-pooling", "cls",
+        )  # fmt: skip
+        assert enc["learning_rate"] == 5e-5 and enc["weight_decay"] == 0.1
+        assert enc["max_seq_length"] == 256 and enc["pooling_mode"] == "cls"
+
+    def test_flag_overrides_the_config_file(self, tmp_path, capsys):
+        cfg_path = tmp_path / "cfg.json"
+        cfg_path.write_text(json.dumps({"encoder": {"pooling_mode": "max", "max_seq_length": 64}}))
+        _run(["train", "--config", str(cfg_path), "--dump-config", "--encoder-pooling", "mean"])
+        enc = json.loads(capsys.readouterr().out)["encoder"]
+        assert enc["pooling_mode"] == "mean"  # the flag won
+        assert enc["max_seq_length"] == 64  # the file's value survived
+
+    def test_unknown_pooling_mode_is_rejected_by_argparse(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            _run(["train", "--dump-config", "--encoder-pooling", "median"])
+        assert exc.value.code != 0
+        assert "median" in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        "argv,field",
+        [
+            (["--encoder-lr", "0"], "encoder.learning_rate"),
+            (["--encoder-weight-decay", "-1"], "encoder.weight_decay"),
+            (["--encoder-max-seq-length", "0"], "encoder.max_seq_length"),
+        ],
+    )
+    def test_invalid_values_fail_validation_naming_the_field(self, argv, field, capsys):
+        with pytest.raises(SystemExit) as exc:
+            _run(["train", "--dump-config", *argv])
+        assert exc.value.code != 0
+        assert field in capsys.readouterr().err

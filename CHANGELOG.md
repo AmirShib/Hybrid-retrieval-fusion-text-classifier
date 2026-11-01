@@ -9,6 +9,20 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 ## [Unreleased]
 
 ### Added
+- **Encoder fine-tune and model knobs, all defaulting to the old behaviour.**
+  `encoder.learning_rate` (`2e-5`) and `encoder.weight_decay` (`0.01`) — the
+  values `model.fit` used — are now configurable. `encoder.max_seq_length` sets the
+  truncation length (a model property that `encoder.params` could not set, so
+  longer texts were silently cut at the model default); it is persisted with the
+  saved model. `encoder.pooling_mode` (`mean`/`cls`/`max`/`lasttoken`/
+  `weightedmean`/`mean_sqrt_len_tokens`) rebuilds the model as its Transformer plus
+  a fresh `Pooling`, warning when that replaces the model's own pooling or drops a
+  post-pooling `Dense`/`Normalize` module; the model's prompts are carried over.
+  Overrides apply when an encoder is built or fine-tuned and are not re-applied
+  when a saved model dir is reloaded. New train-CLI flags: `--encoder-lr`,
+  `--encoder-weight-decay`, `--encoder-max-seq-length`, `--encoder-pooling`. The
+  loss choice and scale (`train_loss`, `train_loss_params={"scale": ...}`) were
+  already configurable.
 - **Cross-encoder rerank signal (T33, phase 1) — opt-in, off by default.** Adds a
   second signal *round* to `FeatureAssembler`: a `SignalProvider` may now declare
   `needs_candidates = True` and run after candidate selection, receiving the
@@ -61,6 +75,36 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
   the real schema is still computed and validated before any consumer reads it.
 
 ### Changed
+- **Encoder fine-tuning now runs through `SentenceTransformerTrainer`, and the
+  `sentence-transformers` extra requires `>=3.0` plus `datasets`/`accelerate`.**
+  `model.fit` and the hand-written epoch loop are gone. The batch sampler is
+  `BatchSamplers.NO_DUPLICATES` (same job as the old `NoDuplicatesDataLoader`),
+  each epoch is scored by an `InformationRetrievalEvaluator` over the stratified
+  holdout (`desc_acc@1` is its `accuracy@1`, `desc_mrr` its full-rank `mrr@C`,
+  `knn_acc@1` a second evaluator with the fine-tuning pool as the corpus), and
+  best-epoch selection is the Trainer's own `load_best_model_at_end`, with
+  `train_early_stopping_patience`/`train_select_min_delta` mapped onto
+  `EarlyStoppingCallback`. Ties still go to the earlier epoch. The per-epoch table
+  in `encoder_training.json` keeps its schema. Query/document prompts are passed
+  to the evaluator so what is scored is what the deployed encoder computes.
+  Checkpoints go to a temporary directory (weights only, `save_only_model`,
+  nothing reported to any tracker) and are removed; the saved model directory is
+  still written only by `model.save()`, so it stays pickle-free. Training is now
+  seeded by the Trainer (default seed), so a rerun reproduces.
+  - **`pyproject.toml`:** the extra is `sentence-transformers[train]>=3.0`
+    (was `>=2.2`). From sentence-transformers 4.x, `datasets` and `accelerate` sit
+    behind a `train` extra, so a locked install previously lacked them; the
+    hash-locked `requirements.lock` is regenerated and gains 18 packages (no
+    existing pin moved).
+  - **Device handling differs:** the Trainer places the model itself.
+    `encoder.device="cpu"` still pins to CPU, but a CUDA index (`"cuda:1"`) is not
+    honoured and several visible GPUs are all used (`DataParallel`). Both warn;
+    use `CUDA_VISIBLE_DEVICES`.
+  - **Removed:** `EpochSelectionPolicy`, `encoder_retrieval_metrics`,
+    `EncoderEpochTracker` and the `desc_pos_sim` selection metric (the IR evaluator
+    has no equivalent, and it was documented as a weak selection target). A config
+    naming `desc_pos_sim` now fails validation, listing the valid metrics.
+
 - **Retrieval-index construction extracted into `RetrievalIndexBuilder`
   (`application/indexing.py`)** — `TrainingPipeline` stated the same index-build
   policy twice, once in the out-of-fold fold loop and once in the deployment

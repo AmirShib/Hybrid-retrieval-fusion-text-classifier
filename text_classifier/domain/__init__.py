@@ -24,15 +24,14 @@ from .ports import (
 )
 from .services import (
     ENCODER_LOSSES,
+    ENCODER_POOLING_MODES,
     ENCODER_SELECTION_METRICS,
     FEATURE_DEPS,
     FEATURE_NAMES,
     AbstentionPolicy,
     CandidatePolicy,
-    EpochSelectionPolicy,
     ThresholdTuner,
     composed_feature_names,
-    encoder_retrieval_metrics,
     feature_closure,
     fusion_feature_names,
 )
@@ -66,6 +65,5 @@ __all__ = [
     "ThresholdTuner",
     "ENCODER_SELECTION_METRICS",
     "ENCODER_LOSSES",
-    "EpochSelectionPolicy",
-    "encoder_retrieval_metrics",
+    "ENCODER_POOLING_MODES",
 ]

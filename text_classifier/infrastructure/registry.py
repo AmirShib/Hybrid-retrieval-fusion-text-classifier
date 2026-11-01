@@ -429,7 +429,12 @@ register_encoder(
     "sentence-transformers",
     EncoderSpec(
         build=lambda cfg: SentenceTransformerEncoder.load(
-            cfg.model_name_or_path, cfg.encode_batch_size, cfg.device, config=cfg, **cfg.params
+            cfg.model_name_or_path,
+            cfg.encode_batch_size,
+            cfg.device,
+            config=cfg,
+            apply_model_overrides=True,
+            **cfg.params,
         ),
         dirname="encoder",
         load=lambda path, cfg: SentenceTransformerEncoder.load(
