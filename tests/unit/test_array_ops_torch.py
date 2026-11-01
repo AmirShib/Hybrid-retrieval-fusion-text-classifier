@@ -135,6 +135,13 @@ def test_gather_matches_fancy_indexing_broadcast(tops):
     np.testing.assert_array_equal(got, M[rows, cols])
 
 
+def test_argsort_is_stable_and_matches_numpy_backend_on_ties(tops, nops):
+    x = -np.array([[0.5, 0.2, 0.5, 0.2, 0.5, 0.1, 0.5, 0.2] * 4])
+    want = nops.argsort(x, axis=1)
+    np.testing.assert_array_equal(tops.to_host(tops.argsort(x, axis=1)), want)
+    np.testing.assert_array_equal(want, np.argsort(x, axis=1, kind="stable"))
+
+
 def test_topk_matches_numpy_backend(tops, nops):
     x = np.array([[3.0, 1.0, 4.0, 1.0, 5.0]])
     vals_n, idx_n = nops.topk(x, 3, axis=1)

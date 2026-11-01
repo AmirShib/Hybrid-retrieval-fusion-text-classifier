@@ -67,7 +67,10 @@ class ArrayOps(ABC):
         """Top-``k`` values and indices along ``axis``, best-first."""
 
     @abstractmethod
-    def argsort(self, x: Any, axis: int = -1) -> Any: ...
+    def argsort(self, x: Any, axis: int = -1) -> Any:
+        """Ascending indices along ``axis``. Must be **stable** (equal keys keep
+        their index order): rank features depend on how ties are broken, and an
+        unstable sort makes them differ from one machine to the next."""
 
     @abstractmethod
     def argpartition(self, x: Any, k: int, axis: int = -1) -> Any: ...

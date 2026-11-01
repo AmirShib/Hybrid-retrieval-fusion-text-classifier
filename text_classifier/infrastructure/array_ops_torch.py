@@ -138,7 +138,8 @@ class TorchArrayOps(ArrayOps):
         return vals, idx
 
     def argsort(self, x: Any, axis: int = -1) -> torch.Tensor:
-        return torch.argsort(self._as_tensor(x), dim=axis)
+        # stable=True: same tie order as NumpyArrayOps.argsort (lower index first).
+        return torch.argsort(self._as_tensor(x), dim=axis, stable=True)
 
     def argpartition(self, x: Any, k: int, axis: int = -1) -> torch.Tensor:
         """Torch has no native partition kernel; a full ``argsort`` trivially

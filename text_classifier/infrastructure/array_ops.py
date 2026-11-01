@@ -69,13 +69,18 @@ class NumpyArrayOps(ArrayOps):
         idx = np.argpartition(x, n - k, axis=axis)
         idx = np.take(idx, range(n - k, n), axis=axis)
         vals = np.take_along_axis(x, idx, axis=axis)
-        order = np.argsort(-vals, axis=axis)
+        order = np.argsort(-vals, axis=axis, kind="stable")
         idx = np.take_along_axis(idx, order, axis=axis)
         vals = np.take_along_axis(vals, order, axis=axis)
         return vals, idx
 
     def argsort(self, x: Any, axis: int = -1) -> np.ndarray:
-        return np.argsort(x, axis=axis)
+        # Stable, so equal keys keep their index order. numpy's default kind is
+        # neither stable nor portable: it dispatches to CPU-specific SIMD sorts
+        # (AVX2/AVX-512, NEON), so tied scores came back in a machine-dependent
+        # order and rank features differed between the training host and the
+        # deployment host.
+        return np.argsort(x, axis=axis, kind="stable")
 
     def argpartition(self, x: Any, k: int, axis: int = -1) -> np.ndarray:
         return np.argpartition(x, k, axis=axis)

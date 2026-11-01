@@ -54,6 +54,36 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
   unchanged; no torch is imported either way.
 
 ### Fixed
+- **Rank features no longer depend on the CPU.** `ArrayOps.argsort` used numpy's
+  default sort, which is neither stable nor portable: numpy 2.x dispatches it to
+  CPU-specific SIMD kernels (AVX2/AVX-512, NEON), so tied scores — common with
+  BM25 — came back in a machine-dependent order and the `rank_*` features of the
+  same model differed between the training host and the deployment host. The
+  port's `argsort` is now stable on both backends (ties go to the lower class
+  index), and the port contract says so. Values change only where scores tie.
+- **CI was red on every run, `main` included; it is green again.** Three
+  independent causes:
+  - The golden feature-frame test compared float32 dense similarities
+    bit-exactly against fixtures generated on another machine; BLAS libraries sum
+    in different orders, so CI always failed by an ulp. Discrete columns (ranks,
+    flags, counts) are still compared exactly — the stable sort above is what made
+    them portable — and continuous columns to within `1e-6`.
+  - `package-smoke` and `quality-benchmark` installed a hand-copied dependency
+    list with `--no-deps`, which had drifted (no `tqdm`), so the package failed to
+    import. Both now install the package's own declared (torch-free) dependencies.
+  - mypy (28 errors): missing stubs for the optional `torch`/`transformers`/`tqdm`
+    are now ignored like the other ML libraries; the numpy 2.x stubs' typing of
+    `savez_compressed(**arrays)` is satisfied; stale ignores are removed; and the
+    `Optional` retriever handling is made explicit (below).
+- **Clear errors instead of `AttributeError`s for inconsistent retriever state.**
+  A signal provider asked to compute with no index built (e.g. a lexical provider
+  when no BM25 index exists) now raises a `ValueError` naming the signal. Saving,
+  updating or re-tuning a model whose custom retriever kind lacks a method that
+  operation needs (`to_state`, `with_added_classes`, ...) now raises a
+  `TypeError` naming the kind, the operation and the missing method. The check is
+  duck-typed, so custom kinds that do implement those methods keep working.
+  `DeployedArtifacts.dense`/`lexical` are typed against the retrieval ports.
+
 - **`_topn_mask` (candidate selection) reached past the `ArrayOps` port and
   raised under a torch backend.** It called `M.astype` (which torch tensors do
   not have) and `np.partition` on what may be a tensor, then compared that numpy

@@ -446,6 +446,8 @@ class InferencePipeline:
         a = self._a
         k = a.config.retrieval.k_neighbors
         d_lab, d_sim = a.dense.knn_example_labels(q_emb, k)
+        b_lab: Optional[np.ndarray]
+        b_sco: Optional[np.ndarray]
         if a.lexical is not None:
             b_lab, b_sco = a.lexical.knn_example_labels(list(texts), k)
         else:
@@ -464,7 +466,7 @@ class InferencePipeline:
         return [
             {
                 "dense": rows(d_lab[i], d_sim[i]),
-                "lexical": [] if b_lab is None else rows(b_lab[i], b_sco[i]),
+                "lexical": [] if b_lab is None or b_sco is None else rows(b_lab[i], b_sco[i]),
                 "texts_available": False,
             }
             for i in range(len(texts))

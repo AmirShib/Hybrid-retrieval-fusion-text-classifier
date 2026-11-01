@@ -72,7 +72,10 @@ def _effective_names(
 
 
 def _row_rank(M: np.ndarray, cand_mask: np.ndarray, ops: Optional[ArrayOps] = None) -> np.ndarray:
-    """Dense descending rank (1 = best) within each row's candidate set."""
+    """Descending ordinal rank (1 = best) within each row's candidate set.
+
+    Ties get consecutive ranks in class-index order (the port's ``argsort`` is
+    stable), so the same scores rank identically on every machine."""
     ops = ops or NumpyArrayOps()
     Mf = ops.where(cand_mask, M, np.nan)
     Mf = ops.where(ops.isnan(Mf), -np.inf, Mf)
@@ -381,15 +384,20 @@ class FeatureAssembler:
                     data[col] = compute(M)
             margin_col = sm.column_for("margin")
             want_margin = margin_col is not None and _want(margin_col)
-            want_gap = sm.gap_column is not None and _want(sm.gap_column)
+            gap_col = sm.gap_column
+            want_gap = gap_col is not None and _want(gap_col)
             if margin_col is not None and (want_margin or want_gap):
                 mg, gap = _row_margin(M, mask, self._ops)
                 if want_margin:
                     data[margin_col] = g(mg)
-                if want_gap:
-                    data[sm.gap_column] = gap[rows]
+                if want_gap and gap_col is not None:
+                    data[gap_col] = gap[rows]
             if sm.top1_column is not None and _want(sm.top1_column):
                 idx = sm.top1_idx
+                if idx is None:
+                    raise ValueError(
+                        f"a signal declares top1_column={sm.top1_column!r} but provides no top1_idx"
+                    )
                 hit = cols == idx[rows]
                 if sm.top1_check_valid:
                     hit = hit & (idx[rows] >= 0)
@@ -414,7 +422,11 @@ class FeatureAssembler:
             data["class_log_freq"] = self._ops.log1p(class_freq[cols].astype(np.float64))
         if _want("n_signal_agreement"):
             agreement_nodes = ("dense.desc", "dense.proto", "bm25.desc", "dense.knn", "bm25.knn")
-            idxs = [sig_matrices[node].top1_idx for node in agreement_nodes if node in sig_matrices]
+            idxs = [
+                top1
+                for node in agreement_nodes
+                if node in sig_matrices and (top1 := sig_matrices[node].top1_idx) is not None
+            ]
             if len(idxs) == len(agreement_nodes):
                 argstack = np.stack(idxs, axis=1)
                 n_agree = np.fromiter(

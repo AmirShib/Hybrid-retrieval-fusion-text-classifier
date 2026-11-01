@@ -321,7 +321,11 @@ class CrossEncoderSignalProvider(SignalProvider):
             scored_rows.append(r)
             scored_cols.append(c)
 
-        scores = np.asarray(self._reranker.score(pairs), dtype=np.float64) if pairs else []
+        scores: np.ndarray = (
+            np.asarray(self._reranker.score(pairs), dtype=np.float64)
+            if pairs
+            else np.empty(0, dtype=np.float64)
+        )
         if pairs and np.shape(scores) != (len(pairs),):
             raise ValueError(
                 f"{type(self._reranker).__name__}.score returned shape {np.shape(scores)} for "
@@ -377,7 +381,8 @@ class CrossEncoderSignalProvider(SignalProvider):
             return cand.rows, cand.cols
         ops = self._ops
         selected = ops.asarray(cand.mask) & _topn_mask(prescore, top_k, ops=ops)
-        return np.nonzero(ops.to_host(selected))
+        rows, cols = np.nonzero(ops.to_host(selected))
+        return rows, cols
 
     # ---- persistence ------------------------------------------------------
     def save(self, path: str) -> None:

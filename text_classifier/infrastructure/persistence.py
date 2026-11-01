@@ -27,7 +27,7 @@ import logging
 import os
 import pickle
 from dataclasses import dataclass, field, replace
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Union, cast
 
 import numpy as np
 
@@ -37,10 +37,12 @@ from ..domain import (
     AbstentionPolicy,
     ClassDefinition,
     ConfidenceCalibrator,
+    DenseRetriever,
     FeatureProvider,
     FusionModel,
     LabeledItem,
     LabelSpace,
+    LexicalRetriever,
     SignalProvider,
     TextEncoder,
     fusion_feature_names,
@@ -55,7 +57,6 @@ from .registry import (
     lexical_retriever_spec,
     load_signal_providers,
 )
-from .retrieval import DenseRetrieverAdapter, LexicalRetrieverAdapter
 from .signals import rewrap_signal_providers
 
 log = logging.getLogger(__name__)
@@ -137,6 +138,25 @@ def _lexical_json_path(npz_filename: str) -> str:
     return root + ".json"
 
 
+def retriever_supporting(retriever: Any, method: str, operation: str, kind: str) -> Any:
+    """``retriever`` if it provides ``method``; otherwise a ``TypeError`` naming
+    the retriever kind and the ``operation`` that needs it.
+
+    Saving, updating and re-tuning a model call methods the retrieval *ports* do
+    not declare (``to_state``, ``with_added_classes``, ...). The built-in adapters
+    have them, and a custom retriever kind may provide them too -- this is
+    duck-typed on purpose, so a third-party kind that implements ``to_state`` can
+    still be saved. What it replaces is the bare ``AttributeError`` a kind that
+    lacks the method used to fail with, somewhere deep in the operation."""
+    if not hasattr(retriever, method):
+        raise TypeError(
+            f"cannot {operation}: {kind} ({type(retriever).__name__}) has no `{method}`, "
+            "which this needs. The built-in retrievers do; a custom retriever kind must "
+            "implement it to support this operation."
+        )
+    return retriever
+
+
 @dataclass
 class DeployedArtifacts:
     """Everything the inference pipeline needs, in memory.
@@ -158,10 +178,10 @@ class DeployedArtifacts:
     config: PipelineConfig
     label_space: LabelSpace
     encoder: TextEncoder
-    dense: DenseRetrieverAdapter
+    dense: DenseRetriever
     # `None` when "lexical" is absent from `config.signals` -- training skips
     # building a BM25 index entirely rather than building one nothing queries.
-    lexical: Optional[LexicalRetrieverAdapter]
+    lexical: Optional[LexicalRetriever]
     fusion: FusionModel
     calibrator: ConfidenceCalibrator
     abstention: AbstentionPolicy
@@ -175,6 +195,27 @@ class DeployedArtifacts:
     # this in, defaulting to the two built-ins) — the default kept as an empty
     # list here only so direct construction (e.g. in tests) stays valid.
     signal_providers: List[SignalProvider] = field(default_factory=list)
+
+    def dense_supporting(self, method: str, operation: str) -> Any:
+        """``dense``, checked to provide ``method`` (see ``retriever_supporting``)."""
+        return retriever_supporting(
+            self.dense,
+            method,
+            operation,
+            f"retrieval.dense_kind={self.config.retrieval.dense_kind!r}",
+        )
+
+    def lexical_supporting(self, method: str, operation: str) -> Any:
+        """``lexical`` (``None`` when no lexical index was built), checked to
+        provide ``method`` (see ``retriever_supporting``)."""
+        if self.lexical is None:
+            return None
+        return retriever_supporting(
+            self.lexical,
+            method,
+            operation,
+            f"retrieval.lexical_kind={self.config.retrieval.lexical_kind!r}",
+        )
 
     def with_added_classes(self, new_classes: Sequence[NewClass]) -> "DeployedArtifacts":
         """Widen this model's label space with new classes, **without retraining**.
@@ -226,11 +267,14 @@ class DeployedArtifacts:
         # already reported above with a clearer, more actionable message.
         extended_space = LabelSpace(current + defs)
 
-        dense = self.dense.with_added_classes(self.encoder, [d.description for d in defs])
+        dense = self.dense_supporting("with_added_classes", "add classes").with_added_classes(
+            self.encoder, [d.description for d in defs]
+        )
+        current_lexical = self.lexical_supporting("with_added_descriptions", "add classes")
         lexical = (
             None
-            if self.lexical is None
-            else self.lexical.with_added_descriptions(extended_space.descriptions)
+            if current_lexical is None
+            else current_lexical.with_added_descriptions(extended_space.descriptions)
         )
         # T34 phase 2: a DenseSignalProvider/LexicalSignalProvider wraps a
         # specific dense/lexical instance by reference; rewrap onto the
@@ -261,7 +305,9 @@ class ArtifactRepository:
 
         artifacts.encoder.save(os.path.join(directory, enc_spec.dirname))
 
-        dense_arrays = artifacts.dense.to_state()
+        dense_arrays: Dict[str, Any] = artifacts.dense_supporting(
+            "to_state", "save the model"
+        ).to_state()
         np.savez_compressed(os.path.join(directory, dense_spec.filename), **dense_arrays)
 
         # `lexical` is `None` when "lexical" isn't a configured signal (no
@@ -269,10 +315,13 @@ class ArtifactRepository:
         # nothing is written and `components.lexical` records that explicitly
         # (not just absent -- see `_components_from_meta`), so `load()` doesn't
         # try to read files that were never written.
-        if artifacts.lexical is not None:
+        lexical = artifacts.lexical_supporting("to_state", "save the model")
+        if lexical is not None:
             lex_spec = lexical_retriever_spec(cfg.retrieval.lexical_kind)
-            arrays, lex_meta = artifacts.lexical.to_state()
-            np.savez_compressed(os.path.join(directory, lex_spec.filename), **arrays)
+            arrays, lex_meta = lexical.to_state()
+            np.savez_compressed(
+                os.path.join(directory, lex_spec.filename), **cast(Dict[str, Any], arrays)
+            )
             with open(os.path.join(directory, _lexical_json_path(lex_spec.filename)), "w") as fh:
                 json.dump(lex_meta, fh)
 

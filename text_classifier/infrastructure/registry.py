@@ -401,7 +401,7 @@ def load_signal_providers(
     cfg: RetrievalConfig,
     signal_kinds: Sequence[str],
     dense: DenseRetriever,
-    lexical: LexicalRetriever,
+    lexical: Optional[LexicalRetriever],
     array_ops: Optional[ArrayOps] = None,
 ) -> List[SignalProvider]:
     """Reload the ``SignalProvider``s named by ``signal_kinds`` from a saved

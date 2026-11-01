@@ -38,6 +38,7 @@ import numpy as np
 from .._messages import format_preview
 from ..domain import ClassDefinition, LabeledItem, LabelSpace
 from ..infrastructure import DeployedArtifacts, encoder_is_corpus_dependent
+from ..infrastructure.persistence import retriever_supporting
 from ..infrastructure.retrieval import LexicalRetrieverAdapter
 from ..infrastructure.signals import rewrap_signal_providers
 
@@ -87,6 +88,8 @@ def update(
     encoder = artifacts.encoder
     dense = artifacts.dense
     lexical = artifacts.lexical
+    dense_kind = f"retrieval.dense_kind={artifacts.config.retrieval.dense_kind!r}"
+    lexical_kind = f"retrieval.lexical_kind={artifacts.config.retrieval.lexical_kind!r}"
 
     # ------------------------------------------------------------- 1. classes
     new_defs: List[ClassDefinition] = []
@@ -114,20 +117,26 @@ def update(
                     edited[idx] = c.description
 
     if new_defs:
-        dense = dense.with_added_classes(encoder, [d.description for d in new_defs])
+        dense = retriever_supporting(
+            dense, "with_added_classes", "add classes", dense_kind
+        ).with_added_classes(encoder, [d.description for d in new_defs])
         # Incumbent definitions carry through whole; rebuilding them from
         # keys+descriptions would strip their structured taxonomy fields.
         current_defs = list(label_space.definitions)
         label_space = LabelSpace(current_defs + new_defs)
     if edited:
-        dense = dense.with_updated_descriptions(encoder, edited)
+        dense = retriever_supporting(
+            dense, "with_updated_descriptions", "edit class descriptions", dense_kind
+        ).with_updated_descriptions(encoder, edited)
     if new_defs or edited:
         # `lexical` is `None` for a model trained with "lexical" excluded from
         # `config.signals` (no BM25 index exists to extend) -- the new/edited
         # descriptions are still added to `label_space`/`dense` above, they
         # simply carry no lexical support, same as every other class in this model.
         if lexical is not None:
-            lexical = lexical.with_added_descriptions(label_space.descriptions)
+            lexical = retriever_supporting(
+                lexical, "with_added_descriptions", "add or edit classes", lexical_kind
+            ).with_added_descriptions(label_space.descriptions)
         log.info("classes: %d new, %d description edit(s)", len(new_defs), len(edited))
 
     # -------------------------------------------------------- 2. new examples
@@ -166,7 +175,9 @@ def update(
             label_space.encode_labels([it.label for it in new_items]), dtype=np.int64
         )
 
-        dense = dense.with_added_examples(encoder, new_texts, new_labels, label_space.size)
+        dense = retriever_supporting(
+            dense, "with_added_examples", "add examples", dense_kind
+        ).with_added_examples(encoder, new_texts, new_labels, label_space.size)
         # `lexical is None`: this model has no BM25 index to refit (see above).
         if lexical is not None:
             lexical = LexicalRetrieverAdapter.build(

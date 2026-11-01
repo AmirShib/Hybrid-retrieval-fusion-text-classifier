@@ -18,7 +18,7 @@ imports and re-exports both so existing test imports
 
 from __future__ import annotations
 
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, TypeVar
 
 import numpy as np
 
@@ -105,10 +105,30 @@ def _argmax_or_missing(M: np.ndarray, require_positive: bool = False) -> np.ndar
     return np.where(invalid, -1, a)
 
 
+_R = TypeVar("_R")
+
+
+def require_retriever(retriever: Optional[_R], signal: str) -> _R:
+    """``retriever``, or a clear error when a provider is asked to *compute* a
+    ``signal`` whose index was never built.
+
+    A provider over ``None`` is legitimate as long as it only answers schema
+    questions: ``ArtifactRepository.load`` builds unfitted providers to read their
+    ``column_names()``, and ``lexical`` is ``None`` whenever "lexical" is not among
+    ``config.signals``. Computing from one is the inconsistent state; it used to
+    surface as an unrelated ``AttributeError`` deep inside feature assembly."""
+    if retriever is None:
+        raise ValueError(
+            f"signal {signal!r} is configured but its retriever was not built; "
+            f"check that {signal!r} is listed in PipelineConfig.signals"
+        )
+    return retriever
+
+
 def rewrap_signal_providers(
     providers: Sequence[SignalProvider],
     dense: DenseRetriever,
-    lexical: LexicalRetriever,
+    lexical: Optional[LexicalRetriever],
 ) -> List[SignalProvider]:
     """Rebuild ``providers`` onto a new ``dense``/``lexical`` pair, in order.
 
@@ -139,7 +159,7 @@ class DenseSignalProvider(SignalProvider):
 
     name = "dense"
 
-    def __init__(self, retriever: DenseRetriever, ops: Optional[ArrayOps] = None):
+    def __init__(self, retriever: Optional[DenseRetriever], ops: Optional[ArrayOps] = None):
         self._retriever = retriever
         self._ops = ops or NumpyArrayOps()
 
@@ -172,7 +192,7 @@ class DenseSignalProvider(SignalProvider):
         ]
 
     def build(self, ctx: SignalContext) -> List[SignalMatrix]:
-        dense = self._retriever
+        dense = require_retriever(self._retriever, "dense")
         q_emb = ctx.q_emb
         desc_d = np.asarray(dense.description_similarity(q_emb), dtype=np.float64)
         if ctx.self_ids is None:
@@ -256,7 +276,7 @@ class LexicalSignalProvider(SignalProvider):
 
     name = "lexical"
 
-    def __init__(self, retriever: LexicalRetriever, ops: Optional[ArrayOps] = None):
+    def __init__(self, retriever: Optional[LexicalRetriever], ops: Optional[ArrayOps] = None):
         self._retriever = retriever
         self._ops = ops or NumpyArrayOps()
 
@@ -285,7 +305,7 @@ class LexicalSignalProvider(SignalProvider):
         ]
 
     def build(self, ctx: SignalContext) -> List[SignalMatrix]:
-        lexical = self._retriever
+        lexical = require_retriever(self._retriever, "lexical")
         texts = ctx.texts
         if ctx.self_ids is None:
             bn_lab, bn_sco = lexical.knn_example_labels(texts, ctx.k)

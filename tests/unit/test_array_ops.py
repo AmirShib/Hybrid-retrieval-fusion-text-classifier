@@ -123,6 +123,15 @@ def test_topk_returns_best_first_values_and_indices():
     np.testing.assert_array_equal(x[0, idx[0]], vals[0])
 
 
+def test_argsort_is_stable_so_ties_keep_index_order():
+    """The port's argsort is stable: equal keys keep their index order, so every
+    caller (feature ranks, neighbour ordering) breaks ties the same way on every
+    CPU. numpy's default kind is not stable and is CPU-dispatched."""
+    x = -np.array([[0.5, 0.2, 0.5, 0.2, 0.5, 0.1, 0.5, 0.2] * 4])
+    got = NumpyArrayOps().argsort(x, axis=1)
+    np.testing.assert_array_equal(got, np.argsort(x, axis=1, kind="stable"))
+
+
 def test_matmul_where_isnan_pass_through():
     ops = NumpyArrayOps()
     a = np.array([[1.0, 2.0]])

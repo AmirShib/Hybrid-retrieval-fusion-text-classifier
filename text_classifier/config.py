@@ -183,10 +183,7 @@ class CrossEncoderDocument:
     top_k: int = 10  # rerank only this many shortlisted candidates per item
 
     def __post_init__(self) -> None:
-        self.evidence = [
-            EvidenceSpec(**e) if isinstance(e, dict) else e  # type: ignore[arg-type]
-            for e in self.evidence
-        ]
+        self.evidence = [EvidenceSpec(**e) if isinstance(e, dict) else e for e in self.evidence]
 
 
 def _default_documents() -> List[CrossEncoderDocument]:
@@ -246,8 +243,7 @@ class CrossEncoderConfig:
 
     def __post_init__(self) -> None:
         self.documents = [
-            CrossEncoderDocument(**d) if isinstance(d, dict) else d  # type: ignore[arg-type]
-            for d in self.documents
+            CrossEncoderDocument(**d) if isinstance(d, dict) else d for d in self.documents
         ]
         self.gaps = [list(g) for g in self.gaps]
 

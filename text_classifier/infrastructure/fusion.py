@@ -18,7 +18,7 @@ import json
 import logging
 import os
 import pickle
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, cast
 
 import numpy as np
 from sklearn.isotonic import IsotonicRegression
@@ -40,7 +40,7 @@ def _save_npz(path: str, **arrays: np.ndarray) -> None:
     # that suffix; writing through an open file handle instead saves to the
     # exact path the caller (the component registry) asked for.
     with open(path, "wb") as fh:
-        np.savez_compressed(fh, **arrays)
+        np.savez_compressed(fh, **cast(Dict[str, Any], arrays))
 
 
 def _load_npz(path: str) -> Dict[str, np.ndarray]:

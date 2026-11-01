@@ -91,3 +91,82 @@ def test_dense_only_signals_survives_update_and_retune(tmp_path):
         updated, items[:20], updated.label_space, target_precision=0.5, per_class_min_support=1
     )
     assert "abstention" in evaluation
+
+
+# --------------------------------------------------------------------------- #
+# Guards for inconsistent retriever state (surfaced by the mypy clean-up)
+# --------------------------------------------------------------------------- #
+def test_a_provider_over_no_index_answers_schema_questions_but_refuses_to_compute():
+    """A provider over `None` is legitimate for schema questions --
+    ArtifactRepository.load builds unfitted providers to read column_names().
+    Computing from one is the inconsistent state: it used to surface as an
+    unrelated AttributeError deep in feature assembly and now names the problem."""
+    import pytest
+
+    from text_classifier.infrastructure.registry import build_signal_providers
+
+    providers = build_signal_providers(RetrievalConfig(), ["dense", "lexical"], None, None)
+    assert all(p.column_names() for p in providers)  # schema-only use is fine
+    for provider, signal in zip(providers, ("dense", "lexical")):
+        with pytest.raises(ValueError, match=f"signal '{signal}' is configured but its retriever"):
+            provider.build(None)
+
+
+def test_rewrapping_onto_a_missing_lexical_index_refuses_to_compute():
+    import pytest
+
+    from text_classifier.infrastructure.signals import (
+        LexicalSignalProvider,
+        rewrap_signal_providers,
+    )
+
+    artifacts, _, _ = _train(PipelineConfig())
+    lexical_providers = [
+        p for p in artifacts.signal_providers if isinstance(p, LexicalSignalProvider)
+    ]
+    (rewrapped,) = rewrap_signal_providers(lexical_providers, artifacts.dense, None)
+    with pytest.raises(ValueError, match="signal 'lexical'"):
+        rewrapped.build(None)
+
+
+def test_rewrapping_without_a_lexical_provider_accepts_no_lexical_index():
+    from text_classifier.infrastructure.signals import rewrap_signal_providers
+
+    cfg = PipelineConfig()
+    cfg.signals = ["dense"]
+    artifacts, _, _ = _train(cfg)
+    rewrapped = rewrap_signal_providers(artifacts.signal_providers, artifacts.dense, None)
+    assert [type(p).__name__ for p in rewrapped] == ["DenseSignalProvider"]
+
+
+def test_saving_a_retriever_kind_without_to_state_names_what_is_missing(tmp_path):
+    """Saving/updating call methods the retrieval ports do not declare. A custom
+    kind that provides them works (duck-typed; see test_registry's echo kinds). One
+    that lacks them used to fail with a bare AttributeError deep in the operation;
+    it now names the kind, the operation and the missing method."""
+    import dataclasses
+
+    import pytest
+
+    class _ForeignDense:  # a third-party DenseRetriever with no persistence support
+        pass
+
+    artifacts, _, _ = _train(PipelineConfig())
+    foreign = dataclasses.replace(artifacts, dense=_ForeignDense())
+    with pytest.raises(
+        TypeError, match=r"cannot save the model: retrieval.dense_kind=.*`to_state`"
+    ):
+        ArtifactRepository().save(foreign, str(tmp_path / "m"))
+    with pytest.raises(TypeError, match=r"cannot add classes: .*`with_added_classes`"):
+        foreign.with_added_classes([ClassDefinition("NEW", "a brand new class")])
+
+
+def test_builtin_retrievers_pass_through_the_capability_checks():
+    artifacts, _, _ = _train(PipelineConfig())
+    assert artifacts.dense_supporting("to_state", "save") is artifacts.dense
+    assert artifacts.lexical_supporting("to_state", "save") is artifacts.lexical
+
+    cfg = PipelineConfig()
+    cfg.signals = ["dense"]
+    dense_only, _, _ = _train(cfg)
+    assert dense_only.lexical_supporting("to_state", "save") is None

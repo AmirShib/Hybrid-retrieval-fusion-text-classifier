@@ -53,7 +53,7 @@ def count_likely_overlap(artifacts: DeployedArtifacts, q_emb: np.ndarray) -> int
     embedding match — a cheap, conservative proxy for "this text is already in
     the training corpus" (see module docstring for why it's a proxy, not exact
     text matching)."""
-    if artifacts.dense.state.example_emb.shape[0] == 0:
+    if artifacts.dense_supporting("state", "re-tune").state.example_emb.shape[0] == 0:
         return 0
     _, sim = artifacts.dense.knn_example_labels(q_emb, k=1)
     best = np.nan_to_num(sim[:, 0], nan=-1.0)
