@@ -353,7 +353,7 @@ the model alone", so an existing config trains exactly as before:
 |---|---|---|
 | `learning_rate` / `--encoder-lr` | `2e-5` | AdamW step size (the library's own `fit()` default) |
 | `weight_decay` / `--encoder-weight-decay` | `0.01` | AdamW decay (likewise) |
-| `train_loss` / `--encoder-loss` | `multiple_negatives_symmetric_ranking` | or `multiple_negatives_ranking`, or `cached_multiple_negatives_ranking` for a large effective batch on a small GPU |
+| `train_loss` / `--encoder-loss` | `multiple_negatives_ranking` | or `multiple_negatives_symmetric_ranking` (also scores description→item; the previous default, deprecated upstream from 5.6), or `cached_multiple_negatives_ranking` for a large effective batch on a small GPU |
 | `train_loss_params` | `{}` | passed to the loss, e.g. `{"scale": 10.0}` (the temperature) or `{"mini_batch_size": 32}` |
 | `max_seq_length` / `--encoder-max-seq-length` | model's own | truncation length in tokens, when training *and* encoding; persisted with the saved model. Otherwise longer texts are silently cut at the model default |
 | `pooling_mode` / `--encoder-pooling` | model's own | `mean`, `cls`, `max`, `lasttoken`, `weightedmean` or `mean_sqrt_len_tokens` |
@@ -592,7 +592,7 @@ guard against that:
   folds the fusion model never trained on.
 * **Encoder** — by default a single shared encoder is used (cheap). For full
   rigor, set `use_per_fold_encoder=True` to fine-tune a fresh encoder per fold.
-  The encoder is fine-tuned with `MultipleNegativesSymmetricRankingLoss` on
+  The encoder is fine-tuned with `MultipleNegativesRankingLoss` on
   (item, class-description) pairs. A multi-epoch fine-tune scores a held-out
   slice of its own training rows after every epoch and keeps the best epoch, so
   "train longer" cannot quietly ship an overfitted encoder.

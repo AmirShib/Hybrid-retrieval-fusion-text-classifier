@@ -100,7 +100,7 @@ def main() -> None:
     p.add_argument(
         "--encoder-loss",
         default=None,
-        help=f"fine-tuning loss (default: multiple_negatives_symmetric_ranking). "
+        help=f"fine-tuning loss (default: multiple_negatives_ranking). "
         f"One of {list(ENCODER_LOSSES)} (verified compatible with the (item, "
         "description) pairs this trains on), or any other "
         "sentence_transformers.losses class name (e.g. 'CosineSimilarityLoss') for "

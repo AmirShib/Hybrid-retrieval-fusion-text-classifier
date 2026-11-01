@@ -455,6 +455,13 @@ class TestEncoderTrainingFlags:
         assert enc["pooling_mode"] is None and enc["max_seq_length"] is None
         assert enc["learning_rate"] == 2e-5 and enc["weight_decay"] == 0.01
 
+    def test_default_loss_is_multiple_negatives_ranking(self, capsys):
+        assert self._dump(capsys)["train_loss"] == "multiple_negatives_ranking"
+
+    def test_loss_flag_can_restore_the_previous_symmetric_default(self, capsys):
+        enc = self._dump(capsys, "--encoder-loss", "multiple_negatives_symmetric_ranking")
+        assert enc["train_loss"] == "multiple_negatives_symmetric_ranking"
+
     def test_flags_set_the_fields(self, capsys):
         enc = self._dump(
             capsys,

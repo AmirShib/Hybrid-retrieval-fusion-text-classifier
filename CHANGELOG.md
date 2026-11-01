@@ -102,6 +102,14 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
     writing a checkpoint, which transformers 5 removed, so every best-epoch
     fine-tune died with an `AttributeError`; the argument is now supplied when
     absent.
+  - **Default fine-tuning loss is now `multiple_negatives_ranking`** (one-directional,
+    item→description), replacing `multiple_negatives_symmetric_ranking`, which
+    sentence-transformers deprecates from 5.6. **This changes what an untouched
+    config trains**: the symmetric loss also scored description→item. Set
+    `encoder.train_loss="multiple_negatives_symmetric_ranking"` (or
+    `--encoder-loss`) to keep the old objective; it remains available. A config
+    that already names a loss is unaffected, and `encoder.train_loss` only matters
+    when an encoder is fine-tuned, so models already trained are not touched.
   - **Device handling differs:** the Trainer places the model itself.
     `encoder.device="cpu"` still pins to CPU, but a CUDA index (`"cuda:1"`) is not
     honoured and several visible GPUs are all used (`DataParallel`). Both warn;

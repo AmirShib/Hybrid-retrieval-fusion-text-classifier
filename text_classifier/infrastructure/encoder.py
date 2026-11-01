@@ -3,7 +3,7 @@
 - ``SentenceTransformerEncoder``: wraps a SentenceTransformer (torch + a model
   download) and supports fine-tuning over (item, class-description) pairs with
   a pluggable loss (``EncoderConfig.train_loss``, default
-  MultipleNegativesSymmetricRankingLoss; see ``domain.services.ENCODER_LOSSES``)
+  MultipleNegativesRankingLoss; see ``domain.services.ENCODER_LOSSES``)
   through ``SentenceTransformerTrainer``. Each epoch is scored on a held-out slice
   by ``InformationRetrievalEvaluator``, so a multi-epoch run keeps its *best* epoch
   rather than its last. Pooling and truncation length are configurable
@@ -959,7 +959,7 @@ def train_encoder(
     """Fine-tune a bi-encoder so items sit near their class description.
 
     Runs a ``SentenceTransformerTrainer`` with ``config.train_loss`` (default
-    MultipleNegativesSymmetricRankingLoss) on (item_text, description) pairs,
+    MultipleNegativesRankingLoss) on (item_text, description) pairs,
     ``config.learning_rate`` / ``weight_decay``, and the ``NO_DUPLICATES`` batch
     sampler, which keeps two items of the same class out of one batch -- what
     prevents the in-batch negatives from treating an item's own description as a

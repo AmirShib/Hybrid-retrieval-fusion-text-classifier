@@ -303,6 +303,29 @@ class TestTrainingArguments:
 # loss choice and scale
 # --------------------------------------------------------------------------- #
 class TestTrainLoss:
+    def test_default_loss_is_plain_multiple_negatives_ranking(self, tiny_model):
+        from sentence_transformers import SentenceTransformer
+
+        losses = enc._losses_module()
+        name = EncoderConfig().train_loss
+        assert name == "multiple_negatives_ranking"
+        loss = enc._build_train_loss(
+            name, SentenceTransformer(tiny_model, device="cpu"), losses, {}
+        )
+        assert type(loss) is losses.MultipleNegativesRankingLoss
+
+    def test_the_previous_symmetric_default_is_still_selectable(self, tiny_model):
+        from sentence_transformers import SentenceTransformer
+
+        losses = enc._losses_module()
+        loss = enc._build_train_loss(
+            "multiple_negatives_symmetric_ranking",
+            SentenceTransformer(tiny_model, device="cpu"),
+            losses,
+            {},
+        )
+        assert type(loss) is losses.MultipleNegativesSymmetricRankingLoss
+
     def test_scale_reaches_the_loss(self, tiny_model):
         from sentence_transformers import SentenceTransformer
 

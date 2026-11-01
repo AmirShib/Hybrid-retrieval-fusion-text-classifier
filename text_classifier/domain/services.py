@@ -422,13 +422,14 @@ ENCODER_POOLING_MODES: Tuple[str, ...] = (
 # Fine-tuning losses. These three friendly aliases are all trained on the same
 # (item_text, description) pair examples train_encoder already builds -- picking
 # among them is a config change, not a data-plumbing one:
-#   multiple_negatives_symmetric_ranking -- the default. In-batch negatives
-#                   scored in both directions (item->description AND
-#                   description->item), which is what NoDuplicatesDataLoader's
-#                   same-class exclusion is for.
-#   multiple_negatives_ranking -- one-directional (item->description only).
-#                   Cheaper per step; a reasonable choice when descriptions
-#                   are too generic to usefully anchor the reverse direction.
+#   multiple_negatives_ranking -- the default. In-batch negatives scored in one
+#                   direction (item->description). NoDuplicatesBatchSampler's
+#                   same-class exclusion is what keeps a same-class sibling's
+#                   description from being scored as a negative for the item.
+#   multiple_negatives_symmetric_ranking -- the same, scored in both directions
+#                   (item->description AND description->item). The previous
+#                   default; deprecated upstream from sentence-transformers 5.6,
+#                   where MultipleNegativesRankingLoss(directions=...) replaces it.
 #   cached_multiple_negatives_ranking -- same objective as
 #                   multiple_negatives_ranking, computed over GradCache
 #                   mini-batches (train_loss_params["mini_batch_size"]) so a
@@ -447,7 +448,7 @@ ENCODER_POOLING_MODES: Tuple[str, ...] = (
 # caller's responsibility to get right; see that loss's sentence-transformers
 # docs for what it expects before selecting it.
 ENCODER_LOSSES: Tuple[str, ...] = (
-    "multiple_negatives_symmetric_ranking",
     "multiple_negatives_ranking",
+    "multiple_negatives_symmetric_ranking",
     "cached_multiple_negatives_ranking",
 )

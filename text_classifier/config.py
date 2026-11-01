@@ -60,7 +60,7 @@ class EncoderConfig:
     # never sets them trains as before.
     learning_rate: float = 2e-5
     weight_decay: float = 0.01
-    train_loss: str = "multiple_negatives_symmetric_ranking"
+    train_loss: str = "multiple_negatives_ranking"
     train_loss_params: Dict[str, Any] = field(default_factory=dict)
     # Best-epoch selection. With train_epochs > 1, `train_holdout_ratio` of the
     # fine-tuning items are held out from the gradient updates and re-scored after
