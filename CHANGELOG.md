@@ -8,6 +8,34 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-02
+
+### Added
+- **Learned-sparse (SPLADE) retrieval signal (T94).** Add `"splade"` to
+  `signals` to get a sixth, round-one signal: a masked-language model's
+  per-word weights (`retrieval.splade.kind = "splade"`, any checkpoint with its
+  MLM head, e.g. a Hebrew BERT) scored as a sparse dot product against class
+  descriptions (`s_desc_*`) and the example pool (`s_knn_*`). It joins candidate
+  selection, so unlike the cross-encoder it can raise candidate recall.
+  `retrieval.splade.train` fine-tunes a fresh copy per fold (contrastive loss +
+  FLOPS sparsity penalty), leakage-free. Weights ship in the model dir as
+  safetensors. `kind = "hashing"` is the offline stand-in. Off by default; the
+  default config is unchanged. New `splade` install extra. `SignalProvider` gained
+  an optional `fit` hook so stateful signals are fitted per fold.
+
+### Changed
+- **`n_signal_agreement` now counts every shortlist-building signal (T94).** It
+  used to require exactly the five dense + BM25 picks and vanished otherwise; now
+  every round-one signal with a top-1 pick votes (SPLADE included; the
+  cross-encoder does not), and the column is kept whenever at least two round-one
+  signals are configured. Values for the default dense + BM25 config are
+  unchanged, so existing models load and score identically.
+- **New feature `n_top1_votes`: how many shortlist-building signals picked
+  *this* candidate as their top class (T94).** The per-candidate counterpart of
+  `n_signal_agreement` (which is one value per item). Same voters, same
+  presence rule. Models saved before it existed load as if trained with it in
+  `fusion.drop_features` (which is how they were trained) and score unchanged.
+
 ## [0.2.0] - 2026-11-02
 
 ### Added

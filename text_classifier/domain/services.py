@@ -78,7 +78,19 @@ FEATURE_NAMES: List[str] = [
     "q_gap_d_desc",
     "q_gap_d_knn",
     "q_gap_b_desc",
+    # ``n_top1_votes`` (T94): how many round-one signals picked *this* candidate
+    # as their top-1 class -- the per-candidate counterpart of the per-query
+    # ``n_signal_agreement``. Same voters (every round-one top-1 pick; the
+    # reranker does not vote) and same presence rule (>= 2 round-one signals).
+    # Last in the list, and treated as dropped when loading a model saved before
+    # it existed (``LEGACY_ABSENT_FEATURES``), so older models score unchanged.
+    "n_top1_votes",
 ]
+
+# Core columns added after models were already in the field. A saved model whose
+# ``meta.json`` lacks one of these is loaded as if it had been trained with that
+# column in ``fusion.drop_features`` -- which is exactly how it was trained.
+LEGACY_ABSENT_FEATURES = ("n_top1_votes",)
 
 
 # What each core column (or intermediate) is built from (T87). Intermediates are
@@ -135,6 +147,14 @@ FEATURE_DEPS: Dict[str, Tuple[str, ...]] = {
         "bm25.knn",
         "candidates",
     ),
+    "n_top1_votes": (
+        "dense.desc",
+        "dense.proto",
+        "bm25.desc",
+        "dense.knn",
+        "bm25.knn",
+        "candidates",
+    ),
     "margin_d_desc": ("dense.desc", "candidates"),
     "margin_d_proto": ("dense.proto", "candidates"),
     "margin_d_knn": ("dense.knn", "candidates"),
@@ -167,7 +187,9 @@ def _direct_signal_reqs(name: str) -> Set[str]:
     return reqs
 
 
-def core_feature_names(active_signals: Optional[Iterable[str]] = None) -> List[str]:
+def core_feature_names(
+    active_signals: Optional[Iterable[str]] = None, n_voting_signals: Optional[int] = None
+) -> List[str]:
     """``FEATURE_NAMES`` narrowed to the columns computable from
     ``active_signals`` (a name set that may include ``"dense"``/``"lexical"``
     plus any third-party signal kind -- only the two built-ins matter here).
@@ -178,11 +200,28 @@ def core_feature_names(active_signals: Optional[Iterable[str]] = None) -> List[s
     ``b_desc_sim`` without ``"lexical"``) is dropped; a column needing neither
     (``class_log_freq``) always survives; ``n_signal_agreement`` needs both,
     so it drops whenever either built-in is disabled -- with only one signal
-    active, "how many signals agree" carries no information."""
+    active, "how many signals agree" carries no information.
+
+    T94: ``n_voting_signals`` generalizes that last rule. When given, it is the
+    number of active *round-one* signal providers (built-in or optional, e.g.
+    SPLADE), and ``n_signal_agreement`` is kept whenever at least two vote --
+    so ``["dense", "splade"]`` keeps it. ``None`` keeps the original rule
+    (both built-ins required)."""
     if active_signals is None:
         return list(FEATURE_NAMES)
     active = set(active_signals)
-    return [n for n in FEATURE_NAMES if _direct_signal_reqs(n) <= active]
+    voters = (
+        n_voting_signals if n_voting_signals is not None else len(active & {"dense", "lexical"})
+    )
+    return [
+        n
+        for n in FEATURE_NAMES
+        if (
+            voters >= 2
+            if n in ("n_signal_agreement", "n_top1_votes")
+            else _direct_signal_reqs(n) <= active
+        )
+    ]
 
 
 def feature_closure(requested: Iterable[str]) -> Set[str]:
@@ -236,7 +275,10 @@ def composed_feature_names(
     silently overwrite data in the assembled frame — the worst kind of
     train/infer disagreement."""
     active_builtin = {sp.name for sp in signal_providers if sp.name in ("dense", "lexical")}
-    names: List[str] = core_feature_names(active_builtin if signal_providers else None)
+    n_voting = sum(1 for sp in signal_providers if not getattr(sp, "needs_candidates", False))
+    names: List[str] = core_feature_names(
+        active_builtin if signal_providers else None, n_voting if signal_providers else None
+    )
     seen = set(names)
     for sp in signal_providers:
         if sp.name in ("dense", "lexical"):

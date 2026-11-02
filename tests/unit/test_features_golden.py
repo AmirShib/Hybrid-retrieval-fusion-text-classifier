@@ -73,6 +73,12 @@ def env(hashing_encoder):
 
 def _assert_matches_golden(df, fixture_name):
     golden = dict(np.load(os.path.join(FIXTURES, fixture_name)))
+    # Columns added to the core schema after these fixtures were captured
+    # (T94: n_top1_votes) are new, not drift; every *captured* column must still
+    # match exactly, in order.
+    from text_classifier.domain import LEGACY_ABSENT_FEATURES
+
+    df = df[[c for c in df.columns if c not in LEGACY_ABSENT_FEATURES]]
     assert list(df.columns) == list(golden.keys()), (
         f"column set/order changed vs. {fixture_name}: "
         f"got {list(df.columns)}, expected {list(golden.keys())}"

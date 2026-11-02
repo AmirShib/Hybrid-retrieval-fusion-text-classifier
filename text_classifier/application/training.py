@@ -513,6 +513,21 @@ class TrainingPipeline:
             provider.fit(fold_items, label_space)
         return providers
 
+    @staticmethod
+    def _fit_signal_providers(
+        signal_providers: Sequence[SignalProvider],
+        rows: np.ndarray,
+        texts: List[str],
+        y: np.ndarray,
+        label_space: LabelSpace,
+    ) -> None:
+        """Call every signal provider's ``fit`` on ``rows`` only (T94). A no-op
+        for the built-ins and the cross-encoder (which has its own mining-based
+        path below); a provider owning a model or index fits it here."""
+        row_texts = [texts[int(i)] for i in rows]
+        for provider in signal_providers:
+            provider.fit(row_texts, y[rows], label_space)
+
     def _fit_cross_encoder(
         self,
         signal_providers: Sequence[SignalProvider],
@@ -608,6 +623,9 @@ class TrainingPipeline:
             signal_providers = build_signal_providers(
                 self.cfg.retrieval, self.cfg.signals, dense, lexical, self._assembler_ops
             )
+            # T94: fit any stateful signal (e.g. SPLADE's encoder + index) on
+            # this fold's training rows only.
+            self._fit_signal_providers(signal_providers, tr, texts, y, label_space)
             # T33 phase 3: fine-tune this fold's (fresh) cross-encoder on this
             # fold's training rows only, before it scores the held-out rows.
             self._fit_cross_encoder(
@@ -900,6 +918,12 @@ class TrainingPipeline:
         # same objects `_featurize_external`/the returned `DeployedArtifacts` use).
         self._signal_providers = build_signal_providers(
             self.cfg.retrieval, self.cfg.signals, dense, lexical, self._assembler_ops
+        )
+        # T94: the shipped stateful signals are fitted on all rows (they score
+        # only external sets and new data -- or, on the leave-one-out path,
+        # training items with themselves masked out of the index).
+        self._fit_signal_providers(
+            self._signal_providers, np.arange(len(texts)), texts, y, label_space
         )
         # T33 phase 3: the shipped cross-encoder is fine-tuned on all rows. It
         # scores only external val/test and new data, never these rows' features

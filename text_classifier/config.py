@@ -297,6 +297,63 @@ class CrossEncoderConfig:
         self.gaps = [list(g) for g in self.gaps]
 
 
+# T94: learned-sparse (SPLADE) signal backends. "hashing" is the offline,
+# dependency-free stand-in (log-tf over hashed tokens, nothing learned); "splade"
+# is a masked-language model (e.g. a Hebrew BERT) read out SPLADE-style.
+SPLADE_KINDS = ("hashing", "splade")
+
+
+@dataclass
+class SpladeConfig:
+    """The learned-sparse retrieval signal (T94). Reached by adding ``"splade"``
+    to ``PipelineConfig.signals``; this block alone does nothing, so the default
+    is inert and the system is byte-for-byte unchanged until it is switched on.
+
+    A SPLADE model maps a text to a weight per *vocabulary word*: most are zero,
+    the rest say how much that word (or a related word the model infers) matters.
+    Scoring is a sparse dot product, like BM25, except the weights are learned --
+    which is how the fusion model gets "which words to trust" rather than IDF.
+
+    ``kind="splade"`` loads ``model_name`` with ``AutoModelForMaskedLM``: any
+    BERT-style checkpoint *with its MLM head* works (a pretrained SPLADE model,
+    or a plain MLM such as a Hebrew BERT). A plain MLM is not a usable sparse
+    retriever until fine-tuned -- set ``train`` for that. Its weights are saved
+    into the model dir, so a deployed model needs no download.
+    """
+
+    kind: str = "hashing"
+    model_name: str = ""  # required for "splade"; a Hub id or a local directory
+    max_length: int = 128  # tokens per text (truncation)
+    # Small on purpose: the MLM head emits one logit per vocabulary entry per
+    # token, i.e. batch * max_length * vocab floats (8 * 128 * 128k ~ 0.5 GB).
+    batch_size: int = 8
+    device: Optional[str] = None  # None = auto (CUDA, then CPU)
+    # Keep at most this many non-zero weights per text. Bounds index size and
+    # scoring cost; SPLADE vectors are sparse already, this is a hard cap.
+    top_terms: int = 256
+    # hashing stand-in only: size of the hashed vocabulary.
+    hashing_dim: int = 2**18
+    # ---- fine-tuning. Off by default. With `train`, a FRESH copy of
+    # `model_name` is fine-tuned per fold on that fold's training items only (and
+    # once more on all items for the deployed model), so no item is ever scored
+    # by a model that trained on its label: n_folds + 1 fine-tunes per run.
+    # Objective: each item must score its own class's description above the other
+    # classes' (in-batch softmax over the batch's classes plus `train_negatives`
+    # sampled others), plus the SPLADE FLOPS penalty that keeps vectors sparse.
+    train: bool = False
+    train_epochs: int = 1
+    train_batch_size: int = 8
+    train_negatives: int = 16
+    learning_rate: float = 2e-5
+    weight_decay: float = 0.01
+    warmup_ratio: float = 0.1
+    # FLOPS regularization strength for query/document vectors. Higher = sparser
+    # vectors (faster, smaller index), at some cost in accuracy.
+    flops_query: float = 3e-4
+    flops_document: float = 1e-4
+    seed: int = 42
+
+
 @dataclass
 class RetrievalConfig:
     k_neighbors: int = 20
@@ -345,10 +402,15 @@ class RetrievalConfig:
     # Populated by default but *inert*: nothing reads it until "cross-encoder"
     # is added to `PipelineConfig.signals`.
     cross_encoder: CrossEncoderConfig = field(default_factory=CrossEncoderConfig)
+    # T94: the learned-sparse signal's settings; inert until "splade" is in
+    # `PipelineConfig.signals`. Lives here for the same reason as `cross_encoder`.
+    splade: SpladeConfig = field(default_factory=SpladeConfig)
 
     def __post_init__(self) -> None:
         if isinstance(self.cross_encoder, dict):
             self.cross_encoder = CrossEncoderConfig(**self.cross_encoder)
+        if isinstance(self.splade, dict):
+            self.splade = SpladeConfig(**self.splade)
 
 
 @dataclass
@@ -889,6 +951,73 @@ class PipelineConfig:
                 ce.gaps,
                 all(name in ce_doc_names for g in ce.gaps for name in g),
                 f"referring only to configured document names {sorted(ce_doc_names)}",
+            ),
+        ]
+        sp = self.retrieval.splade
+        checks += [
+            # T94. Like the cross-encoder block: checked even when switched off.
+            (
+                "retrieval.splade.kind",
+                sp.kind,
+                sp.kind in SPLADE_KINDS,
+                f"one of {list(SPLADE_KINDS)}",
+            ),
+            (
+                "retrieval.splade.model_name",
+                sp.model_name,
+                sp.kind != "splade" or bool(str(sp.model_name).strip()),
+                "set when kind is 'splade' (a Hub model id or a local directory of a "
+                "masked-language model)",
+            ),
+            ("retrieval.splade.max_length", sp.max_length, sp.max_length >= 8, ">= 8"),
+            ("retrieval.splade.batch_size", sp.batch_size, sp.batch_size >= 1, ">= 1"),
+            ("retrieval.splade.top_terms", sp.top_terms, sp.top_terms >= 1, ">= 1"),
+            ("retrieval.splade.hashing_dim", sp.hashing_dim, sp.hashing_dim >= 16, ">= 16"),
+            (
+                "retrieval.splade.train",
+                sp.train,
+                not sp.train or "splade" in self.signals,
+                "used only with 'splade' in signals (otherwise nothing would be trained)",
+            ),
+            (
+                "retrieval.splade.train",
+                sp.train,
+                not sp.train or sp.kind == "splade",
+                "used only with kind 'splade' (the hashing stand-in has no weights to train)",
+            ),
+            (
+                "retrieval.splade.train",
+                sp.train,
+                not sp.train or self.training.n_folds >= 2,
+                "used only with k-fold training (n_folds >= 2): leave-one-out scores the "
+                "training items with the deployed model, which would have trained on them",
+            ),
+            ("retrieval.splade.train_epochs", sp.train_epochs, sp.train_epochs >= 1, ">= 1"),
+            (
+                "retrieval.splade.train_batch_size",
+                sp.train_batch_size,
+                sp.train_batch_size >= 2,
+                ">= 2",
+            ),
+            (
+                "retrieval.splade.train_negatives",
+                sp.train_negatives,
+                sp.train_negatives >= 0,
+                ">= 0",
+            ),
+            ("retrieval.splade.learning_rate", sp.learning_rate, sp.learning_rate > 0, "> 0"),
+            (
+                "retrieval.splade.warmup_ratio",
+                sp.warmup_ratio,
+                0 <= sp.warmup_ratio < 1,
+                "in [0, 1)",
+            ),
+            ("retrieval.splade.flops_query", sp.flops_query, sp.flops_query >= 0, ">= 0"),
+            (
+                "retrieval.splade.flops_document",
+                sp.flops_document,
+                sp.flops_document >= 0,
+                ">= 0",
             ),
         ]
         problems = [

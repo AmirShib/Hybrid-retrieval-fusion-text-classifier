@@ -183,6 +183,17 @@ def update(
             lexical = LexicalRetrieverAdapter.build(
                 merged_texts, merged_labels, label_space, artifacts.config.retrieval
             )
+        # T94: a signal owning its own example index (SPLADE) indexes the new
+        # examples too; its encoder is reused as is, like the dense encoder.
+        artifacts = replace(
+            artifacts,
+            signal_providers=[
+                p.with_added_examples(new_texts, new_labels)
+                if hasattr(p, "with_added_examples")
+                else p
+                for p in artifacts.signal_providers
+            ],
+        )
         log.info("examples: %d added (corpus now %d items)", len(new_items), len(merged_items))
         updated_corpus = merged_items
     else:

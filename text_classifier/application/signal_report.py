@@ -118,10 +118,13 @@ def signal_report(features: pd.DataFrame) -> Dict[str, Any]:
 
     agreement: Dict[str, Any] = {}
     if "n_signal_agreement" in features.columns:
-        # n_signal_agreement = 5 - (distinct classes the firing signals point at),
-        # constant across an item's candidate rows, so one value per item.
+        # n_signal_agreement = voters - (distinct classes the firing signals point
+        # at), constant across an item's candidate rows, so one value per item.
+        # `voters` is 5 for the default dense+BM25 signals; optional round-one
+        # signals (T94) add theirs, recorded by the assembler in `attrs`.
+        voters = float(features.attrs.get("agreement_voters", 5))
         per_item = features.groupby("item_id", sort=False)["n_signal_agreement"].first().to_numpy()
-        distinct = 5.0 - per_item.astype(np.float64)
+        distinct = voters - per_item.astype(np.float64)
         agreement = {
             "mean_distinct_top_classes": float(distinct.mean()),
             "consensus_rate": float((distinct <= 1.0).mean()),
