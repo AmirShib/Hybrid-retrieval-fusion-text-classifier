@@ -181,6 +181,21 @@ class TestRowRank:
         assert ranks[0, 1] == 2
         assert ranks[0, 2] == 3  # non-candidate → worst
 
+    def test_ties_break_by_class_index_on_every_platform(self):
+        """Tied scores are common (equal BM25 scores, discrete embeddings). numpy's
+        default argsort is not stable and dispatches to CPU-specific SIMD sorts, so
+        without a stable sort the rank a tie gets -- and so the feature a trained
+        model sees -- depended on the machine. Ties must go to the lower index."""
+        row = np.array([0.5, 0.2, 0.5, 0.2, 0.5, 0.1, 0.5, 0.2] * 4)
+        M = row[None, :]
+        cand = np.ones_like(M, dtype=bool)
+        ranks = _row_rank(M, cand)[0]
+        expected = np.empty(row.size)
+        expected[np.argsort(-row, kind="stable")] = np.arange(1, row.size + 1)
+        npt.assert_array_equal(ranks, expected)
+        # e.g. the 16 copies of 0.5 take ranks 1..16 in index order
+        npt.assert_array_equal(ranks[row == 0.5], np.arange(1, 17))
+
     def test_nan_value_pushed_to_worst_rank(self):
         M = np.array([[0.9, np.nan, 0.1]])
         cand = np.array([[True, True, True]])

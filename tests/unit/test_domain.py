@@ -100,6 +100,26 @@ def test_encode_labels_unknown_key_raises_key_error():
         s.encode_labels(["alpha", "ghost"])
 
 
+def test_unknown_keys_reports_only_undefined_keys_sorted_and_deduped():
+    """The detection half every caller that accepts outside labels shares:
+    training items, external val/test splits, the tune set, an update's new
+    examples, the evaluate CLI. Sorted + de-duplicated so the error message is
+    stable regardless of input order or repetition."""
+    s = _space_from_pairs()
+    assert s.unknown_keys(["zeta", "alpha", "ghost", "zeta"]) == ["ghost", "zeta"]
+
+
+def test_unknown_keys_is_empty_when_every_key_resolves():
+    s = _space_from_pairs()
+    assert s.unknown_keys(["alpha", "alpha"]) == []
+
+
+def test_unknown_keys_accepts_a_lazy_iterable():
+    """Callers pass generator expressions over item lists, not materialized sets."""
+    s = _space_from_pairs()
+    assert s.unknown_keys(k for k in ["ghost", "alpha"]) == ["ghost"]
+
+
 # --------------------------------------------------------------------------- #
 # Frozen value objects
 # --------------------------------------------------------------------------- #
@@ -175,6 +195,41 @@ def test_accept_boundary_is_inclusive():
     confidence = np.array([0.5])
     class_index = np.array([0])
     np.testing.assert_array_equal(policy.accept(confidence, class_index), np.array([True]))
+
+
+def test_thresholds_for_agrees_with_scalar_threshold_for():
+    """The vectorized lookup is the same rule as the scalar one, elementwise.
+
+    `thresholds_for` replaced a per-row Python dict lookup with a sorted
+    `searchsorted` probe; this pins the two to the same answers, including for
+    classes with no override and for override keys that are not contiguous.
+    """
+    policy = AbstentionPolicy(global_threshold=0.42, per_class={7: 0.9, 2: 0.8, 13: 0.55})
+    class_index = np.array([0, 2, 7, 13, 5, 2, 99])
+    np.testing.assert_allclose(
+        policy.thresholds_for(class_index),
+        [policy.threshold_for(int(c)) for c in class_index],
+    )
+
+
+def test_thresholds_for_with_no_overrides_is_all_global():
+    policy = AbstentionPolicy(global_threshold=0.3)
+    np.testing.assert_allclose(policy.thresholds_for(np.array([0, 5, 2])), [0.3, 0.3, 0.3])
+
+
+def test_thresholds_for_falls_back_to_global_outside_the_override_range():
+    """An index below, above, or between the override keys — including the `-1`
+    sentinel an item with no prediction carries — takes the global threshold
+    rather than the nearest override or an IndexError."""
+    policy = AbstentionPolicy(global_threshold=0.5, per_class={4: 0.95})
+    np.testing.assert_allclose(
+        policy.thresholds_for(np.array([-1, 0, 4, 9])), [0.5, 0.5, 0.95, 0.5]
+    )
+
+
+def test_thresholds_for_handles_an_empty_batch():
+    policy = AbstentionPolicy(global_threshold=0.5, per_class={1: 0.8})
+    assert policy.thresholds_for(np.array([], dtype=np.int64)).shape == (0,)
 
 
 # --------------------------------------------------------------------------- #

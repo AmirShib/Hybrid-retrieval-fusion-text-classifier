@@ -35,8 +35,10 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from .._messages import format_preview
 from ..domain import ClassDefinition, LabeledItem, LabelSpace
 from ..infrastructure import DeployedArtifacts, encoder_is_corpus_dependent
+from ..infrastructure.persistence import retriever_supporting
 from ..infrastructure.retrieval import LexicalRetrieverAdapter
 from ..infrastructure.signals import rewrap_signal_providers
 
@@ -86,6 +88,8 @@ def update(
     encoder = artifacts.encoder
     dense = artifacts.dense
     lexical = artifacts.lexical
+    dense_kind = f"retrieval.dense_kind={artifacts.config.retrieval.dense_kind!r}"
+    lexical_kind = f"retrieval.lexical_kind={artifacts.config.retrieval.lexical_kind!r}"
 
     # ------------------------------------------------------------- 1. classes
     new_defs: List[ClassDefinition] = []
@@ -95,12 +99,10 @@ def update(
         file_keys = {c.key for c in classes}
         missing = sorted(current_keys - file_keys)
         if missing:
-            shown = missing[:10]
-            suffix = " ..." if len(missing) > 10 else ""
             raise ValueError(
                 f"`classes` is missing {len(missing)} class key(s) already in the model: "
-                f"{shown}{suffix}. update never removes or reorders classes; retrain if "
-                "you need to change the taxonomy that way."
+                f"{format_preview(missing)}. update never removes or reorders classes; "
+                "retrain if you need to change the taxonomy that way."
             )
         seen_new = set()
         for c in classes:
@@ -115,28 +117,36 @@ def update(
                     edited[idx] = c.description
 
     if new_defs:
-        dense = dense.with_added_classes(encoder, [d.description for d in new_defs])
-        current_defs = [
-            ClassDefinition(k, d) for k, d in zip(label_space.keys, label_space.descriptions)
-        ]
+        dense = retriever_supporting(
+            dense, "with_added_classes", "add classes", dense_kind
+        ).with_added_classes(encoder, [d.description for d in new_defs])
+        # Incumbent definitions carry through whole; rebuilding them from
+        # keys+descriptions would strip their structured taxonomy fields.
+        current_defs = list(label_space.definitions)
         label_space = LabelSpace(current_defs + new_defs)
     if edited:
-        dense = dense.with_updated_descriptions(encoder, edited)
+        dense = retriever_supporting(
+            dense, "with_updated_descriptions", "edit class descriptions", dense_kind
+        ).with_updated_descriptions(encoder, edited)
     if new_defs or edited:
-        lexical = lexical.with_added_descriptions(label_space.descriptions)
+        # `lexical` is `None` for a model trained with "lexical" excluded from
+        # `config.signals` (no BM25 index exists to extend) -- the new/edited
+        # descriptions are still added to `label_space`/`dense` above, they
+        # simply carry no lexical support, same as every other class in this model.
+        if lexical is not None:
+            lexical = retriever_supporting(
+                lexical, "with_added_descriptions", "add or edit classes", lexical_kind
+            ).with_added_descriptions(label_space.descriptions)
         log.info("classes: %d new, %d description edit(s)", len(new_defs), len(edited))
 
     # -------------------------------------------------------- 2. new examples
     updated_corpus: Optional[List[LabeledItem]]
     if new_items:
-        known = set(label_space.keys)
-        unknown = sorted({it.label for it in new_items if it.label not in known})
+        unknown = label_space.unknown_keys(it.label for it in new_items)
         if unknown:
-            shown = unknown[:10]
-            suffix = " ..." if len(unknown) > 10 else ""
             raise ValueError(
                 f"{len(unknown)} new item label(s) are not in the label space "
-                f"(add them via `classes` first): {shown}{suffix}"
+                f"(add them via `classes` first): {format_preview(unknown)}"
             )
         if corpus is None:
             raise ValueError(
@@ -165,10 +175,14 @@ def update(
             label_space.encode_labels([it.label for it in new_items]), dtype=np.int64
         )
 
-        dense = dense.with_added_examples(encoder, new_texts, new_labels, label_space.size)
-        lexical = LexicalRetrieverAdapter.build(
-            merged_texts, merged_labels, label_space, artifacts.config.retrieval
-        )
+        dense = retriever_supporting(
+            dense, "with_added_examples", "add examples", dense_kind
+        ).with_added_examples(encoder, new_texts, new_labels, label_space.size)
+        # `lexical is None`: this model has no BM25 index to refit (see above).
+        if lexical is not None:
+            lexical = LexicalRetrieverAdapter.build(
+                merged_texts, merged_labels, label_space, artifacts.config.retrieval
+            )
         log.info("examples: %d added (corpus now %d items)", len(new_items), len(merged_items))
         updated_corpus = merged_items
     else:

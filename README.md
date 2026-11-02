@@ -323,19 +323,53 @@ to `model_dir/encoder/encoder_training.json`:
 {
   "select_metric": "desc_acc@1", "best_epoch": 6, "epochs_run": 9,
   "early_stopped": true, "n_fit_items": 4212, "n_holdout_items": 468,
-  "epochs": [{"epoch": 1, "desc_acc@1": 0.61, "desc_mrr": 0.72, "desc_pos_sim": 0.44}, "..."]
+  "epochs": [{"epoch": 1, "desc_acc@1": 0.61, "desc_mrr": 0.72}, "..."]
 }
 ```
 
 `--encoder-select-metric` chooses what "best" means: `desc_acc@1` (default —
 the item's nearest class description *is* its class, the direct analogue of the
 `d_desc_sim` signal), `desc_mrr` (smoother, better at separating epochs on a
-small holdout), `desc_pos_sim` (a diagnostic — it can rise while ranking
-degrades), or `knn_acc@1` (nearest labeled *example* shares the label, closest
-to the `d_knn_*` signals, but it re-encodes the fine-tuning pool every epoch).
-Set `--encoder-epoch-holdout 0` to disable selection entirely: every item trains
-and the final epoch wins, as before. Selection is inert at the default
+small holdout), or `knn_acc@1` (nearest labeled *example* shares the label,
+closest to the `d_knn_*` signals, but it re-encodes the fine-tuning pool every
+epoch). Set `--encoder-epoch-holdout 0` to disable selection entirely: every item
+trains and the final epoch wins, as before. Selection is inert at the default
 `--encoder-epochs 1` — one epoch, nothing to choose between.
+
+Fine-tuning runs through sentence-transformers' `SentenceTransformerTrainer`. The
+batch sampler is `NO_DUPLICATES` (two items of one class never share a batch, so
+an item's own description is never one of its in-batch negatives), each epoch is
+scored by an `InformationRetrievalEvaluator` over the holdout, and the Trainer
+reloads the best epoch's weights at the end. `--encoder-patience` is the
+Trainer's early-stopping patience, and `train_select_min_delta` the improvement
+that counts as progress for it. Everything the Trainer writes along the way goes
+to a temporary directory that is removed afterwards; the saved model directory
+comes only from `model.save()`, so it stays pickle-free.
+
+**Tuning the fine-tune and the model it builds.** All of these default to "leave
+the model alone", so an existing config trains exactly as before:
+
+| Setting (`encoder.*` / CLI flag) | Default | Effect |
+|---|---|---|
+| `learning_rate` / `--encoder-lr` | `2e-5` | AdamW step size (the library's own `fit()` default) |
+| `weight_decay` / `--encoder-weight-decay` | `0.01` | AdamW decay (likewise) |
+| `train_loss` / `--encoder-loss` | `multiple_negatives_ranking` | or `multiple_negatives_symmetric_ranking` (also scores description→item; the previous default, deprecated upstream from 5.6), or `cached_multiple_negatives_ranking` for a large effective batch on a small GPU |
+| `train_loss_params` | `{}` | passed to the loss, e.g. `{"scale": 10.0}` (the temperature) or `{"mini_batch_size": 32}` |
+| `max_seq_length` / `--encoder-max-seq-length` | model's own | truncation length in tokens, when training *and* encoding; persisted with the saved model. Otherwise longer texts are silently cut at the model default |
+| `pooling_mode` / `--encoder-pooling` | model's own | `mean`, `cls`, `max`, `lasttoken`, `weightedmean` or `mean_sqrt_len_tokens` |
+
+`pooling_mode` rebuilds the model as its Transformer plus a fresh pooling layer.
+That drops any module the model had after pooling (a `Dense` projection, a
+`Normalize` layer), and a model trained with a different pooling will not match
+its original quality until it is fine-tuned — the encoder logs a warning in both
+cases. It applies when the encoder is built or fine-tuned, never when a saved
+model directory is reloaded (which already carries its own pooling).
+
+**Devices.** The Trainer places the model itself, so `encoder.device="cpu"` pins
+it to the CPU but a CUDA *index* (`"cuda:1"`) is not honoured: set
+`CUDA_VISIBLE_DEVICES` to pin a GPU. With several GPUs visible the Trainer uses
+all of them, which shrinks each replica's in-batch negatives — set
+`CUDA_VISIBLE_DEVICES` to one device to avoid that. Both cases log a warning.
 
 The holdout is carved out of the items the encoder was already entitled to (in
 the out-of-fold loop, one fold's training rows), so it does not weaken the
@@ -511,6 +545,102 @@ each time.
 Use `--in-place` to overwrite `--model` directly instead of writing a new
 directory.
 
+### Cross-encoder reranking (optional second stage)
+
+Off by default. When switched on, a cross-encoder reads each item *together with*
+a candidate class's text and scores the pair. That is more accurate than comparing
+two independently computed embeddings, and much more expensive, so it runs only on
+the round-one shortlist and can only **reorder** it, never add a class to it:
+candidate recall stays a property of round one.
+
+```json
+{
+  "signals": ["dense", "lexical", "cross-encoder"],
+  "retrieval": {
+    "cross_encoder": {
+      "kind": "cross-encoder",
+      "model_name": "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+      "params": {"max_length": 256}
+    }
+  }
+}
+```
+
+Pass that with `--config`. There is deliberately **no default model**: pick one that
+reads your language. For a non-English taxonomy use a multilingual reranker, e.g.
+`cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` (small) or `BAAI/bge-reranker-v2-m3`
+(large, stronger). The model must output one relevance score per pair.
+
+**What it scores.** For each item, the 10 shortlisted classes ranked best by the
+description similarity (`documents[].top_k`, `prescore_node`) are scored against two
+documents built from the class's structured taxonomy fields:
+
+- `pos`: the class definition plus the example most like the item;
+- `neg`: the exclusion or sibling note most like the item.
+
+That adds 15 feature columns (raw score, missing flag, rank, normalised score,
+margin, top1-top2 gap and top-1 flag per document, plus `ce_pos_neg_gap`: "fits the
+definition, but fits what it excludes better"). Classes outside the 10 get NaN,
+never 0. The `neg` document only does something if your classes carry
+`exclusions` / `sibling_distinctions` (see the structured class columns); without
+them its columns are all NaN, which is harmless but adds nothing.
+
+**Fine-tuning it on your data.** Add `"train": true` to `cross_encoder`:
+
+```json
+"cross_encoder": {
+  "kind": "cross-encoder",
+  "model_name": "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+  "train": true,
+  "train_loss": "binary_cross_entropy",
+  "train_negatives": 9,
+  "train_epochs": 1,
+  "learning_rate": 2e-5
+}
+```
+
+Training data is mined from each item's own round-one shortlist (computed
+leave-one-out, so the item never retrieves itself): the true class is the positive
+and the other shortlisted classes, hardest first, are the negatives. These are
+exactly the decisions the reranker faces at inference. `train_loss` is
+`binary_cross_entropy` (pointwise, positives up-weighted) or a listwise `lambda` /
+`listnet`.
+
+To stay leakage-free, a **fresh copy** of `model_name` is fine-tuned per fold on
+that fold's training items only, and once more on all items for the model that
+ships. No item is ever scored by a model that trained on its label. That means
+`n_folds + 1` fine-tunes per run, so it is practical on a GPU; it needs k-fold
+training (`n_folds >= 2`) and sentence-transformers >= 4.0.
+
+**Training for more than one epoch** picks its own epoch, as the encoder does:
+with `train_epochs > 1`, a stratified `train_holdout_ratio` (default 0.1) of the
+training lists is held out of the gradient and scored after every epoch (is each
+item's true class ranked first among its candidates?), and the best epoch's weights
+are kept. `train_select_metric` is `mrr` (default), `ndcg` or `map`;
+`train_early_stopping_patience` stops after that many epochs without an improvement
+larger than `train_select_min_delta`. The shipped model's per-epoch table is saved as
+`model_dir/signals/cross-encoder/cross_encoder_training.json`. At the default
+`train_epochs: 1` there is nothing to choose between, so selection is off.
+
+**Deployment.** The cross-encoder's weights (pretrained or fine-tuned) are saved
+into `model_dir/signals/cross-encoder/` as safetensors and loaded from there, so the
+deployed model works offline. Expect the model directory to grow by the reranker's
+size (about 100 MB for a MiniLM-sized model, over 1 GB for `bge-reranker-v2-m3`).
+
+**Compatibility.** Tested with sentence-transformers 5.2, 5.6 and 6.2, on
+transformers 4.57 and 5.x. Fine-tuning needs sentence-transformers >= 4.0; scoring
+with a pretrained model works on older versions. On transformers 4.57.3, loading the
+saved model logs a warning that the tokenizer has "an incorrect regex pattern" (it
+mentions Mistral). It is a false alarm from that transformers release: the saved and
+original tokenizers were checked to produce identical tokens on 2,000 real Hebrew
+item names. It can be ignored.
+
+**Cost.** About 20 cross-encoder calls per item (10 candidates × 2 documents)
+every time an item is scored, in training and at inference. On a GPU that is fine;
+on a CPU with a large corpus it will be the slowest stage by far. `top_k` and the
+document list are the levers. `cross_encoder.device` follows the same
+auto-detection as the encoder.
+
 ### Worked examples
 
 The two demos behind the [Results](#what-it-looks-like-in-practice) table, each
@@ -558,7 +688,7 @@ guard against that:
   folds the fusion model never trained on.
 * **Encoder** — by default a single shared encoder is used (cheap). For full
   rigor, set `use_per_fold_encoder=True` to fine-tune a fresh encoder per fold.
-  The encoder is fine-tuned with `MultipleNegativesSymmetricRankingLoss` on
+  The encoder is fine-tuned with `MultipleNegativesRankingLoss` on
   (item, class-description) pairs. A multi-epoch fine-tune scores a held-out
   slice of its own training rows after every epoch and keeps the best epoch, so
   "train longer" cannot quietly ship an overfitted encoder.

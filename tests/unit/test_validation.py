@@ -238,6 +238,8 @@ class TestConfigValidation:
             (lambda c: setattr(c.retrieval, "bm25_max_df_ratio", 0.0), "bm25_max_df_ratio"),
             (lambda c: setattr(c.retrieval, "bm25_max_df_ratio", 1.5), "bm25_max_df_ratio"),
             (lambda c: setattr(c.retrieval, "bm25_max_block_elems", 0), "bm25_max_block_elems"),
+            (lambda c: setattr(c.encoder, "train_loss", ""), "train_loss"),
+            (lambda c: setattr(c.fusion, "objective", ""), "objective"),
         ],
     )
     def test_each_bound_rejected_naming_the_field(self, mutate, field_name):
@@ -259,6 +261,10 @@ class TestConfigValidation:
             lambda c: setattr(c.encoder, "encode_batch_size", 1),
             lambda c: setattr(c.retrieval, "bm25_max_df_ratio", 1.0),
             lambda c: setattr(c.retrieval, "bm25_max_block_elems", 1),
+            lambda c: setattr(c.encoder, "train_loss", "multiple_negatives_ranking"),
+            lambda c: setattr(c.encoder, "train_loss", "CosineSimilarityLoss"),
+            lambda c: setattr(c.fusion, "objective", "binary:hinge"),
+            lambda c: setattr(c.fusion, "objective", None),
         ],
     )
     def test_boundary_values_pass(self, mutate):

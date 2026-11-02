@@ -10,9 +10,12 @@ from typing import Any, Dict, List, Optional, Type, TypeVar
 # The domain layer owns the set of encoder-epoch metrics; import it rather than
 # restate it, so a new metric is valid in config the moment it can be measured.
 # (Acyclic: `domain` imports neither config nor infrastructure.)
-from .domain.services import ENCODER_SELECTION_METRICS
+from .domain.services import ENCODER_LOSSES, ENCODER_POOLING_MODES, ENCODER_SELECTION_METRICS
 
 _T = TypeVar("_T")
+
+# T89: valid values for EncoderConfig.reuse_query_embeddings (see its comment).
+REUSE_QUERY_EMBEDDINGS_MODES = ("auto", "always", "never")
 
 
 @dataclass
@@ -21,10 +24,44 @@ class EncoderConfig:
     model_name_or_path: str = "sentence-transformers/all-MiniLM-L6-v2"
     encode_batch_size: int = 64
     device: Optional[str] = None
-    # fine-tuning (MultipleNegativesSymmetricRankingLoss on item<->description pairs)
+    # Pooling. None (the default) keeps whatever Pooling module the model ships
+    # with -- mean pooling for a plain Hugging Face checkpoint -- so behaviour is
+    # unchanged. A mode from domain.services.ENCODER_POOLING_MODES rebuilds the
+    # model as its Transformer module plus a fresh `models.Pooling(mode)`. That
+    # DROPS any module the model had after its pooling (a Dense projection, a
+    # Normalize layer), and swapping the pooling of a model trained with another
+    # one costs quality until it is fine-tuned -- the encoder logs a warning in
+    # both cases. Applied when the encoder is built and when it is fine-tuned,
+    # never on reloading a saved model dir (which already carries its pooling).
+    pooling_mode: Optional[str] = None
+    # Truncation length in tokens. `max_seq_length` is a property of the loaded
+    # model, not a constructor argument, so `params` cannot set it; None keeps the
+    # model's own default (often 128-512), silently cutting longer texts off. It
+    # applies to fine-tuning and to encoding alike, and is persisted with the
+    # model, so a saved dir encodes at the length it was trained at.
+    max_seq_length: Optional[int] = None
+    # fine-tuning, on item<->description pairs. `train_loss` selects the
+    # objective: one of domain.services.ENCODER_LOSSES's three friendly aliases
+    # (all trained on the exact same pairs, so switching between them is a
+    # config change, not a data-plumbing one; see that tuple's comment for what
+    # each does), or any other class name under `sentence_transformers.losses`
+    # (e.g. "CosineSimilarityLoss", "TripletLoss") for direct access to the
+    # rest of the package's built-in losses -- unlike the three aliases, those
+    # are not verified to match the (item, description) pair shape this
+    # package builds, so picking one is the caller's responsibility.
+    # `train_loss_params` passes straight to the loss constructor (e.g.
+    # {"scale": 10.0} to soften the similarity temperature, or
+    # {"mini_batch_size": 32} for the cached variant).
     train_epochs: int = 1
     train_batch_size: int = 64
     warmup_ratio: float = 0.1
+    # AdamW step size and decay for the fine-tune. The defaults are the values the
+    # library's own `model.fit` used (lr 2e-5, weight decay 0.01), so a config that
+    # never sets them trains as before.
+    learning_rate: float = 2e-5
+    weight_decay: float = 0.01
+    train_loss: str = "multiple_negatives_ranking"
+    train_loss_params: Dict[str, Any] = field(default_factory=dict)
     # Best-epoch selection. With train_epochs > 1, `train_holdout_ratio` of the
     # fine-tuning items are held out from the gradient updates and re-scored after
     # every epoch; the epoch scoring best on `train_select_metric` is the one
@@ -68,6 +105,196 @@ class EncoderConfig:
     document_prompt: Optional[str] = None
     query_prompt_name: Optional[str] = None
     document_prompt_name: Optional[str] = None
+    # T89: whether training may reuse T88's once-per-run document embeddings as
+    # the *query* embeddings for held-out items, instead of encoding them a
+    # second time. Valid only when the two roles encode identically -- with the
+    # *_prompt fields above set (E5/BGE-style asymmetry), a document embedding is
+    # NOT a query embedding and substituting one is a correctness bug, not an
+    # optimization. Follows the array_backend="auto" precedent: auto-detect by
+    # default, an explicit value always wins.
+    #   "auto"   -- reuse when the encoder advertises `roles_share_encoding`
+    #               (the built-in encoders do; an unrecognized/custom encoder
+    #               does not, and is left re-encoding). The default.
+    #   "always" -- reuse even against a detected asymmetry: the caller asserts
+    #               the roles are equivalent. Logged as a warning when it
+    #               overrides, so it is never silent.
+    #   "never"  -- always re-encode; byte-for-byte the pre-T89 behaviour.
+    # None of these can reuse what does not exist: on the per-fold-encoder path
+    # there is no shared cache (a fold's embeddings are stale the moment that
+    # fold's encoder is fine-tuned), so all three are a no-op there.
+    reuse_query_embeddings: str = "auto"
+
+
+# --------------------------------------------------------------- cross-encoder
+# T33. Which class-side text a rendered evidence slot draws on. Each name maps to
+# a `ClassDefinition` accessor (see `infrastructure/reranker.py::_EVIDENCE`); the
+# tuple-valued ones ("examples"/"inclusions"/"exclusions"/"siblings") hold several
+# short strings and so support per-query `select`, while the scalar views
+# ("description"/"core") are a single document with nothing to choose between.
+CROSS_ENCODER_VIEWS = (
+    "description",
+    "core",
+    "examples",
+    "inclusions",
+    "exclusions",
+    "siblings",
+)
+# How to pick among a tuple-valued view's entries for one query. "best" is
+# query-adaptive (the entry most like the item text) and is the point of the
+# exercise: a class with six example phrases has six different doors in, and
+# which one fits depends on the query. For a *negative* view "best" also means
+# "the hardest negative" — the exclusion most at risk of being confused.
+CROSS_ENCODER_SELECT_MODES = ("best", "all", "first")
+# T33 phase 3: cross-encoder fine-tuning objectives (see CrossEncoderConfig).
+CROSS_ENCODER_TRAIN_LOSSES = ("binary_cross_entropy", "lambda", "listnet")
+# Held-out reranking metrics best-epoch selection can pick the cross-encoder by.
+CROSS_ENCODER_SELECT_METRICS = ("mrr", "ndcg", "map")
+
+
+@dataclass
+class EvidenceSpec:
+    """One rendered slot of a cross-encoder document (T33).
+
+    ``max_chars`` is a per-slot budget, not a document-level one, deliberately:
+    formal taxonomy definitions run to paragraphs, and truncating the *document*
+    would chop its tail — which in the natural ordering is the negative evidence,
+    silently deleting the one thing this signal exists to add. Budgeting per slot
+    keeps every slot represented in a long document."""
+
+    view: str = "description"
+    select: str = "best"
+    label: str = ""  # rendered prefix, e.g. "Excludes: "
+    max_chars: int = 300
+
+
+@dataclass
+class CrossEncoderDocument:
+    """One document scored per (item, candidate), and therefore one ``(b, C)``
+    signal matrix and one full set of derived columns (T33).
+
+    Splitting evidence across documents versus composing it into one is the
+    central knob here, and it is *config* rather than code because the right
+    answer depends on the backend. A stock relevance cross-encoder cannot know
+    that a span is a prohibition — overlap reads as relevance — so composing
+    exclusions into the positive document would invert the signal. An instructed
+    LLM judge or a purpose-trained cross-encoder can be told, and for those the
+    composed single-document form is better. Both are reachable from here."""
+
+    name: str = "pos"  # -> node "ce.<name>", column suffix
+    evidence: List[EvidenceSpec] = field(default_factory=lambda: [EvidenceSpec()])
+    instruction: str = ""  # prepended to the document; the LLM-judge affordance
+    join: str = "\n"
+    top_k: int = 10  # rerank only this many shortlisted candidates per item
+
+    def __post_init__(self) -> None:
+        self.evidence = [EvidenceSpec(**e) if isinstance(e, dict) else e for e in self.evidence]
+
+
+def _default_documents() -> List[CrossEncoderDocument]:
+    """The recommended default: positive identity composed into one document,
+    negative evidence scored separately.
+
+    The negative is *not* composed in, for the backend reason in
+    ``CrossEncoderDocument``'s docstring. Read alone, a high ``ce_neg`` means
+    "this item resembles what the class rules out", which is unambiguous whatever
+    the backend — and it is separately visible to the fusion model, which matters
+    because "matched the description but got vetoed" is exactly when the system
+    should abstain rather than guess."""
+    return [
+        CrossEncoderDocument(
+            name="pos",
+            evidence=[
+                EvidenceSpec(view="core", select="first"),
+                EvidenceSpec(view="examples", select="best", label="For example: "),
+            ],
+        ),
+        CrossEncoderDocument(
+            name="neg",
+            evidence=[
+                EvidenceSpec(view="exclusions", select="best", label="Excludes: "),
+                EvidenceSpec(view="siblings", select="best", label="Distinguish from: "),
+            ],
+        ),
+    ]
+
+
+@dataclass
+class CrossEncoderConfig:
+    """The cross-encoder rerank signal (T33). Reached by adding
+    ``"cross-encoder"`` to ``PipelineConfig.signals``; this block alone does
+    nothing, so the default is inert and the system stays byte-for-byte
+    identical until the signal is switched on."""
+
+    # Registry key (see `register_reranker`). "token-overlap" is the offline,
+    # dependency-free stand-in — the reranker analogue of `encoder.kind
+    # = "hashing"`. "cross-encoder" is a real sentence-transformers CrossEncoder
+    # (T33 phase 3): `model_name` is then required (a Hub id or a local dir) and
+    # there is deliberately no default model, since the right one depends on the
+    # language of your taxonomy. Its weights are saved into the model dir, so a
+    # deployed model needs no download.
+    kind: str = "token-overlap"
+    model_name: str = ""  # required for "cross-encoder"; unused by "token-overlap"
+    batch_size: int = 32
+    # None = the same auto-detection the encoder uses (CUDA, then MPS, then CPU).
+    device: Optional[str] = None
+    # Which round-one signal ranks the shortlist to pick each document's
+    # `top_k`. Already computed, so consulting it is free.
+    prescore_node: str = "dense.desc"
+    documents: List[CrossEncoderDocument] = field(default_factory=_default_documents)
+    # Pairs of document names to emit an explicit difference column for
+    # (`ce_<a>_<b>_gap`). The fusion model splits on one feature at a time and
+    # cannot learn `ce_pos - ce_neg` itself, so the comparison that actually
+    # discriminates — "matches the definition, but matches the exclusions
+    # better" — has to be handed to it. Same reasoning as `desc_proto_gap`.
+    gaps: List[List[str]] = field(default_factory=lambda: [["pos", "neg"]])
+    # Extra CrossEncoder constructor kwargs, e.g. {"max_length": 256} (truncation
+    # in tokens) or {"trust_remote_code": True}.
+    params: Dict[str, Any] = field(default_factory=dict)
+    # ---- fine-tuning (T33 phase 3). Off by default: a pretrained cross-encoder
+    # never sees your labels, so it can score held-out items safely. With
+    # `train`, a FRESH copy of `model_name` is fine-tuned per fold on that fold's
+    # training items only (and once more on all items for the deployed model),
+    # so no item is ever scored by a model that trained on its label. That costs
+    # n_folds + 1 fine-tunes per run -- practical on a GPU. Requires k-fold
+    # training (n_folds >= 2): leave-one-out scores the training items with the
+    # deployed model, which would have seen them.
+    #
+    # Training lists are mined from each training item's own round-one shortlist,
+    # computed leave-one-out against the fold's index (the item never retrieves
+    # itself): the true class is the positive, and up to `train_negatives` other
+    # shortlisted classes -- hardest first by `prescore_node` -- are negatives.
+    # These are exactly the decisions the reranker faces at inference. Pairs are
+    # rendered with `train_document` (a name from `documents`, "pos" by default);
+    # the other documents are scored by the same fine-tuned model.
+    train: bool = False
+    train_document: str = "pos"
+    train_negatives: int = 9
+    # "binary_cross_entropy" (pointwise, positives up-weighted to balance the
+    # negatives), or listwise "lambda" / "listnet" (one list per item).
+    train_loss: str = "binary_cross_entropy"
+    train_epochs: int = 1
+    train_batch_size: int = 16
+    learning_rate: float = 2e-5
+    weight_decay: float = 0.01
+    warmup_ratio: float = 0.1
+    # Best-epoch selection, as for the encoder. With train_epochs > 1, a
+    # stratified `train_holdout_ratio` of the training lists is held out of the
+    # gradient and re-scored after every epoch (a reranking evaluator: does each
+    # item's true class come first among its candidates?), and the best epoch's
+    # weights are the ones kept. Ignored at train_epochs == 1 (nothing to choose
+    # between), so the default changes nothing. `train_select_metric` is "mrr"
+    # (default), "ndcg" or "map"; `train_early_stopping_patience` > 0 stops after
+    # that many epochs without an improvement larger than `train_select_min_delta`.
+    train_holdout_ratio: float = 0.1
+    train_select_metric: str = "mrr"
+    train_early_stopping_patience: int = 0
+    train_select_min_delta: float = 0.0
+
+    def __post_init__(self) -> None:
+        self.documents = [
+            CrossEncoderDocument(**d) if isinstance(d, dict) else d for d in self.documents
+        ]
+        self.gaps = [list(g) for g in self.gaps]
 
 
 @dataclass
@@ -104,6 +331,24 @@ class RetrievalConfig:
     # must go through the chunked, sparse `top_k` path instead. `None` (the
     # default) is unbounded — today's behaviour.
     bm25_max_block_elems: Optional[int] = None
+    # Threads used to parallelize BM25.top_k's per-chunk sparse mat-mul
+    # (Qbin_chunk @ Wt). scipy's sparse @ releases the GIL during the C-level
+    # multiply, so plain threads (no pickling of the (vocab, n_docs) Wt matrix
+    # across processes) already parallelize this across cores. 1 (default) is
+    # the original single-threaded behaviour, byte-for-byte; -1 uses
+    # os.cpu_count().
+    bm25_n_jobs: int = 1
+    # T33: the cross-encoder rerank signal's settings. Lives here (rather than on
+    # PipelineConfig) because `SignalProviderSpec.build` already receives a
+    # RetrievalConfig, so a signal backend reaches its own config without
+    # widening a spec signature shared with every other signal provider.
+    # Populated by default but *inert*: nothing reads it until "cross-encoder"
+    # is added to `PipelineConfig.signals`.
+    cross_encoder: CrossEncoderConfig = field(default_factory=CrossEncoderConfig)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.cross_encoder, dict):
+            self.cross_encoder = CrossEncoderConfig(**self.cross_encoder)
 
 
 @dataclass
@@ -129,6 +374,17 @@ class FusionConfig:
     auto_scale_pos_weight: bool = True  # set scale_pos_weight = n_neg / n_pos at fit time
     # Generic params block read by non-xgboost backends (e.g. LightGBM).
     params: Dict[str, Any] = field(default_factory=dict)
+    # The loss/objective the fusion backend trains against, e.g. "binary:logistic"
+    # / "binary:hinge" (xgboost), "binary" / "cross_entropy" (lightgbm),
+    # "rank:pairwise" / "rank:ndcg" (xgb-ranker). None (default) leaves each
+    # backend's own default in place -- xgboost/lightgbm's implicit binary
+    # log-loss, or "rank:pairwise" for xgb-ranker. Merged into xgb_params/params
+    # as their "objective" key, which is not fusion-kind-specific and is left
+    # unvalidated here (pluggable backends may register kinds with objectives
+    # this package does not know about) -- an unrecognized value surfaces as a
+    # clear error from the backend library itself. An "objective" key already
+    # present in xgb_params/params wins over this field.
+    objective: Optional[str] = None
     # Feature columns withheld from the fusion model — this is what makes a
     # retrain-based ablation possible: "is the model better without this
     # column?", as opposed to the masking ablation's "what if this signal fails
@@ -293,6 +549,11 @@ class PipelineConfig:
         else:
             n_folds_ok = self.training.n_folds >= 3
             n_folds_constraint = ">= 3 (one train fold + one calibration fold + one test fold)"
+        # T33: hoisted so the cross-encoder checks below stay one-liners.
+        ce = self.retrieval.cross_encoder
+        ce_doc_names = {d.name for d in ce.documents}
+        ce_views = {e.view for d in ce.documents for e in d.evidence}
+        ce_selects = {e.select for d in ce.documents for e in d.evidence}
         checks = [
             # fold_roles() needs >=1 train fold + 1 calibration + 1 test; with
             # n_folds=2 the fusion training set is silently empty. External
@@ -380,6 +641,44 @@ class PipelineConfig:
                 f"one of {list(ENCODER_SELECTION_METRICS)}",
             ),
             (
+                "encoder.pooling_mode",
+                self.encoder.pooling_mode,
+                self.encoder.pooling_mode is None
+                or self.encoder.pooling_mode in ENCODER_POOLING_MODES,
+                f"None (keep the model's own pooling) or one of {list(ENCODER_POOLING_MODES)}",
+            ),
+            (
+                "encoder.max_seq_length",
+                self.encoder.max_seq_length,
+                self.encoder.max_seq_length is None
+                or (
+                    isinstance(self.encoder.max_seq_length, int)
+                    and not isinstance(self.encoder.max_seq_length, bool)
+                    and self.encoder.max_seq_length >= 1
+                ),
+                "None (keep the model's default) or an integer >= 1",
+            ),
+            (
+                "encoder.learning_rate",
+                self.encoder.learning_rate,
+                self.encoder.learning_rate > 0.0,
+                "> 0",
+            ),
+            (
+                "encoder.weight_decay",
+                self.encoder.weight_decay,
+                self.encoder.weight_decay >= 0.0,
+                ">= 0",
+            ),
+            (
+                "encoder.train_loss",
+                self.encoder.train_loss,
+                isinstance(self.encoder.train_loss, str) and self.encoder.train_loss.strip(),
+                f"a non-empty string -- one of {list(ENCODER_LOSSES)}, or any other "
+                "sentence_transformers.losses class name (not validated here; the "
+                "installed sentence-transformers version is what decides that)",
+            ),
+            (
                 "encoder.train_select_min_delta",
                 self.encoder.train_select_min_delta,
                 self.encoder.train_select_min_delta >= 0.0,
@@ -391,9 +690,22 @@ class PipelineConfig:
                 self.encoder.train_early_stopping_patience >= 0,
                 ">= 0 (0 trains every epoch)",
             ),
+            (
+                "encoder.reuse_query_embeddings",
+                self.encoder.reuse_query_embeddings,
+                self.encoder.reuse_query_embeddings in REUSE_QUERY_EMBEDDINGS_MODES,
+                f"one of {list(REUSE_QUERY_EMBEDDINGS_MODES)}",
+            ),
             # Membership in the schema is checked later, by fusion_feature_names,
             # which is the only place the *composed* schema (core + providers) is
             # known. Here we only reject shapes that are wrong on their face.
+            (
+                "fusion.objective",
+                self.fusion.objective,
+                self.fusion.objective is None
+                or (isinstance(self.fusion.objective, str) and self.fusion.objective.strip()),
+                "None or a non-empty objective string (backend-specific; not validated here)",
+            ),
             (
                 "fusion.drop_features",
                 self.fusion.drop_features,
@@ -417,6 +729,166 @@ class PipelineConfig:
                 self.signals,
                 len(set(self.signals)) == len(self.signals),
                 "free of duplicates",
+            ),
+            # T33. Checked unconditionally, not only when "cross-encoder" is in
+            # `signals`: a typo in a block that is currently switched off should
+            # surface now, not the day someone switches it on.
+            (
+                "retrieval.cross_encoder.batch_size",
+                ce.batch_size,
+                ce.batch_size >= 1,
+                ">= 1",
+            ),
+            (
+                "retrieval.cross_encoder.documents",
+                [d.name for d in ce.documents],
+                bool(ce.documents)
+                and all(isinstance(d.name, str) and d.name.strip() for d in ce.documents),
+                "a non-empty list of documents with non-empty names",
+            ),
+            (
+                "retrieval.cross_encoder.documents",
+                [d.name for d in ce.documents],
+                len(ce_doc_names) == len(ce.documents),
+                "free of duplicate document names (each names one signal node)",
+            ),
+            (
+                "retrieval.cross_encoder.documents[].top_k",
+                [d.top_k for d in ce.documents],
+                all(d.top_k >= 1 for d in ce.documents),
+                ">= 1 for every document",
+            ),
+            (
+                "retrieval.cross_encoder.documents[].evidence",
+                [len(d.evidence) for d in ce.documents],
+                all(d.evidence for d in ce.documents),
+                "at least one evidence slot per document",
+            ),
+            (
+                "retrieval.cross_encoder.documents[].evidence[].view",
+                sorted(ce_views),
+                ce_views <= set(CROSS_ENCODER_VIEWS),
+                f"drawn from {list(CROSS_ENCODER_VIEWS)}",
+            ),
+            (
+                "retrieval.cross_encoder.documents[].evidence[].select",
+                sorted(ce_selects),
+                ce_selects <= set(CROSS_ENCODER_SELECT_MODES),
+                f"one of {list(CROSS_ENCODER_SELECT_MODES)}",
+            ),
+            (
+                "retrieval.cross_encoder.documents[].evidence[].max_chars",
+                [e.max_chars for d in ce.documents for e in d.evidence],
+                all(e.max_chars >= 1 for d in ce.documents for e in d.evidence),
+                ">= 1 for every evidence slot",
+            ),
+            (
+                "retrieval.cross_encoder.model_name",
+                ce.model_name,
+                ce.kind != "cross-encoder" or bool(str(ce.model_name).strip()),
+                "set when kind is 'cross-encoder' (a Hub model id or a local directory; there is no default, since the right model depends on your language)",
+            ),
+            (
+                "retrieval.cross_encoder.train",
+                ce.train,
+                not ce.train or "cross-encoder" in self.signals,
+                "used only with 'cross-encoder' in signals (otherwise nothing would be trained)",
+            ),
+            (
+                "retrieval.cross_encoder.train",
+                ce.train,
+                not ce.train or ce.kind == "cross-encoder",
+                "used only with kind 'cross-encoder' (the token-overlap stand-in has no weights to train)",
+            ),
+            (
+                "retrieval.cross_encoder.train",
+                ce.train,
+                not ce.train or self.training.n_folds >= 2,
+                "used only with k-fold training (n_folds >= 2): leave-one-out scores the training items with the deployed model, which would have trained on them",
+            ),
+            (
+                "retrieval.cross_encoder.train_document",
+                ce.train_document,
+                ce.train_document in ce_doc_names,
+                f"one of the configured document names {sorted(ce_doc_names)}",
+            ),
+            (
+                "retrieval.cross_encoder.train_negatives",
+                ce.train_negatives,
+                ce.train_negatives >= 1,
+                ">= 1",
+            ),
+            (
+                "retrieval.cross_encoder.train_loss",
+                ce.train_loss,
+                ce.train_loss in CROSS_ENCODER_TRAIN_LOSSES,
+                f"one of {list(CROSS_ENCODER_TRAIN_LOSSES)}",
+            ),
+            (
+                "retrieval.cross_encoder.train_epochs",
+                ce.train_epochs,
+                ce.train_epochs >= 1,
+                ">= 1",
+            ),
+            (
+                "retrieval.cross_encoder.train_batch_size",
+                ce.train_batch_size,
+                ce.train_batch_size >= 1,
+                ">= 1",
+            ),
+            (
+                "retrieval.cross_encoder.learning_rate",
+                ce.learning_rate,
+                ce.learning_rate > 0.0,
+                "> 0",
+            ),
+            (
+                "retrieval.cross_encoder.weight_decay",
+                ce.weight_decay,
+                ce.weight_decay >= 0.0,
+                ">= 0",
+            ),
+            (
+                "retrieval.cross_encoder.warmup_ratio",
+                ce.warmup_ratio,
+                0.0 <= ce.warmup_ratio < 1.0,
+                "in [0, 1)",
+            ),
+            (
+                "retrieval.cross_encoder.train_holdout_ratio",
+                ce.train_holdout_ratio,
+                0.0 <= ce.train_holdout_ratio <= 0.5,
+                "in [0, 0.5] (0 disables best-epoch selection)",
+            ),
+            (
+                "retrieval.cross_encoder.train_select_metric",
+                ce.train_select_metric,
+                ce.train_select_metric in CROSS_ENCODER_SELECT_METRICS,
+                f"one of {list(CROSS_ENCODER_SELECT_METRICS)}",
+            ),
+            (
+                "retrieval.cross_encoder.train_early_stopping_patience",
+                ce.train_early_stopping_patience,
+                ce.train_early_stopping_patience >= 0,
+                ">= 0 (0 trains every epoch)",
+            ),
+            (
+                "retrieval.cross_encoder.train_select_min_delta",
+                ce.train_select_min_delta,
+                ce.train_select_min_delta >= 0.0,
+                ">= 0",
+            ),
+            (
+                "retrieval.cross_encoder.gaps",
+                ce.gaps,
+                all(len(g) == 2 for g in ce.gaps),
+                "a list of [document_a, document_b] pairs",
+            ),
+            (
+                "retrieval.cross_encoder.gaps",
+                ce.gaps,
+                all(name in ce_doc_names for g in ce.gaps for name in g),
+                f"referring only to configured document names {sorted(ce_doc_names)}",
             ),
         ]
         problems = [

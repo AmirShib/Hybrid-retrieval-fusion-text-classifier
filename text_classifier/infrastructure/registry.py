@@ -30,6 +30,7 @@ import numpy as np
 
 from ..config import (
     CalibrationConfig,
+    CrossEncoderConfig,
     EncoderConfig,
     FeatureProviderConfig,
     FeaturesConfig,
@@ -45,6 +46,7 @@ from ..domain import (
     LabeledItem,
     LabelSpace,
     LexicalRetriever,
+    PairwiseReranker,
     SignalProvider,
     TextEncoder,
 )
@@ -65,6 +67,11 @@ from .fusion import (
     PlattCalibrator,
     XGBoostFusionModel,
     XGBRankerFusionModel,
+)
+from .reranker import (
+    CrossEncoderSignalProvider,
+    SentenceTransformersCrossEncoder,
+    TokenOverlapReranker,
 )
 from .retrieval import DenseRetrieverAdapter, LexicalRetrieverAdapter
 from .signals import DenseSignalProvider, LexicalSignalProvider
@@ -169,6 +176,21 @@ class SignalProviderSpec:
 
 
 @dataclass(frozen=True)
+class RerankerSpec:
+    """How to build/persist a ``PairwiseReranker`` (T33).
+
+    Separate from ``SignalProviderSpec`` on purpose: the *signal* decides which
+    pairs to score and what the columns are called, the *reranker* only scores
+    pairs. So swapping a stock cross-encoder for a fine-tuned one or an
+    instructed LLM judge is a `retrieval.cross_encoder.kind` change with no
+    effect on the schema, and one reranker backend can serve several document
+    plans."""
+
+    build: Callable[[CrossEncoderConfig], PairwiseReranker]
+    load: Callable[[str, CrossEncoderConfig], PairwiseReranker]
+
+
+@dataclass(frozen=True)
 class ArrayOpsSpec:
     """How to build an ``ArrayOps`` backend. Unlike the other specs there is
     nothing to persist: the backend is a pure execution choice (T84), never a
@@ -186,6 +208,7 @@ _ARRAY_OPS: Dict[str, ArrayOpsSpec] = {}
 _DENSE_RETRIEVERS: Dict[str, DenseRetrieverSpec] = {}
 _LEXICAL_RETRIEVERS: Dict[str, LexicalRetrieverSpec] = {}
 _SIGNAL_PROVIDERS: Dict[str, SignalProviderSpec] = {}
+_RERANKERS: Dict[str, RerankerSpec] = {}
 
 _T = TypeVar("_T")
 
@@ -220,6 +243,10 @@ def register_lexical_retriever(name: str, spec: LexicalRetrieverSpec) -> None:
 
 def register_signal_provider(name: str, spec: SignalProviderSpec) -> None:
     _SIGNAL_PROVIDERS[name] = spec
+
+
+def register_reranker(name: str, spec: RerankerSpec) -> None:
+    _RERANKERS[name] = spec
 
 
 def _lookup(registry: Mapping[str, _T], name: str, what: str) -> _T:
@@ -266,6 +293,14 @@ def lexical_retriever_spec(kind: str) -> LexicalRetrieverSpec:
 
 def signal_provider_spec(kind: str) -> SignalProviderSpec:
     return _lookup(_SIGNAL_PROVIDERS, kind, "signal provider")
+
+
+def reranker_spec(kind: str) -> RerankerSpec:
+    return _lookup(_RERANKERS, kind, "reranker")
+
+
+def build_reranker(config: CrossEncoderConfig) -> PairwiseReranker:
+    return reranker_spec(config.kind).build(config)
 
 
 # ------------------------------------------------------------------- factories
@@ -370,7 +405,7 @@ def load_signal_providers(
     cfg: RetrievalConfig,
     signal_kinds: Sequence[str],
     dense: DenseRetriever,
-    lexical: LexicalRetriever,
+    lexical: Optional[LexicalRetriever],
     array_ops: Optional[ArrayOps] = None,
 ) -> List[SignalProvider]:
     """Reload the ``SignalProvider``s named by ``signal_kinds`` from a saved
@@ -398,7 +433,12 @@ register_encoder(
     "sentence-transformers",
     EncoderSpec(
         build=lambda cfg: SentenceTransformerEncoder.load(
-            cfg.model_name_or_path, cfg.encode_batch_size, cfg.device, config=cfg, **cfg.params
+            cfg.model_name_or_path,
+            cfg.encode_batch_size,
+            cfg.device,
+            config=cfg,
+            apply_model_overrides=True,
+            **cfg.params,
         ),
         dirname="encoder",
         load=lambda path, cfg: SentenceTransformerEncoder.load(
@@ -433,10 +473,22 @@ register_encoder(
     ),
 )
 
+
+def _with_objective(params: Dict[str, Any], objective: Optional[str]) -> Dict[str, Any]:
+    """Merge ``FusionConfig.objective`` into a backend's params dict as its
+    "objective" key. An "objective" already present in ``params`` (a
+    power-user override typed directly into xgb_params/params) wins."""
+    if objective is None:
+        return params
+    return {"objective": objective, **params}
+
+
 register_fusion(
     "xgboost",
     FusionSpec(
-        build=lambda cfg: XGBoostFusionModel(cfg.xgb_params, cfg.auto_scale_pos_weight),
+        build=lambda cfg: XGBoostFusionModel(
+            _with_objective(cfg.xgb_params, cfg.objective), cfg.auto_scale_pos_weight
+        ),
         filename="fusion.json",
         load=XGBoostFusionModel.load,
     ),
@@ -445,7 +497,9 @@ register_fusion(
 register_fusion(
     "lightgbm",
     FusionSpec(
-        build=lambda cfg: LightGBMFusionModel(cfg.params, cfg.auto_scale_pos_weight),
+        build=lambda cfg: LightGBMFusionModel(
+            _with_objective(cfg.params, cfg.objective), cfg.auto_scale_pos_weight
+        ),
         filename="fusion.txt",  # LightGBM native text format
         load=LightGBMFusionModel.load,
     ),
@@ -454,7 +508,7 @@ register_fusion(
 register_fusion(
     "xgbranker",
     FusionSpec(
-        build=lambda cfg: XGBRankerFusionModel(cfg.params),
+        build=lambda cfg: XGBRankerFusionModel(_with_objective(cfg.params, cfg.objective)),
         filename="fusion_ranker",  # a directory: native model + isotonic head
         load=XGBRankerFusionModel.load,
     ),
@@ -506,6 +560,20 @@ register_calibrator(
 register_array_ops("numpy", ArrayOpsSpec(build=lambda: NumpyArrayOps()))
 
 
+def _build_torch_array_ops() -> ArrayOps:
+    """Deferred import (T85): this only runs when ``build_array_ops("torch")``
+    is actually called -- registration itself (below) is metadata only, so
+    listing "torch" as a registered kind never imports torch (see
+    ``array_ops.py::resolve_array_backend``, which checks ``torch_installed()``
+    -- a non-importing probe -- rather than registry membership)."""
+    from .array_ops_torch import TorchArrayOps
+
+    return TorchArrayOps()
+
+
+register_array_ops("torch", ArrayOpsSpec(build=_build_torch_array_ops))
+
+
 def _load_dense_exact(directory: str, cfg: RetrievalConfig) -> DenseRetriever:
     arrays: Dict[str, Any] = dict(np.load(os.path.join(directory, "dense.npz")))
     return DenseRetrieverAdapter.from_state(arrays, chunk=cfg.dense_chunk)
@@ -552,6 +620,47 @@ register_signal_provider(
         build=lambda cfg, dense, lexical, ops: LexicalSignalProvider(lexical, ops),
         load=lambda directory, cfg: LexicalSignalProvider(
             lexical_retriever_spec(cfg.lexical_kind).load(directory)
+        ),
+    ),
+)
+
+register_reranker(
+    "token-overlap",
+    RerankerSpec(
+        # The offline stand-in -- no model, no network, deterministic. The
+        # reranker counterpart of the "hashing" encoder kind, and what the
+        # test suite and `scripts/demo` exercise the second stage with.
+        build=lambda cfg: TokenOverlapReranker(),
+        load=lambda path, cfg: TokenOverlapReranker.load(path),
+    ),
+)
+
+register_reranker(
+    "cross-encoder",
+    RerankerSpec(
+        # T33 phase 3: a real sentence-transformers CrossEncoder (lazy import --
+        # registering it never imports torch). `build` loads `model_name`;
+        # `load` reads the weights the model dir carries, never the Hub, so a
+        # deployed model works offline and a fine-tuned one reloads as trained.
+        build=SentenceTransformersCrossEncoder.from_config,
+        load=lambda path, cfg: SentenceTransformersCrossEncoder.load(path, config=cfg),
+    ),
+)
+
+register_signal_provider(
+    "cross-encoder",
+    SignalProviderSpec(
+        # T33. Ignores `dense`/`lexical`: it reranks candidates the shortlist
+        # already contains and reads its class-side text from the label space
+        # per chunk, so it wraps no retriever and holds no taxonomy state.
+        build=lambda cfg, dense, lexical, ops: CrossEncoderSignalProvider(
+            build_reranker(cfg.cross_encoder), cfg.cross_encoder, ops
+        ),
+        load=lambda directory, cfg: CrossEncoderSignalProvider(
+            reranker_spec(cfg.cross_encoder.kind).load(
+                os.path.join(directory, "signals", "cross-encoder"), cfg.cross_encoder
+            ),
+            cfg.cross_encoder,
         ),
     ),
 )

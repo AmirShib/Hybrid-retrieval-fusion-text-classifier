@@ -52,7 +52,6 @@ from .._version import __version__
 from ..application.evaluation import build_manifest, write_evaluation_artifacts
 from ..application.tuning import retune
 from ..application.updating import update
-from ..domain import ClassDefinition
 from ..infrastructure import ArtifactRepository
 from ._common import add_logging_arg, configure_logging, read_items, read_label_space
 
@@ -151,7 +150,7 @@ def main() -> None:
     classes = None
     if args.classes:
         ls = read_label_space(args.classes, args.key_col, args.desc_col)
-        classes = [ClassDefinition(k, d) for k, d in zip(ls.keys, ls.descriptions)]
+        classes = list(ls.definitions)
     new_items = read_items(args.items, args.text_col, args.label_col) if args.items else []
 
     try:

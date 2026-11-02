@@ -4,11 +4,23 @@ Captures the *actual values* ``FeatureAssembler.assemble`` produced on a fixed
 synthetic corpus under the pre-refactor code (see
 ``tests/unit/t34_phase2_golden*.npz``, generated once from the unmodified
 ``application/features.py`` / ``infrastructure/retrieval.py`` and checked in).
-The Phase 2 signal-provider refactor must reproduce these values exactly —
-same columns, same order, same floats, `rtol=0`/`atol=0` — for the default
-``dense``/``lexical`` provider pair. This is the safety net the T34 ticket's
-"hard requirement" asks for: a refactor with a golden-output guarantee, not a
-behaviour change.
+The Phase 2 signal-provider refactor must reproduce these values for the
+default ``dense``/``lexical`` provider pair — same columns, same order, and:
+
+  - discrete columns (ranks, top-1 flags, counts, missing indicators — any
+    column whose golden values are all whole numbers) **exactly**;
+  - continuous float columns to within ``1e-6``.
+
+Why not bit-exact floats everywhere: the dense similarities are float32 matrix
+products, and BLAS libraries (OpenBLAS on Linux CI, Accelerate on macOS, MKL)
+sum in different orders, so the same code differs by an ulp or two between
+machines. The fixtures were generated on one machine and CI runs on another, so
+a bit-exact check failed on every CI run. ``1e-6`` is a few float32 ulps at
+these magnitudes — far below anything a real behaviour change produces.
+
+The discrete columns stay exact because they *are* portable: ties break by
+class index (the ``ArrayOps.argsort`` contract is a stable sort). They used not
+to be — numpy's default sort is CPU-dispatched — and this test caught it.
 
 Three fixtures cover the paths that matter:
   - ``t34_phase2_golden.npz``          -- ordinary assemble(), with labels
@@ -30,6 +42,8 @@ from text_classifier.domain import CandidatePolicy, fusion_feature_names
 from text_classifier.infrastructure.retrieval import DenseRetrieverAdapter, LexicalRetrieverAdapter
 
 FIXTURES = os.path.dirname(__file__)
+# A few float32 ulps at the magnitudes these features take; see the module docstring.
+FLOAT_ATOL = 1e-6
 
 
 @pytest.fixture
@@ -66,7 +80,12 @@ def _assert_matches_golden(df, fixture_name):
     for col in golden:
         got = df[col].to_numpy()
         want = golden[col]
-        npt.assert_array_equal(got, want, err_msg=f"column {col!r} differs from golden fixture")
+        msg = f"column {col!r} differs from golden fixture"
+        finite = want[np.isfinite(want)] if want.dtype.kind == "f" else want
+        if want.dtype.kind != "f" or np.array_equal(finite, np.round(finite)):
+            npt.assert_array_equal(got, want, err_msg=msg)  # discrete: exact
+        else:
+            npt.assert_allclose(got, want, rtol=0, atol=FLOAT_ATOL, equal_nan=True, err_msg=msg)
 
 
 def test_assemble_matches_golden_with_labels(env):

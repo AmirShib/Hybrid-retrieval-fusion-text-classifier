@@ -117,8 +117,8 @@ class TestVocabPruningGuard:
         pipeline = TrainingPipeline(cfg)
         _, report = pipeline.run(items, label_space)
         assert report.n_items > 0
-        assert pipeline._shared_example_counts is None
-        assert pipeline._shared_desc_bm25 is not None  # A1 still shared
+        assert not pipeline._indexes.example_counts_cached
+        assert pipeline._indexes.description_index_cached  # A1 still shared
         # One `.fit()` (and its internal `tokenize_corpus`) for the shared
         # description index, plus one per fold and one for the deployment
         # index on the example side — none of those reach `build_from_counts`.
@@ -134,7 +134,7 @@ class TestVocabPruningGuard:
         pipeline = TrainingPipeline(cfg)
         _, report = pipeline.run(items, label_space)
         assert report.n_items > 0
-        assert pipeline._shared_example_counts is None
+        assert not pipeline._indexes.example_counts_cached
 
 
 class TestMaxDfRatioTrainingIntegration:

@@ -5,9 +5,8 @@ primitive, not a framework) and contain no IO.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 
@@ -147,6 +146,45 @@ FEATURE_DEPS: Dict[str, Tuple[str, ...]] = {
 }
 
 
+def _direct_signal_reqs(name: str) -> Set[str]:
+    """Which of the two built-in signals (``"dense"``/``"lexical"``) a core
+    column's *own* ``FEATURE_DEPS`` entry names directly (a ``dense.*``/
+    ``bm25.*`` node), ignoring the shared ``"candidates"`` node.
+
+    ``"candidates"`` is deliberately excluded: every candidate-gated column
+    depends on it, but the *mask itself* is only ever built from whichever
+    signals are actually active (``FeatureAssembler``'s candidate union), not
+    both unconditionally — so it carries no signal-specific information for
+    this purpose. Derived from ``FEATURE_DEPS`` (not a second hardcoded list)
+    so a new dense/bm25 column is classified automatically, the same "single
+    source of truth" discipline ``FEATURE_DEPS`` itself documents."""
+    reqs: Set[str] = set()
+    for dep in FEATURE_DEPS.get(name, ()):
+        if dep.startswith("dense."):
+            reqs.add("dense")
+        elif dep.startswith("bm25."):
+            reqs.add("lexical")
+    return reqs
+
+
+def core_feature_names(active_signals: Optional[Iterable[str]] = None) -> List[str]:
+    """``FEATURE_NAMES`` narrowed to the columns computable from
+    ``active_signals`` (a name set that may include ``"dense"``/``"lexical"``
+    plus any third-party signal kind -- only the two built-ins matter here).
+
+    ``None`` (the default) means both built-ins are active and returns
+    ``FEATURE_NAMES`` verbatim -- the byte-for-byte-identical default schema.
+    A column that needs a signal absent from ``active_signals`` (e.g.
+    ``b_desc_sim`` without ``"lexical"``) is dropped; a column needing neither
+    (``class_log_freq``) always survives; ``n_signal_agreement`` needs both,
+    so it drops whenever either built-in is disabled -- with only one signal
+    active, "how many signals agree" carries no information."""
+    if active_signals is None:
+        return list(FEATURE_NAMES)
+    active = set(active_signals)
+    return [n for n in FEATURE_NAMES if _direct_signal_reqs(n) <= active]
+
+
 def feature_closure(requested: Iterable[str]) -> Set[str]:
     """The transitive closure of ``requested`` over ``FEATURE_DEPS``, plus the
     unconditional ``candidates`` dependency (and everything it pulls in).
@@ -181,14 +219,24 @@ def composed_feature_names(
     This is *the* column order the fusion model is trained and scored on, and it is
     persisted into ``meta.json`` at save time so inference rebuilds the identical
     order. With no providers it is exactly ``FEATURE_NAMES``. The built-in ``"dense"``/
-    ``"lexical"`` signal providers are skipped here (by ``name``): their columns
-    *are* ``FEATURE_NAMES``, already present, so declaring them again would just be
-    a duplicate of the constant this function already starts from. Raises
-    ``ValueError`` on a name collision (a provider colliding with a core column, or
-    two providers colliding), because a duplicate column name would silently
-    overwrite data in the assembled frame — the worst kind of train/infer
-    disagreement."""
-    names: List[str] = list(FEATURE_NAMES)
+    ``"lexical"`` signal providers are skipped in the loop below (by ``name``): their
+    columns are ``core_feature_names``' output, already present, so declaring them
+    again would just be a duplicate of what this function already starts from.
+
+    ``core_feature_names`` narrows that starting list to whichever of ``"dense"``/
+    ``"lexical"`` actually appear (by ``name``) in ``signal_providers`` — an empty
+    ``signal_providers`` (every pre-T34-phase-2 caller, and any caller that
+    deliberately wants the full legacy schema) means "assume both", the
+    byte-for-byte-identical default; a non-empty list missing one of the two
+    (e.g. only a ``DenseSignalProvider``) drops that signal's columns, because
+    nothing built them.
+
+    Raises ``ValueError`` on a name collision (a provider colliding with a core
+    column, or two providers colliding), because a duplicate column name would
+    silently overwrite data in the assembled frame — the worst kind of
+    train/infer disagreement."""
+    active_builtin = {sp.name for sp in signal_providers if sp.name in ("dense", "lexical")}
+    names: List[str] = core_feature_names(active_builtin if signal_providers else None)
     seen = set(names)
     for sp in signal_providers:
         if sp.name in ("dense", "lexical"):
@@ -281,15 +329,37 @@ class AbstentionPolicy:
     per_class: Dict[int, float] = field(default_factory=dict)
 
     def threshold_for(self, class_index: int) -> float:
+        """This policy's threshold for one class — its own override, else the
+        global one. The scalar counterpart of ``thresholds_for``."""
         return self.per_class.get(int(class_index), self.global_threshold)
 
+    def thresholds_for(self, class_index: np.ndarray) -> np.ndarray:
+        """``threshold_for`` over a whole ``(n,)`` array of class indices,
+        without a Python-level lookup per row.
+
+        The overrides are sorted once and probed with ``searchsorted``, so the
+        cost is ``O(m log m + n log m)`` in C for ``m`` overrides and ``n`` rows,
+        rather than ``n`` dict lookups driven from the interpreter — this runs
+        over every scored item of every batch. An index with no override (which
+        includes any out-of-range or sentinel value, e.g. the ``-1`` an item
+        with no prediction carries) falls back to the global threshold, exactly
+        as ``threshold_for`` does.
+        """
+        idx = np.asarray(class_index)
+        if not self.per_class:
+            return np.full(idx.shape, self.global_threshold, dtype=np.float64)
+        keys = np.fromiter(self.per_class.keys(), dtype=np.int64, count=len(self.per_class))
+        values = np.fromiter(self.per_class.values(), dtype=np.float64, count=len(self.per_class))
+        order = np.argsort(keys)
+        keys, values = keys[order], values[order]
+        # `searchsorted` can return `len(keys)`; clipping keeps the gather in
+        # bounds and the `== idx` check below rejects the clipped miss anyway.
+        pos = np.clip(np.searchsorted(keys, idx), 0, keys.size - 1)
+        return np.where(keys[pos] == idx, values[pos], self.global_threshold)
+
     def accept(self, confidence: np.ndarray, class_index: np.ndarray) -> np.ndarray:
-        thr = np.fromiter(
-            (self.threshold_for(c) for c in class_index.tolist()),
-            dtype=np.float64,
-            count=len(class_index),
-        )
-        return confidence >= thr
+        """Elementwise "is this confidence above its class's threshold"."""
+        return confidence >= self.thresholds_for(class_index)
 
 
 class ThresholdTuner:
@@ -316,7 +386,8 @@ class ThresholdTuner:
 # Metrics an encoder fine-tune can be *scored* on after each epoch, so a
 # multi-epoch run can return its best epoch instead of blindly its last. All are
 # "higher is better" and all are measured on a held-out slice of the fine-tuning
-# items (see ``encoder_retrieval_metrics``):
+# items by sentence-transformers' ``InformationRetrievalEvaluator`` (see
+# ``infrastructure/encoder.py``):
 #
 #   desc_acc@1   -- fraction of items whose nearest class *description* is their
 #                   true class. The direct analogue of the `d_desc_sim` signal,
@@ -324,138 +395,60 @@ class ThresholdTuner:
 #   desc_mrr     -- mean reciprocal rank of the true class among descriptions.
 #                   Smoother than acc@1, so it separates epochs on small holdouts
 #                   where acc@1 plateaus.
-#   desc_pos_sim -- mean cosine to the item's own class description. Moves even
-#                   when no ranking changes; useful as a diagnostic, weak as a
-#                   selection target (it can rise while ranking degrades).
 #   knn_acc@1    -- fraction whose nearest *example* in the fine-tuning pool
 #                   shares its label — the analogue of the `d_knn_*` signals.
 #                   Requires re-encoding the example pool each epoch, so it is
-#                   only computed when a pool is supplied.
+#                   only computed when it is the metric being selected on.
 ENCODER_SELECTION_METRICS: Tuple[str, ...] = (
     "desc_acc@1",
     "desc_mrr",
-    "desc_pos_sim",
     "knn_acc@1",
 )
 
+# Pooling modes ``EncoderConfig.pooling_mode`` may name. These are
+# ``sentence_transformers.models.Pooling``'s own mode strings; ``None`` (the
+# default) leaves the model's saved Pooling module alone. ``lasttoken`` needs a
+# sentence-transformers release that ships it -- the encoder raises a clear
+# error on an older one rather than failing deep inside the library.
+ENCODER_POOLING_MODES: Tuple[str, ...] = (
+    "mean",
+    "cls",
+    "max",
+    "lasttoken",
+    "weightedmean",
+    "mean_sqrt_len_tokens",
+)
 
-def encoder_retrieval_metrics(
-    query_emb: np.ndarray,
-    desc_emb: np.ndarray,
-    true_idx: np.ndarray,
-    *,
-    pool_emb: Optional[np.ndarray] = None,
-    pool_labels: Optional[np.ndarray] = None,
-) -> Dict[str, float]:
-    """Score an encoder's retrieval quality on a labeled holdout.
-
-    ``query_emb`` (n, d) are the holdout items, ``desc_emb`` (C, d) the class
-    descriptions in ``LabelSpace`` order, and ``true_idx`` (n,) each item's true
-    class index. All embeddings are expected L2-normalized (the package-wide
-    invariant), so the dot products below *are* cosines. ``pool_emb`` (m, d) with
-    ``pool_labels`` (m,) optionally adds the nearest-example metric; the pool must
-    not contain the holdout items themselves, or every query self-retrieves and
-    ``knn_acc@1`` reads 1.0.
-
-    Returns a ``{metric: value}`` dict over ``ENCODER_SELECTION_METRICS`` (the
-    ``knn_`` key only when a pool is given). An empty holdout yields NaNs rather
-    than raising — the caller decides whether an unscoreable epoch is fatal.
-
-    Ranks are *optimistic* on ties (``rank = #{strictly better} + 1``), while
-    ``desc_acc@1`` follows ``argmax`` and so breaks ties by lowest class index.
-    The two therefore disagree slightly on a degenerate encoder that maps
-    everything to the same vector; neither is used to make claims about such a
-    model beyond "this epoch is not the one to keep".
-    """
-    q = np.asarray(query_emb, dtype=np.float64)
-    d = np.asarray(desc_emb, dtype=np.float64)
-    t = np.asarray(true_idx, dtype=np.intp)
-    metrics: Dict[str, float] = {}
-    if q.shape[0] == 0 or d.shape[0] == 0:
-        metrics.update({name: float("nan") for name in ENCODER_SELECTION_METRICS[:3]})
-        if pool_emb is not None:
-            metrics["knn_acc@1"] = float("nan")
-        return metrics
-
-    sims = q @ d.T  # (n, C) cosine to every class description
-    own = sims[np.arange(sims.shape[0]), t]  # (n,) cosine to the true class
-    rank = (sims > own[:, None]).sum(axis=1) + 1  # optimistic rank of the true class
-    metrics["desc_acc@1"] = float((sims.argmax(axis=1) == t).mean())
-    metrics["desc_mrr"] = float((1.0 / rank).mean())
-    metrics["desc_pos_sim"] = float(own.mean())
-
-    if pool_emb is not None:
-        p = np.asarray(pool_emb, dtype=np.float64)
-        labels = np.asarray(pool_labels, dtype=np.intp)
-        if p.shape[0] == 0:
-            metrics["knn_acc@1"] = float("nan")
-        else:
-            nearest = (q @ p.T).argmax(axis=1)  # (n,) index of the closest example
-            metrics["knn_acc@1"] = float((labels[nearest] == t).mean())
-    return metrics
-
-
-@dataclass(frozen=True, slots=True)
-class EpochSelectionPolicy:
-    """Which epoch of a multi-epoch fit to keep, given the per-epoch scores.
-
-    A pure decision rule over a history of ``{metric: value}`` dicts (one per
-    epoch, in order) — it holds no model state and does no IO, so the same rule
-    drives selection during training and can be re-derived from a persisted
-    history afterwards.
-
-    - ``metric`` names the entry to select on (one of ``ENCODER_SELECTION_METRICS``).
-    - ``min_delta`` is how much a later epoch must beat the incumbent by to be
-      considered an improvement — it suppresses churn from noise on a small
-      holdout, and (with ``patience``) defines what "no progress" means.
-    - ``patience`` > 0 requests early stopping after that many consecutive
-      non-improving epochs; 0 trains every epoch and just picks the best.
-
-    Ties go to the *earlier* epoch: equal measured quality from less training is
-    the cheaper, less-overfit model.
-    """
-
-    metric: str = "desc_acc@1"
-    min_delta: float = 0.0
-    patience: int = 0
-
-    def score(self, metrics: Mapping[str, float]) -> float:
-        """This policy's metric out of one epoch's record.
-
-        Raises ``KeyError`` naming what was available: a missing metric means the
-        history was produced under a different measurement (e.g. selecting on
-        ``knn_acc@1`` with no example pool supplied), which must not silently
-        degrade into "no epoch is better than any other".
-        """
-        try:
-            return float(metrics[self.metric])
-        except KeyError:
-            raise KeyError(
-                f"epoch metric {self.metric!r} was not measured; recorded metrics: "
-                f"{sorted(metrics)}"
-            ) from None
-
-    def best_epoch(self, history: Sequence[Mapping[str, float]]) -> int:
-        """The 1-based epoch to keep, or 0 if no epoch produced a usable score.
-
-        0 is a real answer, not an error: it says "selection has nothing to go
-        on" (an empty history, or every score NaN), and the caller falls back to
-        whatever the fit produced last.
-        """
-        best_epoch, best_score = 0, -math.inf
-        for epoch, metrics in enumerate(history, start=1):
-            score = self.score(metrics)
-            if math.isnan(score):
-                continue
-            if best_epoch == 0 or score > best_score + self.min_delta:
-                best_epoch, best_score = epoch, score
-        return best_epoch
-
-    def should_stop(self, history: Sequence[Mapping[str, float]]) -> bool:
-        """Whether ``patience`` non-improving epochs have elapsed since the best."""
-        if self.patience <= 0 or not history:
-            return False
-        best = self.best_epoch(history)
-        if best == 0:
-            return False
-        return len(history) - best >= self.patience
+# Fine-tuning losses. These three friendly aliases are all trained on the same
+# (item_text, description) pair examples train_encoder already builds -- picking
+# among them is a config change, not a data-plumbing one:
+#   multiple_negatives_ranking -- the default. In-batch negatives scored in one
+#                   direction (item->description). NoDuplicatesBatchSampler's
+#                   same-class exclusion is what keeps a same-class sibling's
+#                   description from being scored as a negative for the item.
+#   multiple_negatives_symmetric_ranking -- the same, scored in both directions
+#                   (item->description AND description->item). The previous
+#                   default; deprecated upstream from sentence-transformers 5.6,
+#                   where MultipleNegativesRankingLoss(directions=...) replaces it.
+#   cached_multiple_negatives_ranking -- same objective as
+#                   multiple_negatives_ranking, computed over GradCache
+#                   mini-batches (train_loss_params["mini_batch_size"]) so a
+#                   large effective batch of in-batch negatives fits in memory
+#                   too small to hold it directly.
+#
+# `EncoderConfig.train_loss` is not restricted to these three: any class name
+# under `sentence_transformers.losses` (e.g. "CosineSimilarityLoss",
+# "TripletLoss", "ContrastiveLoss", "GISTEmbedLoss", ...) also resolves, via
+# infrastructure/encoder.py's `_build_train_loss`. This tuple exists for CLI
+# discoverability and lists only the losses verified compatible with the
+# (item_text, description) *pair* examples this package builds -- other
+# sentence-transformers losses expect a different input shape (an explicit
+# label/score, a triplet, a batch of same/different-class groups) that
+# train_encoder does not construct, and picking one outside this list is the
+# caller's responsibility to get right; see that loss's sentence-transformers
+# docs for what it expects before selecting it.
+ENCODER_LOSSES: Tuple[str, ...] = (
+    "multiple_negatives_ranking",
+    "multiple_negatives_symmetric_ranking",
+    "cached_multiple_negatives_ranking",
+)

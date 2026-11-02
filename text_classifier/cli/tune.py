@@ -28,17 +28,12 @@ items look like near-duplicates of an indexed training example.
 from __future__ import annotations
 
 import argparse
-import json
 
 from .. import InferencePipeline
-from ..application.evaluation import _json_safe, build_manifest, write_evaluation_artifacts
+from ..application.evaluation import build_manifest, write_evaluation_artifacts
 from ..application.tuning import retune
 from ..infrastructure import ArtifactRepository
-from ._common import add_logging_arg, configure_logging, read_items
-
-
-def _pct(x) -> str:
-    return "n/a" if x is None else f"{100 * x:.1f}%"
+from ._common import add_logging_arg, configure_logging, pct, read_items, write_json_report
 
 
 def main() -> None:
@@ -97,10 +92,10 @@ def main() -> None:
     print(f"\n=== {heading} ===")
     print(f"items evaluated       : {o['n_items']}")
     print(
-        f"coverage              : {_pct(o['coverage'])} "
+        f"coverage              : {pct(o['coverage'])} "
         f"({o['n_accepted']} accepted, {o['n_abstained']} abstained)"
     )
-    print(f"accuracy on accepted  : {_pct(o['accuracy_on_accepted'])}")
+    print(f"accuracy on accepted  : {pct(o['accuracy_on_accepted'])}")
     print(f"global threshold      : {abstention.global_threshold:.4f}")
     print(f"per-class thresholds  : {len(abstention.per_class)}")
 
@@ -115,10 +110,7 @@ def main() -> None:
         n_evaluated=len(items),
     )
 
-    if args.output:
-        with open(args.output, "w") as fh:
-            json.dump(_json_safe({"manifest": manifest, **evaluation}), fh, indent=2)
-        print(f"\nwrote report to {args.output}")
+    write_json_report(args.output, {"manifest": manifest, **evaluation}, label="report")
 
     if args.dry_run:
         print("\n(dry run: model directory left unchanged)")

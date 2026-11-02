@@ -8,6 +8,355 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 
 ## [Unreleased]
 
+### Added
+- **A real cross-encoder backend for the rerank signal, with optional per-fold
+  fine-tuning (T33 phase 3).** `retrieval.cross_encoder.kind = "cross-encoder"`
+  wraps a sentence-transformers `CrossEncoder` (`model_name` required; no default,
+  since the right model depends on your language; extra constructor args via
+  `params`, e.g. `max_length`). Scores are the model's raw logits, forced
+  explicitly because `CrossEncoder.predict`'s default activation differs between
+  versions (5.6+ applies a sigmoid, 5.2 does not). The weights are saved into the
+  model dir as safetensors and reloaded from there, so deployed models work
+  offline. `device` follows the encoder's auto-detection.
+
+  With `cross_encoder.train = true`, a fresh copy of the model is fine-tuned per
+  fold on that fold's training items only, and once more on all items for the
+  shipped model, so no item is scored by a model that saw its label. Training
+  lists are mined from each item's own round-one shortlist, computed leave-one-out
+  (true class positive, other shortlisted classes negative, hardest first by
+  `prescore_node`), rendered with `train_document` (default `pos`). Losses:
+  `binary_cross_entropy` (positives up-weighted), `lambda`, `listnet`. New fields:
+  `train`, `train_document`, `train_negatives`, `train_loss`, `train_epochs`,
+  `train_batch_size`, `learning_rate`, `weight_decay`, `warmup_ratio`. Validation
+  rejects training on the leave-one-out path (`n_folds = 1`, which would leak),
+  without the signal configured, or with the token-overlap stand-in. Fine-tuning
+  needs sentence-transformers >= 4.0. Tested offline on 6.2.0, 5.6.0 and 5.2.0.
+
+  Multi-epoch fine-tuning selects its best epoch, as the encoder does: with
+  `train_epochs > 1` a class-stratified `train_holdout_ratio` (default 0.1) of the
+  training lists is held out and scored after each epoch by a
+  `CrossEncoderRerankingEvaluator`; the Trainer reloads the best epoch on
+  `train_select_metric` (`mrr`/`ndcg`/`map`), with optional early stopping
+  (`train_early_stopping_patience`, `train_select_min_delta`). The shipped model's
+  per-epoch table is saved as `signals/cross-encoder/cross_encoder_training.json`.
+  Off at the default single epoch.
+
+  Verified end to end with a real multilingual cross-encoder
+  (`cross-encoder/mmarco-mMiniLMv2-L12-H384-v1`) on a Hebrew sample of the COICOP
+  example data, on sentence-transformers 5.2.0 + transformers 4.57.3 and on 6.2.0 +
+  5.22: training, saving, offline reload with identical predictions, and every
+  post-training CLI (evaluate, tune, importance, update with new examples or a new
+  class -- a class added after training is reranked like any other).
+- **Encoder fine-tune and model knobs, all defaulting to the old behaviour.**
+  `encoder.learning_rate` (`2e-5`) and `encoder.weight_decay` (`0.01`) — the
+  values `model.fit` used — are now configurable. `encoder.max_seq_length` sets the
+  truncation length (a model property that `encoder.params` could not set, so
+  longer texts were silently cut at the model default); it is persisted with the
+  saved model. `encoder.pooling_mode` (`mean`/`cls`/`max`/`lasttoken`/
+  `weightedmean`/`mean_sqrt_len_tokens`) rebuilds the model as its Transformer plus
+  a fresh `Pooling`, warning when that replaces the model's own pooling or drops a
+  post-pooling `Dense`/`Normalize` module; the model's prompts are carried over.
+  Overrides apply when an encoder is built or fine-tuned and are not re-applied
+  when a saved model dir is reloaded. New train-CLI flags: `--encoder-lr`,
+  `--encoder-weight-decay`, `--encoder-max-seq-length`, `--encoder-pooling`. The
+  loss choice and scale (`train_loss`, `train_loss_params={"scale": ...}`) were
+  already configurable.
+- **Cross-encoder rerank signal (T33, phase 1) — opt-in, off by default.** Adds a
+  second signal *round* to `FeatureAssembler`: a `SignalProvider` may now declare
+  `needs_candidates = True` and run after candidate selection, receiving the
+  shortlist (`SignalContext.candidates`) instead of scoring all `C` classes. That
+  is what a reranker needs and what the assembler could not express — every
+  provider previously ran before the mask existed. A second-round provider must
+  declare no `candidate_features` (it cannot select what it consumes; the
+  assembler rejects the combination), and that restriction is what makes it safe
+  to skip such a provider entirely when every one of its columns is pruned — so
+  dropping the `ce_*` columns costs *zero* cross-encoder calls, asserted as a
+  call count.
+
+  Enabled with `"cross-encoder"` in `PipelineConfig.signals`. It is the first
+  consumer of the structured taxonomy fields: each candidate is scored against
+  documents rendered from `core`/`examples`/`inclusions`/`exclusions`/`siblings`
+  views, with the entry most like the query selected per item. The default plan
+  scores positive identity and negative evidence (`exclusions` +
+  `sibling_distinctions`) **separately**, plus an explicit `ce_pos_neg_gap`
+  difference column — a stock relevance cross-encoder cannot tell that a span is
+  a prohibition, so composing negatives into one document would invert the
+  signal; an instructed LLM judge or a purpose-trained model can, and reaching
+  that is a config change (`retrieval.cross_encoder.documents`), not a rewrite.
+  Backends plug in behind the new `PairwiseReranker` port; `token-overlap` (no
+  model, no network, deterministic) is the only one registered so far.
+
+  A class with no exclusions yields `NaN`, never `0.0` — an absent view is
+  absent, not evidence of a poor match (the `NaN` invariant, at the text layer).
+  With the signal off, output, schema and on-disk layout are byte-for-byte
+  unchanged; no torch is imported either way.
+
+### Fixed
+- **Fine-tuning no longer prints a `{'train_runtime': ...}` line per run.** With
+  progress bars off, transformers' `PrinterCallback` printed the end-of-training
+  summary to stdout even with logging disabled; it is removed from both the encoder
+  and the cross-encoder trainers, which report through `logging` instead.
+- **Possible segfault when training on macOS.** On Macs using Homebrew's libomp,
+  importing torch before xgboost makes xgboost's first `fit()` crash
+  (`OMP: Error #179`). A normal training run does exactly that, because the
+  sentence-transformers encoder loads torch before the fusion model loads xgboost;
+  only the test suite was protected. The package now imports xgboost when it loads.
+  This can't help if your own code imports torch before `text_classifier`. Linux is
+  unaffected (checked on two torch/xgboost version pairs).
+- **Rank features no longer depend on the CPU.** `ArrayOps.argsort` used numpy's
+  default sort, which is neither stable nor portable: numpy 2.x dispatches it to
+  CPU-specific SIMD kernels (AVX2/AVX-512, NEON), so tied scores — common with
+  BM25 — came back in a machine-dependent order and the `rank_*` features of the
+  same model differed between the training host and the deployment host. The
+  port's `argsort` is now stable on both backends (ties go to the lower class
+  index), and the port contract says so. Values change only where scores tie.
+- **CI was red on every run, `main` included; it is green again.** Three
+  independent causes:
+  - The golden feature-frame test compared float32 dense similarities
+    bit-exactly against fixtures generated on another machine; BLAS libraries sum
+    in different orders, so CI always failed by an ulp. Discrete columns (ranks,
+    flags, counts) are still compared exactly — the stable sort above is what made
+    them portable — and continuous columns to within `1e-6`.
+  - `package-smoke` and `quality-benchmark` installed a hand-copied dependency
+    list with `--no-deps`, which had drifted (no `tqdm`), so the package failed to
+    import. Both now install the package's own declared (torch-free) dependencies.
+  - mypy (28 errors): missing stubs for the optional `torch`/`transformers`/`tqdm`
+    are now ignored like the other ML libraries; the numpy 2.x stubs' typing of
+    `savez_compressed(**arrays)` is satisfied; stale ignores are removed; and the
+    `Optional` retriever handling is made explicit (below).
+- **Clear errors instead of `AttributeError`s for inconsistent retriever state.**
+  A signal provider asked to compute with no index built (e.g. a lexical provider
+  when no BM25 index exists) now raises a `ValueError` naming the signal. Saving,
+  updating or re-tuning a model whose custom retriever kind lacks a method that
+  operation needs (`to_state`, `with_added_classes`, ...) now raises a
+  `TypeError` naming the kind, the operation and the missing method. The check is
+  duck-typed, so custom kinds that do implement those methods keep working.
+  `DeployedArtifacts.dense`/`lexical` are typed against the retrieval ports.
+
+- **`_topn_mask` (candidate selection) reached past the `ArrayOps` port and
+  raised under a torch backend.** It called `M.astype` (which torch tensors do
+  not have) and `np.partition` on what may be a tensor, then compared that numpy
+  result against the tensor it came from. Both are now port calls (`asarray`,
+  `topk` — the nth-best value is the same threshold `partition`'s pivot gave).
+  Latent rather than user-visible: `TrainingPipeline._assembler_ops` pins the
+  whole feature-assembly layer to numpy until T86, so nothing reached it. Numpy
+  output is unchanged — verified bit-identical over 6000 randomized cases
+  covering NaN, exact ties, all-NaN rows, all-non-positive rows and `k > C`, on
+  top of the golden-output benchmarks.
+- **`fusion.drop_features` could not name a provider column.** `TrainingPipeline`
+  validated the drop list at construction against the *core-only* schema, before
+  any `FeatureProvider`/`SignalProvider` existed, so dropping a custom provider's
+  column raised "cannot drop unknown feature(s)" before the run started — even
+  though the per-fold and deployment paths both compute the correct composed
+  schema. Pre-existing since custom providers landed; surfaced by T33's `ce_*`
+  columns. The eager computation is removed (building providers early just to
+  read `column_names()` would load a real cross-encoder to validate a string);
+  the real schema is still computed and validated before any consumer reads it.
+
+### Changed
+- **Encoder fine-tuning now runs through `SentenceTransformerTrainer`, and the
+  `sentence-transformers` extra requires `>=3.0` plus `datasets`/`accelerate`.**
+  `model.fit` and the hand-written epoch loop are gone. The batch sampler is
+  `BatchSamplers.NO_DUPLICATES` (same job as the old `NoDuplicatesDataLoader`),
+  each epoch is scored by an `InformationRetrievalEvaluator` over the stratified
+  holdout (`desc_acc@1` is its `accuracy@1`, `desc_mrr` its full-rank `mrr@C`,
+  `knn_acc@1` a second evaluator with the fine-tuning pool as the corpus), and
+  best-epoch selection is the Trainer's own `load_best_model_at_end`, with
+  `train_early_stopping_patience`/`train_select_min_delta` mapped onto
+  `EarlyStoppingCallback`. Ties still go to the earlier epoch. The per-epoch table
+  in `encoder_training.json` keeps its schema. Query/document prompts are passed
+  to the evaluator so what is scored is what the deployed encoder computes.
+  Checkpoints go to a temporary directory (weights only, `save_only_model`,
+  nothing reported to any tracker) and are removed; the saved model directory is
+  still written only by `model.save()`, so it stays pickle-free. Training is now
+  seeded by the Trainer (default seed), so a rerun reproduces.
+  - **`pyproject.toml`:** the extra is `sentence-transformers[train]>=3.0`
+    (was `>=2.2`). From sentence-transformers 4.x, `datasets` and `accelerate` sit
+    behind a `train` extra, so a locked install previously lacked them; the
+    hash-locked `requirements.lock` is regenerated and gains 18 packages (no
+    existing pin moved).
+  - **Compatibility, tested:** sentence-transformers 6.2.0, 5.6.0 (the locked
+    version) and 5.2.0, the last on both transformers 4.57 and 5.22. 5.2.0 on
+    transformers 5 needed a shim: its Trainer reads `args.save_safetensors` when
+    writing a checkpoint, which transformers 5 removed, so every best-epoch
+    fine-tune died with an `AttributeError`; the argument is now supplied when
+    absent.
+  - **Default fine-tuning loss is now `multiple_negatives_ranking`** (one-directional,
+    item→description), replacing `multiple_negatives_symmetric_ranking`, which
+    sentence-transformers deprecates from 5.6. **This changes what an untouched
+    config trains**: the symmetric loss also scored description→item. Set
+    `encoder.train_loss="multiple_negatives_symmetric_ranking"` (or
+    `--encoder-loss`) to keep the old objective; it remains available. A config
+    that already names a loss is unaffected, and `encoder.train_loss` only matters
+    when an encoder is fine-tuned, so models already trained are not touched.
+  - **Device handling differs:** the Trainer places the model itself.
+    `encoder.device="cpu"` still pins to CPU, but a CUDA index (`"cuda:1"`) is not
+    honoured and several visible GPUs are all used (`DataParallel`). Both warn;
+    use `CUDA_VISIBLE_DEVICES`.
+  - **Removed:** `EpochSelectionPolicy`, `encoder_retrieval_metrics`,
+    `EncoderEpochTracker` and the `desc_pos_sim` selection metric (the IR evaluator
+    has no equivalent, and it was documented as a weak selection target). A config
+    naming `desc_pos_sim` now fails validation, listing the valid metrics.
+
+- **Retrieval-index construction extracted into `RetrievalIndexBuilder`
+  (`application/indexing.py`)** — `TrainingPipeline` stated the same index-build
+  policy twice, once in the out-of-fold fold loop and once in the deployment
+  build: the same T88 embedding-cache, T32 A1/A2 tokenization-cache, and T34
+  phase-1 built-in-kind gating, spelled out in two places that had to be kept in
+  agreement by hand. A backend that changed one and not the other would have
+  trained the fusion model against a differently-built index than the one it
+  ships with. Both sites now call `build(encoder, rows)` on one builder that owns
+  the caches, so "shared once per run" is an object invariant rather than a
+  convention held by comments, and `TrainingPipeline` drops ~190 lines and six
+  cache fields. No behavioral change: the T88/T32/T89 call-count tests and the
+  golden feature vectors are unchanged.
+- **The shared encoder is built once per training run, not twice** — the
+  out-of-fold loop and the deployment build each called `_load_shared_encoder()`,
+  which constructed a fresh encoder every time. For a pretrained backend that was
+  a second load of identical weights off disk. It is memoized now; the per-fold
+  path still fits one encoder per fold, as intended.
+- `AbstentionPolicy.accept` no longer does a Python-level dict lookup per scored
+  row (against the package's own "no per-row Python loops on the hot path"
+  convention). The new `AbstentionPolicy.thresholds_for` resolves a whole batch
+  with a sorted `searchsorted` probe; `threshold_for` is unchanged for the scalar
+  case, and out-of-range/sentinel class indices still fall back to the global
+  threshold.
+- `InferencePipeline`'s five public entry points (`predict`, `predict_topk`,
+  `explain`, `importance_report`, `explain_records`) shared an identical 13-line
+  encode-and-assemble block that differed only in the requested schema; it is now
+  one `_featurize` call each.
+- `LabelSpace.unknown_keys` and `_messages.format_preview` replace six
+  re-implementations of "reject labels this model does not know" and eight of the
+  "show the first ten offenders" message idiom, so every such error now reads the
+  same way to an operator.
+- `application.evaluation._json_safe` is now public as `json_safe`: it was
+  imported under its private name by five modules across two layers.
+- CLI presentation helpers (`pct`/`signed_pct`/`num`/`signed_num`,
+  `write_json_report`) moved to `cli/_common.py`, deduplicating four copies of the
+  percentage formatter and four of the `--output` writer. `retrain-ablate` now
+  loads `--config` through the shared `load_pipeline_config` (friendly errors, no
+  leaked file handle) and gained `--dump-config` for parity with `train`.
+- **Query embeddings are reused instead of recomputed (T89)** — on the
+  shared-encoder path (the default), training encoded every item twice: once as
+  a document into T88's once-per-run pool cache, and again as a *query* when the
+  fold loop reached it. Because the folds' held-out sets partition the item list,
+  that was one extra full pass over the corpus per run — flat in `n_folds`, not
+  proportional to it, and pure recomputation whenever the encoder treats both
+  roles identically (which it does unless a query/document prompt is configured).
+  Held-out items now slice the cache. Measured on Apple Silicon (M5/MPS) with
+  the default MiniLM encoder over 3,000 items: **55-61% less encoder time**
+  (6.9s → 3.1s uniform-length, 10.5s → 4.1s variable-length) and 47-55% less
+  out-of-fold wall-clock.
+  **On feature parity, read this carefully.** With a deterministic host-side
+  encoder the output is bit-identical (all 40 columns, NaN placement included).
+  With a real transformer on GPU it is bit-identical for uniform-length inputs
+  but *not* for variable-length ones: 12 of 40 continuous columns moved by up to
+  ~2e-06 (ordinal `rank_*`/`is_*_top1` columns were unaffected in that run,
+  though a near-tie could in principle flip one). The cause is that the old path
+  re-encoded held-out items in different *batches* than the pooled pass had, and
+  padding changes float reduction order — meaning the pre-T89 pipeline computed
+  two slightly different vectors for the same text, one indexed and one used to
+  query. Reuse removes that inconsistency rather than introducing one, but the
+  numbers are not byte-for-byte what a pre-T89 GPU run produced.
+  Reuse is refused whenever it would be wrong: a per-fold fine-tuned encoder
+  never populates a cache in the first place (its pre-training embeddings would
+  be stale), an asymmetric E5/BGE-style encoder (T28) keeps re-encoding, and a
+  custom `TextEncoder` that does not advertise the new `roles_share_encoding`
+  capability is left alone rather than assumed symmetric. Override with
+  `encoder.reuse_query_embeddings` / `--reuse-query-embeddings`:
+  `auto` (default, detect), `always` (force, warns when it overrides a detected
+  asymmetry), `never` (byte-for-byte the pre-T89 path).
+
+### Added
+- **Loss/objective is a config choice, not a hardcoded default, for both the
+  encoder fine-tune and the fusion models.** `EncoderConfig.train_loss`
+  (`--encoder-loss`) picks among `domain.services.ENCODER_LOSSES`
+  (`multiple_negatives_symmetric_ranking`, the previous hardcoded default;
+  `multiple_negatives_ranking`; `cached_multiple_negatives_ranking`) — all
+  three train on the same (item, description) pairs `train_encoder` already
+  builds, so switching is a config change, not a data-plumbing one. Beyond
+  those three, `train_loss` also accepts any other class name under
+  `sentence_transformers.losses` (e.g. `"CosineSimilarityLoss"`,
+  `"TripletLoss"`) for direct access to the rest of the package's built-in
+  losses, resolved by name at fine-tune time; unlike the three aliases those
+  are not verified to match the (item, description) *pair* shape this package
+  builds (some expect a label, a triplet, or a different batch structure), so
+  picking one is the caller's call, and an unresolvable name fails loudly
+  with a clear error rather than mis-training silently.
+  `FusionConfig.objective` merges into `xgb_params`/`params` as `"objective"`
+  for whichever fusion backend is selected (e.g. `binary:hinge` for xgboost,
+  `cross_entropy` for lightgbm, `rank:ndcg` for xgb-ranker); unset, each
+  backend keeps its previous implicit default (xgboost/lightgbm's own binary
+  log-loss, `rank:pairwise` for xgb-ranker). Not validated against a fixed
+  list — valid objectives are backend-specific and pluggable third-party
+  fusion kinds may support ones this package doesn't know about; an
+  unrecognized value surfaces as a clear error from the backend library
+  itself. An `"objective"` key already present in `xgb_params`/`params` wins
+  over the new field.
+- **Device-resident dense retrieval + encoder handoff (T85)** — a torch
+  `ArrayOps` backend (`array_backend="torch"`/`"auto"` over T83's crossover)
+  keeps the dense index's embeddings and query compute on-device across the
+  whole out-of-fold loop instead of re-uploading the corpus on every chunk:
+  `SentenceTransformerEncoder.array_backend="torch"` hands back a resident
+  tensor instead of forcing a numpy conversion, and `DenseState`'s arrays
+  (uploaded once per run, not once per fold) stay there for every query
+  afterward. Every public `DenseRetrieverAdapter` method still returns numpy
+  at its boundary — `application/features.py`'s kernels aren't
+  backend-polymorphic yet (T86), so `FeatureAssembler` always gets a plain
+  `NumpyArrayOps` regardless of the run's resolved backend. Registered
+  lazily: listing "torch" as a kind never imports it, and a below-crossover
+  run never even asks whether torch is installed. Persistence stays numpy
+  always — a torch-trained model directory loads on an air-gapped, torch-free
+  host unchanged. No new install extra: the existing `sentence-transformers`
+  extra already pulls in torch. CPU-only, torch-free, and CUDA-visible-but-
+  below-crossover runs are all byte-identical to before. Verified with a
+  torch-CPU parity suite (`tests/unit/test_array_ops_torch.py`,
+  `tests/integration/test_device_parity.py`) — GPU-specific acceptance
+  criteria (transfer byte counts, the VRAM-vs-chunk curve) remain unverified
+  pending a CUDA host, same limitation T83 already flagged; see
+  `docs/device-policy.md`'s T85 addendum.
+- **Multi-threaded BM25 kNN (`RetrievalConfig.bm25_n_jobs`)** — `BM25Index.top_k`'s
+  per-chunk sparse mat-mul (`Qbin_chunk @ Wt`) previously ran serially even
+  though scipy's sparse `@` releases the GIL during the C-level multiply, so
+  on a large example pool (hundreds of thousands of rows) one core sat at
+  100% while the rest of the machine idled. `bm25_n_jobs` (default `1`,
+  byte-for-byte unchanged; `-1` uses all CPU cores) runs the chunk loop
+  across a thread pool instead — no cross-process pickling of the
+  `(vocab, n_docs)` weight matrix. Plumbed through
+  `LexicalRetrieverAdapter`/persisted in its `to_state`/`from_state`, and
+  exposed as `--bm25-n-jobs` on `text-classifier-train`.
+- **`PipelineConfig.signals` can now actually drop a built-in signal** —
+  previously `signals=["dense"]` (or `["lexical"]`) crashed at `fusion.fit`
+  with a `KeyError`: `FEATURE_NAMES` was a fixed ~36-column constant covering
+  both built-in signals unconditionally, so excluding one from `signals` never
+  actually removed its columns from the schema. `composed_feature_names`/
+  `fusion_feature_names` now narrow the schema (via the new
+  `core_feature_names`) to whichever of `"dense"`/`"lexical"` are actually
+  present in the active `SignalProvider`s, derived from `FEATURE_DEPS` rather
+  than a second hardcoded list; `n_signal_agreement` (needs both) drops when
+  either is disabled. Training also skips *building* the excluded index
+  entirely (no corpus tokenization, no per-fold BM25 fit) rather than building
+  one nothing queries — `DeployedArtifacts.lexical` is `Optional` for this.
+  `explain()`'s neighbor evidence, `update`, and `retune` all handle the
+  missing index. The default `signals=["dense", "lexical"]` is unaffected.
+- **Clear error on a feature-schema mismatch, instead of a bare `KeyError`** —
+  every place that indexed an assembled frame by the expected feature-column
+  list (`_fit_fusion`, `fit_calibration_and_abstention`, `add_confidence`,
+  `ablation_report`, `explain_records`'s contributions, `importance_report`)
+  now goes through a new `select_feature_columns` (`application/scoring.py`),
+  which raises a `ValueError` naming exactly which columns are missing and why
+  (a `SignalProvider`/`FeatureProvider` declared a column it didn't produce,
+  or `signals`/`drop_features` don't match what actually ran) instead of
+  pandas' `KeyError: "[...] not in index"` deep inside `fusion.fit`/`predict`.
+- **Progress bars on BM25's CPU-bound stages** — `tqdm` (new core dependency,
+  pure Python, no transitive deps) now brackets `BM25Index.tokenize_corpus`
+  (corpus tokenization), `fit_from_counts` (weight-matrix construction), and
+  `top_k`'s per-chunk query-scoring loop (real fractional progress, since that
+  loop is already chunked). Every bar passes `disable=None`, tqdm's "silence
+  on a non-TTY" mode, so piped/CI/log output and the test suite are unaffected
+  — nothing prints unless stdout is an interactive terminal. Purely observational:
+  scoring output is unchanged (verified byte-identical with/without).
+
 ## [0.1.1] - 2026-08-05
 
 ### Added

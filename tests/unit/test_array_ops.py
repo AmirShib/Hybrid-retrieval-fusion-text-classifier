@@ -123,6 +123,15 @@ def test_topk_returns_best_first_values_and_indices():
     np.testing.assert_array_equal(x[0, idx[0]], vals[0])
 
 
+def test_argsort_is_stable_so_ties_keep_index_order():
+    """The port's argsort is stable: equal keys keep their index order, so every
+    caller (feature ranks, neighbour ordering) breaks ties the same way on every
+    CPU. numpy's default kind is not stable and is CPU-dispatched."""
+    x = -np.array([[0.5, 0.2, 0.5, 0.2, 0.5, 0.1, 0.5, 0.2] * 4])
+    got = NumpyArrayOps().argsort(x, axis=1)
+    np.testing.assert_array_equal(got, np.argsort(x, axis=1, kind="stable"))
+
+
 def test_matmul_where_isnan_pass_through():
     ops = NumpyArrayOps()
     a = np.array([[1.0, 2.0]])
@@ -141,9 +150,12 @@ class TestAutoSelection:
         # is only responsible for picking a name).
         assert resolve_array_backend("bogus", n_items=1, n_classes=1) == "bogus"
 
-    def test_auto_is_numpy_when_no_torch_backend_registered(self):
-        assert "torch" not in registered_array_ops_kinds()
-        # device_visible=True would matter only if a torch backend existed.
+    def test_auto_is_numpy_when_torch_not_installed(self, monkeypatch):
+        """T85: "torch" is now always *registered* (metadata only -- see
+        array_ops.py's module docstring), so registry membership is no longer
+        a usable install proxy. torch_installed() (a non-importing probe) is
+        what auto-selection actually checks; simulate its absence directly."""
+        monkeypatch.setattr("text_classifier.infrastructure.device.torch_installed", lambda: False)
         got = resolve_array_backend(
             None, n_items=10_000_000, n_classes=100_000, device_visible=True
         )
@@ -159,12 +171,24 @@ class TestAutoSelection:
         assert got == "numpy"
 
     def test_auto_short_circuits_before_probing_cuda(self):
-        """The registry check (no torch backend registered) must run before any
-        CUDA probe -- device_visible=None normally triggers ``cuda_available()``,
-        which imports torch; that must never happen while numpy is the only
-        registered backend (see the no-torch-import test below)."""
+        """Below the crossover, resolution must return "numpy" without ever
+        reaching a real torch probe -- device_visible=None normally triggers
+        ``cuda_available()``, which imports torch; the crossover check runs
+        first specifically so a small run never pays that import (see the
+        no-torch-import test below, and array_ops.py's docstring on why this
+        order is deliberate, not incidental)."""
         got = resolve_array_backend(None, n_items=1, n_classes=1, device_visible=None)
         assert got == "numpy"
+
+    def test_auto_picks_torch_over_crossover_when_installed_and_visible(self, monkeypatch):
+        monkeypatch.setattr("text_classifier.infrastructure.device.torch_installed", lambda: True)
+        got = resolve_array_backend(
+            None,
+            n_items=CROSSOVER_MIN_ITEMS + 1,
+            n_classes=1,
+            device_visible=True,
+        )
+        assert got == "torch"
 
 
 class TestRegistry:
@@ -173,6 +197,14 @@ class TestRegistry:
         ops = build_array_ops("numpy")
         assert isinstance(ops, ArrayOps)
         assert ops.name == "numpy"
+
+    def test_torch_registered_as_metadata_only(self):
+        """ "torch" is always registered (T85), but registering it must not
+        import torch -- only calling build_array_ops("torch") does (verified
+        by the no-torch-import test below, which blocks torch and confirms an
+        ordinary numpy run -- including the registry already holding "torch"'s
+        spec -- never touches it)."""
+        assert "torch" in registered_array_ops_kinds()
 
     def test_unknown_kind_raises(self):
         with pytest.raises(ValueError, match="unknown array ops kind"):
@@ -222,3 +254,23 @@ def test_no_torch_import_reachable_from_a_numpy_backend_run(monkeypatch):
     )
     assert len(frame) > 0
     assert "torch" not in sys.modules or sys.modules["torch"] is None
+
+
+def test_build_array_ops_torch_raises_cleanly_when_torch_blocked(monkeypatch):
+    """T85: requesting the torch backend explicitly, with torch unavailable,
+    fails with an ordinary ImportError from the deferred build callable --
+    not an import-time crash and not a silent fallback to numpy."""
+    for mod in list(sys.modules):
+        if mod == "torch" or mod.startswith("torch."):
+            monkeypatch.delitem(sys.modules, mod, raising=False)
+    # Also drop our own torch-backed module from the cache: if an earlier
+    # test in this session already imported it (this file runs alongside
+    # tests/unit/test_array_ops_torch.py), Python won't re-execute its
+    # `import torch` just because `sys.modules["torch"]` was reset below --
+    # it would just hand back the already-imported module.
+    monkeypatch.delitem(
+        sys.modules, "text_classifier.infrastructure.array_ops_torch", raising=False
+    )
+    monkeypatch.setitem(sys.modules, "torch", None)
+    with pytest.raises(ImportError):
+        build_array_ops("torch")

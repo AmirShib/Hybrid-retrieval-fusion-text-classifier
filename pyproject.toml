@@ -31,6 +31,11 @@ dependencies = [
     "scipy>=1.9",
     "scikit-learn>=1.1",
     "xgboost>=1.7",
+    # Progress bars for long CPU-bound stages (BM25 tokenization/fit, query
+    # scoring). Pure Python, zero transitive dependencies of its own, and
+    # auto-silences when stdout isn't a TTY (piped/CI logs) -- safe for the
+    # air-gapped/headless path.
+    "tqdm>=4.65",
 ]
 
 [project.optional-dependencies]
@@ -44,7 +49,17 @@ lightgbm = ["lightgbm"]
 # The semantic (bi-encoder) TextEncoder backend, encoder_kind="sentence-transformers"
 # (the pipeline default). Pulls in torch. Core installs stay torch-free and can
 # still train/infer with --encoder-kind tfidf or --encoder-kind hashing (T63).
-sentence-transformers = ["sentence-transformers>=2.2"]
+# This is also what the device-resident torch ArrayOps backend (T85,
+# array_backend="torch"/"auto") needs -- it deliberately does not get its own
+# "gpu" extra: torch is already exactly one install away via this one, and a
+# second extra pinning the same dependency would only be a second name for it.
+#
+# Fine-tuning runs through SentenceTransformerTrainer, which needs >=3.0 and the
+# `datasets` + `accelerate` packages. Those are hard dependencies of 3.x but moved
+# behind sentence-transformers' own `train` extra from 4.x on, so the extra is named
+# here: without it a locked install imports fine and then fails on the first
+# `datasets.Dataset`. (pip merely warns that a 3.x release has no `train` extra.)
+sentence-transformers = ["sentence-transformers[train]>=3.0"]
 
 [project.urls]
 Repository = "https://github.com/amirshib/hybrid-retrieval-fusion-text-classifier"
@@ -98,6 +113,11 @@ module = [
     "xgboost.*",
     "lightgbm.*",
     "sentence_transformers.*",
+    "datasets.*",
+    "accelerate.*",
+    "transformers.*",
+    "torch.*",
+    "tqdm.*",
     "sklearn.*",
     "scipy.*",
     "joblib.*",

@@ -30,10 +30,17 @@ import argparse
 import json
 import sys
 
-from ..application.evaluation import _json_safe
 from ..application.retrain_ablation import AblationArm, retrain_ablation
-from ..config import PipelineConfig
-from ._common import add_logging_arg, configure_logging, read_items, read_label_space
+from ._common import (
+    add_config_args,
+    add_logging_arg,
+    configure_logging,
+    load_pipeline_config,
+    read_items,
+    read_label_space,
+    signed_num,
+    write_json_report,
+)
 
 
 def _parse_group(spec: str) -> AblationArm:
@@ -49,10 +56,6 @@ def _parse_group(spec: str) -> AblationArm:
     if not columns:
         raise argparse.ArgumentTypeError(f"--group {name!r} lists no columns (got {spec!r})")
     return AblationArm(name=name.strip(), drop=columns)
-
-
-def _fmt(value: float) -> str:
-    return "n/a" if value != value else f"{value:+.4f}"  # NaN != NaN
 
 
 def main() -> None:
@@ -77,20 +80,23 @@ def main() -> None:
         help="comma-separated fold-split seeds (default: 0,1,2,3). More seeds = "
         "tighter error bars and proportionally more training runs.",
     )
-    p.add_argument("--config", default=None, help="optional PipelineConfig JSON")
     p.add_argument("--output", default=None, help="optional path to write the full JSON report")
     p.add_argument("--text-col", default="text")
     p.add_argument("--label-col", default="label")
     p.add_argument("--key-col", default="key")
     p.add_argument("--desc-col", default="description")
+    add_config_args(p)
     add_logging_arg(p)
     args = p.parse_args()
     configure_logging(args.log_level)
 
     seeds = [int(s.strip()) for s in args.seeds.split(",") if s.strip()]
-    cfg = (
-        PipelineConfig.from_dict(json.load(open(args.config))) if args.config else PipelineConfig()
-    )
+    cfg = load_pipeline_config(args.config)
+    # No config-overriding flags on this CLI (each arm's only deviation is its
+    # own `drop`), so the loaded config is already the effective one.
+    if args.dump_config:
+        print(json.dumps(cfg.to_dict(), indent=2))
+        return
     label_space = read_label_space(args.classes, args.key_col, args.desc_col)
     items = read_items(args.items, text_col=args.text_col, label_col=args.label_col)
 
@@ -112,16 +118,13 @@ def main() -> None:
     for arm in report["arms"]:
         delta = arm["paired_delta_accepted_correct"]
         std = arm["paired_delta_accepted_correct_std"]
-        print(f"  {arm['name']:22s} {_fmt(delta):>19s} {std:9.4f}  {arm['verdict']}")
+        print(f"  {arm['name']:22s} {signed_num(delta):>19s} {std:9.4f}  {arm['verdict']}")
     print(
         "\n  negative delta = dropping those columns HURT, i.e. they earn their place.\n"
         "  'inconclusive' means the effect is smaller than its own seed-to-seed spread."
     )
 
-    if args.output:
-        with open(args.output, "w") as fh:
-            json.dump(_json_safe(report), fh, indent=2)
-        print(f"\nwrote {args.output}")
+    write_json_report(args.output, report)
 
 
 if __name__ == "__main__":

@@ -27,19 +27,16 @@ after it lands.
 from __future__ import annotations
 
 import argparse
-import json
 
 from .. import InferencePipeline
-from ..application.evaluation import _json_safe
-from ._common import add_logging_arg, configure_logging, read_items
-
-
-def _pct(x) -> str:
-    return "n/a" if x is None else f"{100 * x:.1f}%"
-
-
-def _signed_pct(x) -> str:
-    return "n/a" if x is None else f"{100 * x:+.1f}%"
+from ._common import (
+    add_logging_arg,
+    configure_logging,
+    pct,
+    read_items,
+    signed_pct,
+    write_json_report,
+)
 
 
 def main() -> None:
@@ -69,9 +66,9 @@ def main() -> None:
     baseline = report["ablation"]["baseline"]
     print("\n=== baseline (unablated) ===")
     print(f"items evaluated       : {baseline['n_items']}")
-    print(f"coverage              : {_pct(baseline['coverage'])}")
-    print(f"accuracy on accepted  : {_pct(baseline['accuracy_on_accepted'])}")
-    print(f"accuracy if no abstain: {_pct(baseline['accuracy_if_no_abstain'])}")
+    print(f"coverage              : {pct(baseline['coverage'])}")
+    print(f"accuracy on accepted  : {pct(baseline['accuracy_on_accepted'])}")
+    print(f"accuracy if no abstain: {pct(baseline['accuracy_if_no_abstain'])}")
 
     importance = report["importance"]
     if importance is None:
@@ -79,22 +76,19 @@ def main() -> None:
     else:
         print(f"\n=== feature importance (top {args.top} by mean |contribution|) ===")
         for row in importance[: args.top]:
-            print(f"  {row['feature']:<24} share={_pct(row['share'])}")
+            print(f"  {row['feature']:<24} share={pct(row['share'])}")
 
     ablations = report["ablation"]["ablations"]
     print(f"\n=== ablation (top {args.top} most damaging removals) ===")
     for row in ablations[: args.top]:
         print(
             f"  {row['feature']:<24} "
-            f"Δaccuracy_if_no_abstain={_signed_pct(row['delta_accuracy_if_no_abstain'])}  "
-            f"Δcoverage={_signed_pct(row['delta_coverage'])}  "
+            f"Δaccuracy_if_no_abstain={signed_pct(row['delta_accuracy_if_no_abstain'])}  "
+            f"Δcoverage={signed_pct(row['delta_coverage'])}  "
             f"(n={row['n_rows_masked']})"
         )
 
-    if args.output:
-        with open(args.output, "w") as fh:
-            json.dump(_json_safe(report), fh, indent=2)
-        print(f"\nwrote full report to {args.output}")
+    write_json_report(args.output, report)
 
 
 if __name__ == "__main__":

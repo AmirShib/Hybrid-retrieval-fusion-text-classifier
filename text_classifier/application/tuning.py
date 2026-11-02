@@ -21,6 +21,7 @@ from typing import Any, Dict, Sequence, Tuple
 
 import numpy as np
 
+from .._messages import format_preview
 from ..domain import (
     AbstentionPolicy,
     CandidatePolicy,
@@ -52,7 +53,7 @@ def count_likely_overlap(artifacts: DeployedArtifacts, q_emb: np.ndarray) -> int
     embedding match — a cheap, conservative proxy for "this text is already in
     the training corpus" (see module docstring for why it's a proxy, not exact
     text matching)."""
-    if artifacts.dense.state.example_emb.shape[0] == 0:
+    if artifacts.dense_supporting("state", "re-tune").state.example_emb.shape[0] == 0:
         return 0
     _, sim = artifacts.dense.knn_example_labels(q_emb, k=1)
     best = np.nan_to_num(sim[:, 0], nan=-1.0)
@@ -84,17 +85,17 @@ def retune(
     if not items:
         raise ValueError("retune requires a non-empty labeled set")
 
-    known = set(label_space.keys)
-    unknown = sorted({it.label for it in items if it.label not in known})
+    unknown = label_space.unknown_keys(it.label for it in items)
     if unknown:
-        shown = unknown[:10]
-        suffix = " ..." if len(unknown) > 10 else ""
         raise ValueError(
-            f"{len(unknown)} tune-set label(s) are not in the model's label space: {shown}{suffix}"
+            f"{len(unknown)} tune-set label(s) are not in the model's label space: "
+            f"{format_preview(unknown)}"
         )
 
     feature_names = fusion_feature_names(
-        artifacts.feature_providers, artifacts.config.fusion.drop_features
+        artifacts.feature_providers,
+        artifacts.config.fusion.drop_features,
+        artifacts.signal_providers,
     )
     assembler = FeatureAssembler(label_space, CandidatePolicy(artifacts.config.candidate_top_n))
     texts = [it.text for it in items]
@@ -122,6 +123,7 @@ def retune(
         query_labels=y,
         chunk=artifacts.config.retrieval.feature_chunk,
         providers=artifacts.feature_providers,
+        signal_providers=artifacts.signal_providers,
     )
     if not len(feats):
         raise ValueError(

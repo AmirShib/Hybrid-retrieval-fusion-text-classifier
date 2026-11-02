@@ -27,7 +27,7 @@ import logging
 import os
 import pickle
 from dataclasses import dataclass, field, replace
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Union, cast
 
 import numpy as np
 
@@ -37,10 +37,12 @@ from ..domain import (
     AbstentionPolicy,
     ClassDefinition,
     ConfidenceCalibrator,
+    DenseRetriever,
     FeatureProvider,
     FusionModel,
     LabeledItem,
     LabelSpace,
+    LexicalRetriever,
     SignalProvider,
     TextEncoder,
     fusion_feature_names,
@@ -55,7 +57,6 @@ from .registry import (
     lexical_retriever_spec,
     load_signal_providers,
 )
-from .retrieval import DenseRetrieverAdapter, LexicalRetrieverAdapter
 from .signals import rewrap_signal_providers
 
 log = logging.getLogger(__name__)
@@ -77,6 +78,55 @@ _LEGACY_SIGNALS = ["dense", "lexical"]
 # A new class may be given as a ClassDefinition or a plain (key, description) pair.
 NewClass = Union[ClassDefinition, Sequence[str]]
 
+# Optional structured taxonomy fields, and how each serializes into meta.json.
+# Scalars round-trip as strings, multi-value fields as JSON arrays (meta.json is
+# real JSON, so no in-cell separator convention is needed here — that is only a
+# CSV concern).
+_CLASS_SCALAR_FIELDS = ("title", "definition")
+_CLASS_TUPLE_FIELDS = (
+    "examples",
+    "inclusions",
+    "exclusions",
+    "parent_path",
+    "sibling_distinctions",
+)
+
+
+def _class_to_meta(definition: ClassDefinition) -> Dict[str, Any]:
+    """Serialize one class for ``meta.json``.
+
+    Empty optional fields are *omitted* rather than written as ""/[]. A taxonomy
+    with no structured fields therefore produces exactly the ``{"key", "description"}``
+    entries it produces today — an existing model dir re-saved by this version is
+    unchanged, and a diff of meta.json shows only classes that actually gained
+    structure."""
+    out: Dict[str, Any] = {"key": definition.key, "description": definition.description}
+    for name in _CLASS_SCALAR_FIELDS:
+        value = getattr(definition, name)
+        if value:
+            out[name] = value
+    for name in _CLASS_TUPLE_FIELDS:
+        value = getattr(definition, name)
+        if value:
+            out[name] = list(value)
+    return out
+
+
+def _class_from_meta(entry: Mapping[str, Any]) -> ClassDefinition:
+    """Rebuild one class from ``meta.json``.
+
+    Missing optional keys are the norm, not an error: every model dir written
+    before the structured fields existed carries only ``key``/``description``, and
+    must keep loading."""
+    kwargs: Dict[str, Any] = {}
+    for name in _CLASS_SCALAR_FIELDS:
+        if entry.get(name):
+            kwargs[name] = entry[name]
+    for name in _CLASS_TUPLE_FIELDS:
+        if entry.get(name):
+            kwargs[name] = tuple(entry[name])
+    return ClassDefinition(entry["key"], entry["description"], **kwargs)
+
 
 def _lexical_json_path(npz_filename: str) -> str:
     """The JSON sidecar path that pairs with a lexical retriever's ``.npz``
@@ -88,17 +138,50 @@ def _lexical_json_path(npz_filename: str) -> str:
     return root + ".json"
 
 
+def retriever_supporting(retriever: Any, method: str, operation: str, kind: str) -> Any:
+    """``retriever`` if it provides ``method``; otherwise a ``TypeError`` naming
+    the retriever kind and the ``operation`` that needs it.
+
+    Saving, updating and re-tuning a model call methods the retrieval *ports* do
+    not declare (``to_state``, ``with_added_classes``, ...). The built-in adapters
+    have them, and a custom retriever kind may provide them too -- this is
+    duck-typed on purpose, so a third-party kind that implements ``to_state`` can
+    still be saved. What it replaces is the bare ``AttributeError`` a kind that
+    lacks the method used to fail with, somewhere deep in the operation."""
+    if not hasattr(retriever, method):
+        raise TypeError(
+            f"cannot {operation}: {kind} ({type(retriever).__name__}) has no `{method}`, "
+            "which this needs. The built-in retrievers do; a custom retriever kind must "
+            "implement it to support this operation."
+        )
+    return retriever
+
+
 @dataclass
 class DeployedArtifacts:
-    """Everything the inference pipeline needs, in memory. Component fields are
-    typed against the ports, not concrete classes, so any registered backend
-    fits."""
+    """Everything the inference pipeline needs, in memory.
+
+    The encoder, fusion model, and calibrator are typed against their ports, so
+    any registered backend fits. ``dense``/``lexical`` are the exception, and
+    deliberately so *for now*: saving a model directory
+    (``DenseRetrieverAdapter.to_state``) and updating a deployed taxonomy
+    (``with_added_classes``/``with_added_examples``/``with_added_descriptions``)
+    call methods the retrieval ports do not declare. A non-built-in
+    ``dense_kind``/``lexical_kind`` (T34 phase 1) therefore builds and scores
+    fine but cannot round-trip through ``ArtifactRepository`` or be updated in
+    place. Closing that gap means widening ``DenseRetriever``/
+    ``LexicalRetriever`` with a persistence + extension contract — a breaking
+    change to a published port, so it belongs with the second real backend
+    (T31), not here.
+    """
 
     config: PipelineConfig
     label_space: LabelSpace
     encoder: TextEncoder
-    dense: DenseRetrieverAdapter
-    lexical: LexicalRetrieverAdapter
+    dense: DenseRetriever
+    # `None` when "lexical" is absent from `config.signals` -- training skips
+    # building a BM25 index entirely rather than building one nothing queries.
+    lexical: Optional[LexicalRetriever]
     fusion: FusionModel
     calibrator: ConfidenceCalibrator
     abstention: AbstentionPolicy
@@ -112,6 +195,27 @@ class DeployedArtifacts:
     # this in, defaulting to the two built-ins) — the default kept as an empty
     # list here only so direct construction (e.g. in tests) stays valid.
     signal_providers: List[SignalProvider] = field(default_factory=list)
+
+    def dense_supporting(self, method: str, operation: str) -> Any:
+        """``dense``, checked to provide ``method`` (see ``retriever_supporting``)."""
+        return retriever_supporting(
+            self.dense,
+            method,
+            operation,
+            f"retrieval.dense_kind={self.config.retrieval.dense_kind!r}",
+        )
+
+    def lexical_supporting(self, method: str, operation: str) -> Any:
+        """``lexical`` (``None`` when no lexical index was built), checked to
+        provide ``method`` (see ``retriever_supporting``)."""
+        if self.lexical is None:
+            return None
+        return retriever_supporting(
+            self.lexical,
+            method,
+            operation,
+            f"retrieval.lexical_kind={self.config.retrieval.lexical_kind!r}",
+        )
 
     def with_added_classes(self, new_classes: Sequence[NewClass]) -> "DeployedArtifacts":
         """Widen this model's label space with new classes, **without retraining**.
@@ -155,16 +259,23 @@ class DeployedArtifacts:
                 "To change an existing class's description, retrain the model."
             )
 
-        current = [
-            ClassDefinition(k, d)
-            for k, d in zip(self.label_space.keys, self.label_space.descriptions)
-        ]
+        # Carry the existing definitions through whole — rebuilding them from
+        # keys+descriptions would silently strip any structured taxonomy fields
+        # off every incumbent class.
+        current = list(self.label_space.definitions)
         # LabelSpace raises on new-vs-new duplicate keys; existing collisions are
         # already reported above with a clearer, more actionable message.
         extended_space = LabelSpace(current + defs)
 
-        dense = self.dense.with_added_classes(self.encoder, [d.description for d in defs])
-        lexical = self.lexical.with_added_descriptions(extended_space.descriptions)
+        dense = self.dense_supporting("with_added_classes", "add classes").with_added_classes(
+            self.encoder, [d.description for d in defs]
+        )
+        current_lexical = self.lexical_supporting("with_added_descriptions", "add classes")
+        lexical = (
+            None
+            if current_lexical is None
+            else current_lexical.with_added_descriptions(extended_space.descriptions)
+        )
         # T34 phase 2: a DenseSignalProvider/LexicalSignalProvider wraps a
         # specific dense/lexical instance by reference; rewrap onto the
         # extended indices so a later `assemble()` call sees the new classes.
@@ -191,17 +302,28 @@ class ArtifactRepository:
         fus_spec = fusion_spec(cfg.fusion.kind)
         cal_spec = calibrator_spec(cfg.calibration.kind)
         dense_spec = dense_retriever_spec(cfg.retrieval.dense_kind)
-        lex_spec = lexical_retriever_spec(cfg.retrieval.lexical_kind)
 
         artifacts.encoder.save(os.path.join(directory, enc_spec.dirname))
 
-        dense_arrays = artifacts.dense.to_state()
+        dense_arrays: Dict[str, Any] = artifacts.dense_supporting(
+            "to_state", "save the model"
+        ).to_state()
         np.savez_compressed(os.path.join(directory, dense_spec.filename), **dense_arrays)
 
-        arrays, lex_meta = artifacts.lexical.to_state()
-        np.savez_compressed(os.path.join(directory, lex_spec.filename), **arrays)
-        with open(os.path.join(directory, _lexical_json_path(lex_spec.filename)), "w") as fh:
-            json.dump(lex_meta, fh)
+        # `lexical` is `None` when "lexical" isn't a configured signal (no
+        # index was ever built -- see `TrainingPipeline._build_deployment_index`);
+        # nothing is written and `components.lexical` records that explicitly
+        # (not just absent -- see `_components_from_meta`), so `load()` doesn't
+        # try to read files that were never written.
+        lexical = artifacts.lexical_supporting("to_state", "save the model")
+        if lexical is not None:
+            lex_spec = lexical_retriever_spec(cfg.retrieval.lexical_kind)
+            arrays, lex_meta = lexical.to_state()
+            np.savez_compressed(
+                os.path.join(directory, lex_spec.filename), **cast(Dict[str, Any], arrays)
+            )
+            with open(os.path.join(directory, _lexical_json_path(lex_spec.filename)), "w") as fh:
+                json.dump(lex_meta, fh)
 
         artifacts.fusion.save(os.path.join(directory, fus_spec.filename))
         artifacts.calibrator.save(os.path.join(directory, cal_spec.filename))
@@ -230,14 +352,16 @@ class ArtifactRepository:
                 "fusion": cfg.fusion.kind,
                 "calibrator": cfg.calibration.kind,
                 "dense": cfg.retrieval.dense_kind,
-                "lexical": cfg.retrieval.lexical_kind,
+                # Explicit `None` (not just an absent key) when no lexical
+                # index was built, so `_components_from_meta` can tell "not
+                # recorded (legacy dir, default to bm25)" apart from
+                # "deliberately absent" -- a bare `.get` can't distinguish a
+                # missing key from a present `null`.
+                "lexical": cfg.retrieval.lexical_kind if artifacts.lexical is not None else None,
                 "signals": list(cfg.signals),
             },
             "feature_providers": provider_manifest,
-            "classes": [
-                {"key": k, "description": d}
-                for k, d in zip(artifacts.label_space.keys, artifacts.label_space.descriptions)
-            ],
+            "classes": [_class_to_meta(d) for d in artifacts.label_space.definitions],
             "abstention": {
                 "global_threshold": artifacts.abstention.global_threshold,
                 "per_class": {str(k): v for k, v in artifacts.abstention.per_class.items()},
@@ -462,7 +586,6 @@ class ArtifactRepository:
         config = PipelineConfig.from_dict(meta["config"])
         if device is not None:
             config.encoder.device = device
-
         # Dispatch each swappable component through the registry by its recorded
         # kind (defaulting for legacy dirs that predate the `components` block).
         components = self._components_from_meta(meta)
@@ -492,14 +615,16 @@ class ArtifactRepository:
             ),
         )
 
-        label_space = LabelSpace(
-            [ClassDefinition(c["key"], c["description"]) for c in meta["classes"]]
-        )
+        label_space = LabelSpace([_class_from_meta(c) for c in meta["classes"]])
 
         encoder = enc_spec.load(os.path.join(directory, enc_spec.dirname), config.encoder)
 
         dense = dense_spec.load(directory, config.retrieval)
-        lexical = self._load_lexical(directory, components["lexical"])
+        lexical = (
+            None
+            if components["lexical"] is None
+            else self._load_lexical(directory, components["lexical"])
+        )
         # The real SignalProviders, wrapping the now-loaded dense/lexical.
         signal_providers = load_signal_providers(
             directory, config.retrieval, components["signals"], dense, lexical
@@ -550,9 +675,17 @@ class ArtifactRepository:
             "dense": comp.get("dense")
             or cfg.get("retrieval", {}).get("dense_kind")
             or _LEGACY_COMPONENTS["dense"],
-            "lexical": comp.get("lexical")
-            or cfg.get("retrieval", {}).get("lexical_kind")
-            or _LEGACY_COMPONENTS["lexical"],
+            # `"lexical" in comp` (not `.get(...) or ...`): a present-but-null
+            # value means `save()` deliberately built no lexical index (the
+            # "lexical" signal wasn't configured) and must stay `None` here,
+            # not fall through to the legacy default -- `.get(...) or ...`
+            # can't tell that apart from the key being absent altogether (a
+            # dir written before this distinction existed).
+            "lexical": (
+                comp["lexical"]
+                if "lexical" in comp
+                else cfg.get("retrieval", {}).get("lexical_kind") or _LEGACY_COMPONENTS["lexical"]
+            ),
             "signals": comp.get("signals") or cfg.get("signals") or list(_LEGACY_SIGNALS),
         }
 

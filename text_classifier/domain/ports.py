@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple
+from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -67,7 +67,10 @@ class ArrayOps(ABC):
         """Top-``k`` values and indices along ``axis``, best-first."""
 
     @abstractmethod
-    def argsort(self, x: Any, axis: int = -1) -> Any: ...
+    def argsort(self, x: Any, axis: int = -1) -> Any:
+        """Ascending indices along ``axis``. Must be **stable** (equal keys keep
+        their index order): rank features depend on how ties are broken, and an
+        unstable sort makes them differ from one machine to the next."""
 
     @abstractmethod
     def argpartition(self, x: Any, k: int, axis: int = -1) -> Any: ...
@@ -96,13 +99,19 @@ class ArrayOps(ABC):
 
 
 class TextEncoder(ABC):
-    """Maps text to L2-normalized embeddings (so dot product == cosine)."""
+    """Maps text to L2-normalized embeddings (so dot product == cosine).
+
+    The return type is ``(n, d)`` float32 in whatever array type the
+    encoder's configured backend uses (T85): numpy for every encoder kind by
+    default, or a resident torch tensor for ``SentenceTransformerEncoder``
+    with ``array_backend="torch"`` (see its docstring). L2-normalization is
+    the invariant that never changes; the container is not."""
 
     @abstractmethod
-    def encode(self, texts: Sequence[str]) -> np.ndarray:  # (n, d) float32
+    def encode(self, texts: Sequence[str]) -> Any:  # (n, d) float32
         ...
 
-    def encode_queries(self, texts: Sequence[str]) -> np.ndarray:  # (n, d) float32
+    def encode_queries(self, texts: Sequence[str]) -> Any:  # (n, d) float32
         """Encode texts in the *query* role (the items being classified).
 
         Defaults to symmetric ``encode``, so existing adapters need no change;
@@ -110,7 +119,7 @@ class TextEncoder(ABC):
         pipelines route every encode call by role."""
         return self.encode(texts)
 
-    def encode_documents(self, texts: Sequence[str]) -> np.ndarray:  # (n, d) float32
+    def encode_documents(self, texts: Sequence[str]) -> Any:  # (n, d) float32
         """Encode texts in the *document* role (the example pool + class
         descriptions queries are matched against). Defaults to symmetric
         ``encode``; see ``encode_queries``."""
@@ -187,6 +196,34 @@ class LexicalRetriever(ABC):
 
 
 @dataclass(frozen=True)
+class CandidateView:
+    """The shortlist, handed to a *second-stage* ``SignalProvider`` (T33).
+
+    Candidate selection splits signal computation into two rounds. Round one is
+    every ordinary provider: it scores all ``C`` classes and its top-n join the
+    candidate union. Round two is providers that declare ``needs_candidates`` —
+    a reranker is the motivating case, being far too slow to score every class,
+    so it can only run once the shortlist exists.
+
+    - ``mask``: the ``(b, C)`` boolean candidate mask.
+    - ``rows``/``cols``: its ``np.nonzero`` decomposition — candidate ``i`` is
+      query ``rows[i]`` paired with class ``cols[i]``, the same parallel-index
+      convention ``FeatureContext`` uses.
+    - ``signals``: round one's ``{node: (b, C) value}`` matrices, read-only. A
+      second-stage provider needs these to decide *which* candidates are worth
+      its cost (e.g. rerank the top-k by ``"dense.desc"``) rather than paying
+      for the whole shortlist. Look nodes up with ``.get`` and degrade
+      gracefully: which signals ran is a config decision, so a node is not
+      guaranteed to be present.
+    """
+
+    mask: np.ndarray  # (b, C) bool
+    rows: np.ndarray  # (n_candidates,) int -> query index
+    cols: np.ndarray  # (n_candidates,) int -> class index
+    signals: Mapping[str, np.ndarray]
+
+
+@dataclass(frozen=True)
 class SignalContext:
     """The per-chunk inputs a ``SignalProvider.build`` computes over — the same
     chunk ``FeatureAssembler._assemble_chunk`` is assembling, so a provider that
@@ -196,13 +233,27 @@ class SignalContext:
     (``n_folds=1``): when given, each query is itself in the pool being
     retrieved against, and a provider whose signal can self-match (kNN, a
     prototype) must mask its own index out, exactly like
-    ``DenseRetriever.knn_example_labels``/``loo_prototype_similarity``."""
+    ``DenseRetriever.knn_example_labels``/``loo_prototype_similarity``.
+
+    ``label_space`` is the canonical column<->class map, mirroring
+    ``FeatureContext``'s. A provider that scores against *class-side text*
+    (descriptions, taxonomy views) reads it from here rather than holding a copy,
+    which is what keeps such a provider stateless with respect to the taxonomy —
+    added classes are picked up automatically and it needs no
+    ``rewrap_signal_providers`` case.
+
+    ``candidates`` is ``None`` in round one and populated in round two (see
+    ``CandidateView``). It is one field rather than several loose optionals so
+    the two rounds cannot be half-read: a provider either has the shortlist or
+    it does not."""
 
     texts: Sequence[str]
     q_emb: np.ndarray  # (b, dim), L2-normalized
     k: int
     n_classes: int
+    label_space: LabelSpace
     self_ids: Optional[np.ndarray] = None
+    candidates: Optional[CandidateView] = None
 
 
 @dataclass
@@ -259,6 +310,22 @@ class SignalMatrix:
     extra_scalars: Dict[str, np.ndarray] = field(default_factory=dict)
     topn_positive_only: bool = False
 
+    def column_for(self, derivation: str) -> Optional[str]:
+        """The output column name for ``derivation`` on this matrix, or ``None``
+        when this matrix does not declare it.
+
+        ``derive`` and ``columns`` answer two halves of one question — "does
+        this derivation apply here" and "what is it called" — and a derivation
+        is only real when *both* agree. Asking it as one method keeps the
+        assembler from re-deriving the conjunction per derivation, and makes a
+        matrix that lists a derivation in ``derive`` without naming its column
+        (or vice versa) a uniformly ignored no-op rather than a ``KeyError`` in
+        one code path and silence in another.
+        """
+        if derivation not in self.derive:
+            return None
+        return self.columns.get(derivation)
+
 
 class SignalProvider(ABC):
     """A pluggable source of retrieval *signals* (T34 phase 2) — the layer below
@@ -276,6 +343,15 @@ class SignalProvider(ABC):
     persists that state directly in ``save``/``load``.
 
     - ``name``: unique prefix identifying this provider (registry key).
+    - ``needs_candidates``: run in round *two*, after candidate selection, with
+      ``SignalContext.candidates`` populated (see ``CandidateView``). Default
+      ``False`` — round one, the only behaviour before T33. A round-two provider
+      **must** return an empty ``candidate_features()``: it cannot select what it
+      consumes, and the assembler rejects the combination rather than resolving
+      it in some order-dependent way. That restriction is also what lets the
+      assembler skip a round-two provider entirely when every one of its columns
+      is pruned (T87) — with no contribution to the candidate mask, not running
+      it cannot change any surviving column's value.
     - ``candidate_features``: which of this provider's ``SignalMatrix.node``
       names join the top-n candidate union for this query chunk. Every node
       returned by ``build`` that is *not* named here still computes its generic
@@ -289,6 +365,7 @@ class SignalProvider(ABC):
     """
 
     name: str
+    needs_candidates: bool = False
 
     @abstractmethod
     def candidate_features(self) -> Sequence[str]:
@@ -322,6 +399,47 @@ class SignalProvider(ABC):
     @abstractmethod
     def load(cls, path: str) -> "SignalProvider":
         """Reload a provider persisted by ``save`` — no labels, no network."""
+
+
+class PairwiseReranker(ABC):
+    """Scores ``(query_text, document_text)`` pairs *jointly* (T33).
+
+    The contrast with ``TextEncoder`` is the whole point: an encoder embeds each
+    side independently, so each is compressed without knowing what it will be
+    compared against. A reranker attends across both texts at once, which is why
+    it ranks better and why it costs ~100x more — it cannot precompute anything,
+    so its cost is per *pair*, not per text.
+
+    Deliberately minimal, and deliberately not a retriever: this port answers
+    "how well do these two texts go together" and nothing else. *Which* pairs to
+    score, how the document side is composed, and how scores become feature
+    columns are all the calling ``SignalProvider``'s decisions (see
+    ``infrastructure/reranker.py``). That split is what lets the same port back a
+    stock cross-encoder, a fine-tuned one, and an instructed LLM judge.
+
+    ``score`` returns raw model outputs — logits for a typical cross-encoder,
+    unbounded and *not* calibrated probabilities. The fusion model learns the
+    scale, so no backend should squash them to look comparable; the isotonic
+    calibration stage downstream is what makes scores mean something.
+    """
+
+    @abstractmethod
+    def score(self, pairs: Sequence[Tuple[str, str]]) -> np.ndarray:
+        """``(n,)`` float32 relevance score per ``(query, document)`` pair.
+
+        Must preserve input order and return exactly one score per pair.
+        Batching is the implementation's business; callers hand over whole
+        chunks precisely so a backend can batch them."""
+
+    @abstractmethod
+    def save(self, directory: str) -> None:
+        """Persist to ``directory`` using portable formats only (no pickle) —
+        the same air-gapped-portability contract ``TextEncoder.save`` carries."""
+
+    @classmethod
+    @abstractmethod
+    def load(cls, path: str, **kwargs: Any) -> "PairwiseReranker":
+        """Reload a reranker persisted by ``save`` — no network."""
 
 
 class FusionModel(ABC):

@@ -67,10 +67,13 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install torch-free runtime subset + pytest
+      # Core dependencies come from the package's own metadata, not a copied list:
+      # a hand-maintained list here drifted (tqdm was missing) and broke the job.
+      # The core install is torch-free (asserted by core-install-torch-free).
+      - name: Install torch-free runtime + pytest
         run: |
-          pip install -e . --no-deps
-          pip install numpy pandas scipy scikit-learn xgboost pytest
+          pip install -e .
+          pip install pytest
 
       - name: Run the quality benchmark
         run: pytest -q -m quality
@@ -151,10 +154,12 @@ jobs:
           pip install build
           python -m build --wheel
 
-      - name: Install the built wheel (torch-free runtime subset)
+      # Install the wheel with its declared dependencies, so this also checks that
+      # the wheel's metadata is complete (a copied list would hide a missing one).
+      - name: Install the built wheel (torch-free runtime)
         run: |
-          pip install dist/*.whl --no-deps
-          pip install numpy pandas scipy scikit-learn xgboost
+          pip install dist/*.whl
+          python -c "import importlib.util, sys; sys.exit(importlib.util.find_spec('torch') is not None)"
 
       - name: Train, infer, evaluate via the installed console scripts
         run: |

@@ -15,6 +15,19 @@ versions, and platforms without any env-var pinning.
 
 from __future__ import annotations
 
+# T85: import xgboost before anything else in the session gets a chance to
+# import torch. On at least one dev host (macOS + Homebrew libomp), xgboost
+# and torch each bundle their own OpenMP runtime, and initializing torch's
+# *first* -- which pytest's single-process collection makes easy to do by
+# accident, since the T85 torch-backend tests import torch at module level --
+# reliably segfaults xgboost's first `fit()` afterward with
+# `OMP: Error #179: Function pthread_mutex_init failed`. Importing xgboost
+# here, before pytest collects any test module, sidesteps it: verified this
+# ordering (xgboost first) is sufficient on the affected host, independent of
+# which library is actually *used* first. A torch-free run is unaffected --
+# xgboost is a hard dependency already, so this import always succeeds.
+import xgboost  # noqa: F401
+
 import pytest
 
 from text_classifier import ClassDefinition, LabelSpace
