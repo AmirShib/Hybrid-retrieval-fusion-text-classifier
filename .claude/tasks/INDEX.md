@@ -120,7 +120,9 @@ signal once T34 phase 2 lands.
 | T42 | 4    | Calibration comparison (isotonic vs Platt vs beta) (needs T23)                 | done |
 | T43 | 4    | Threshold tuner: add target-coverage mode alongside target-precision          | todo |
 | T44 | 4    | Alternative fusion model (XGBRanker) behind `FusionModel` port (needs T23)     | done |
-| T80 | 4    | Track + select the best epoch of an encoder fine-tune (needs T24)              | in-review |
+| T80 | 4    | Track + select the best epoch of an encoder fine-tune (needs T24)              | done (implementation replaced by T92) |
+| T92 | 4    | Encoder fine-tuning via SentenceTransformerTrainer + pooling/max_seq_length/lr/weight-decay knobs; MNRL default | in-review |
+| T93 | 0    | CPU-independent rank features (stable argsort) + CI green again              | done |
 | T82 | 4    | Retrain-based feature ablation: `drop_features` + seeded sweep harness (needs T40) | in-review |
 | T45 | 4    | Per-class calibration behind `ConfidenceCalibrator` port (needs T42)           | done |
 | T50 | 5    | Pin requirements for air-gapped reproducibility (hash-locked)                  | done |

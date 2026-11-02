@@ -1,26 +1,23 @@
 # T80 — Track and choose the best epoch of an encoder fine-tune
 
-status: in-review
-tier: 4
-depends_on: T24
+status: done (superseded in implementation > **Status (2026-11-02): goal delivered; the implementation below was replaced by
+> T92.** Best-epoch selection, its config fields (`train_holdout_ratio`,
+> `train_select_metric`, `train_select_min_delta`, `train_early_stopping_patience`,
+> `train_holdout_seed`), its CLI flags and `encoder_training.json` (same schema)
+> all still exist. What changed: fine-tuning now runs through
+> `SentenceTransformerTrainer`; each epoch is scored by
+> `InformationRetrievalEvaluator`; the best epoch is the Trainer's
+> `load_best_model_at_end`; patience/min-delta map onto `EarlyStoppingCallback`.
+> `EpochSelectionPolicy`, `encoder_retrieval_metrics`, `EncoderEpochTracker`,
+> `tests/unit/test_train_encoder_epochs.py` and the `desc_pos_sim` metric are
+> gone. Read the original note below as history.
+>
+> **Original implementation note (in-review, 2026-08).** Delivered: per-epoch
+> scoring + best-epoch selection inside `train_encoder`, via a framework-free
+> `EpochSelectionPolicy`, `encoder_retrieval_metrics` and an `EncoderEpochTracker`
+> driven by one `SentenceEvaluator` call per epoch from `SentenceTransformer.fit`.
 
-> **Implementation note (in-review).** Delivered: per-epoch scoring + best-epoch
-> selection inside `train_encoder`. The decision rule is the framework-free
-> `EpochSelectionPolicy` (domain), the metrics are `encoder_retrieval_metrics`
-> (domain, pure numpy), and the per-epoch loop is `EncoderEpochTracker`
-> (infrastructure) — driven by one `SentenceEvaluator` call per epoch from
-> `SentenceTransformer.fit` (`evaluation_steps=0`, verified against
-> sentence-transformers 5.6's `EvaluatorCallback.on_epoch_end`). Config:
-> `encoder.train_holdout_ratio` / `train_select_metric` /
-> `train_select_min_delta` / `train_early_stopping_patience` /
-> `train_holdout_seed`, all validated in `PipelineConfig.validate`. CLI:
-> `--encoder-epochs`, `--encoder-epoch-holdout`, `--encoder-select-metric`,
-> `--encoder-patience`. The per-epoch table is persisted to
-> `<model_dir>/encoder/encoder_training.json`. Tests (offline, no torch):
-> `tests/unit/test_encoder_epoch_selection.py` (metrics, policy, tracker, split,
-> config) and `tests/unit/test_train_encoder_epochs.py` (the whole
-> `train_encoder` orchestration against a fake `sentence_transformers` that
-> mirrors the real `fit`/evaluator/save contract).
+`fit`/evaluator/save contract).
 
 ## Goal
 Make a multi-epoch encoder fine-tune return its *best* epoch instead of its last,
