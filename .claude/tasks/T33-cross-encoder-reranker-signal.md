@@ -1,6 +1,6 @@
 # T33 — Cross-encoder rerank as a second-stage, multi-view signal
 
-status: in-review (phases 1-3 landed; cascade_from still open)
+status: done for this release (phases 1-3 + fine-tuning + best-epoch selection); cascade_from deferred
 tier: 3
 depends_on: T34 (phase 2), T87, d4109d9 (structured taxonomy fields)
 
@@ -520,5 +520,21 @@ the shortlist remains the ceiling on accuracy and this ticket does not move it.
   query/document interaction at all (a plain PyTorch loop collapses it to a
   constant too), so learning is asserted on a 64-wide, 2-layer model only.
 
-Still open: `cascade_from`; best-epoch selection for the cross-encoder (the
-encoder has it, the cross-encoder trains a fixed number of epochs); GPU timing.
+## Release hardening (2026-11-02)
+
+- Best-epoch selection for cross-encoder fine-tuning (class-stratified holdout of
+  the training lists, `CrossEncoderRerankingEvaluator`, `load_best_model_at_end`,
+  optional early stopping); history shipped as `cross_encoder_training.json`.
+- Trainer stdout summary silenced (encoder and cross-encoder).
+- Post-training CLIs verified on a cross-encoder model
+  (`tests/integration/test_cross_encoder_cli_paths.py`): evaluate, tune (decision
+  layer only; weights byte-identical), importance, update with examples and with a
+  new class (reranked like any other).
+- Real-model runs: `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` on a Hebrew COICOP
+  sample, on sentence-transformers 5.2.0 + transformers 4.57.3 and 6.2.0 + 5.22.
+  Holdout MRR rose 0.669 -> 0.722 over two epochs (small sample; a hint only).
+  transformers 4.57.3's "incorrect regex pattern" tokenizer warning verified to be a
+  false alarm (identical tokens on 2,000 Hebrew names).
+
+Deferred, not blocking: `cascade_from` (never implemented, not a config field); GPU
+timing (needs the owner's hardware); an accuracy evaluation at realistic scale.

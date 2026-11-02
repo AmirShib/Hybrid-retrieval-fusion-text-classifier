@@ -612,10 +612,28 @@ ships. No item is ever scored by a model that trained on its label. That means
 `n_folds + 1` fine-tunes per run, so it is practical on a GPU; it needs k-fold
 training (`n_folds >= 2`) and sentence-transformers >= 4.0.
 
+**Training for more than one epoch** picks its own epoch, as the encoder does:
+with `train_epochs > 1`, a stratified `train_holdout_ratio` (default 0.1) of the
+training lists is held out of the gradient and scored after every epoch (is each
+item's true class ranked first among its candidates?), and the best epoch's weights
+are kept. `train_select_metric` is `mrr` (default), `ndcg` or `map`;
+`train_early_stopping_patience` stops after that many epochs without an improvement
+larger than `train_select_min_delta`. The shipped model's per-epoch table is saved as
+`model_dir/signals/cross-encoder/cross_encoder_training.json`. At the default
+`train_epochs: 1` there is nothing to choose between, so selection is off.
+
 **Deployment.** The cross-encoder's weights (pretrained or fine-tuned) are saved
 into `model_dir/signals/cross-encoder/` as safetensors and loaded from there, so the
 deployed model works offline. Expect the model directory to grow by the reranker's
 size (about 100 MB for a MiniLM-sized model, over 1 GB for `bge-reranker-v2-m3`).
+
+**Compatibility.** Tested with sentence-transformers 5.2, 5.6 and 6.2, on
+transformers 4.57 and 5.x. Fine-tuning needs sentence-transformers >= 4.0; scoring
+with a pretrained model works on older versions. On transformers 4.57.3, loading the
+saved model logs a warning that the tokenizer has "an incorrect regex pattern" (it
+mentions Mistral). It is a false alarm from that transformers release: the saved and
+original tokenizers were checked to produce identical tokens on 2,000 real Hebrew
+item names. It can be ignored.
 
 **Cost.** About 20 cross-encoder calls per item (10 candidates × 2 documents)
 every time an item is scored, in training and at inference. On a GPU that is fine;

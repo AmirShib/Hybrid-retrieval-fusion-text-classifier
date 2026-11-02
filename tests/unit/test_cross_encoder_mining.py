@@ -135,6 +135,10 @@ class TestTrainingConfig:
             ("learning_rate", 0.0),
             ("weight_decay", -1.0),
             ("warmup_ratio", 1.0),
+            ("train_holdout_ratio", 0.9),
+            ("train_select_metric", "accuracy"),
+            ("train_early_stopping_patience", -1),
+            ("train_select_min_delta", -0.1),
         ],
     )
     def test_invalid_training_values_are_rejected_by_name(self, field, value):

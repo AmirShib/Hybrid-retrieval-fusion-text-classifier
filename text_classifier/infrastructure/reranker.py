@@ -137,6 +137,12 @@ class SentenceTransformersCrossEncoder(PairwiseReranker):
             )
         self._model = model
         self._batch_size = batch_size
+        # Per-epoch record of a fine-tune that selected its best epoch (see
+        # ``train_cross_encoder``). Evidence, not state: written beside the
+        # weights by ``save``; empty for a pretrained or reloaded model.
+        self.training_history: Dict[str, Any] = {}
+
+    TRAINING_HISTORY_NAME = "cross_encoder_training.json"
 
     @property
     def model(self) -> Any:
@@ -170,6 +176,9 @@ class SentenceTransformersCrossEncoder(PairwiseReranker):
         self._model.save(directory)
         with open(os.path.join(directory, "reranker.json"), "w") as fh:
             json.dump({"kind": "cross-encoder"}, fh)
+        if self.training_history:
+            with open(os.path.join(directory, self.TRAINING_HISTORY_NAME), "w") as fh:
+                json.dump(self.training_history, fh, indent=2)
 
     @classmethod
     def load(cls, path: str, **kwargs) -> "SentenceTransformersCrossEncoder":
@@ -240,13 +249,27 @@ def training_examples(
     definitions: Sequence[ClassDefinition],
     document: CrossEncoderDocument,
 ) -> List[Tuple[str, str, List[str]]]:
+    """See ``training_examples_with_classes``; the examples alone."""
+    return training_examples_with_classes(lists, texts, definitions, document)[0]
+
+
+def training_examples_with_classes(
+    lists: Sequence[Tuple[int, int, List[int]]],
+    texts: Sequence[str],
+    definitions: Sequence[ClassDefinition],
+    document: CrossEncoderDocument,
+) -> Tuple[List[Tuple[str, str, List[str]]], List[int]]:
     """Render mined lists into ``(query, positive doc, negative docs)`` text.
 
     Uses the same evidence rendering as scoring -- including query-adaptive
     selection -- so the model is trained on exactly the documents it will see. A
     class with no text for ``document`` renders ``""``; such a negative is dropped,
-    and an item whose positive renders empty is skipped (nothing to learn)."""
+    and an item whose positive renders empty is skipped (nothing to learn).
+
+    Also returns each kept example's positive class, aligned with the examples,
+    so best-epoch selection can hold out a class-stratified slice."""
     out: List[Tuple[str, str, List[str]]] = []
+    classes: List[int] = []
     for item, positive, negatives in lists:
         query = texts[item]
         q_tokens = _tokens(query)
@@ -258,7 +281,8 @@ def training_examples(
         ]
         if neg_docs:
             out.append((query, pos_doc, neg_docs))
-    return out
+            classes.append(int(positive))
+    return out, classes
 
 
 def _train_dataset_and_loss(
@@ -298,6 +322,7 @@ def train_cross_encoder(
     reranker: SentenceTransformersCrossEncoder,
     examples: Sequence[Tuple[str, str, List[str]]],
     config: CrossEncoderConfig,
+    classes: Optional[Sequence[int]] = None,
 ) -> SentenceTransformersCrossEncoder:
     """Fine-tune ``reranker``'s model in place on ``examples`` and return it.
 
@@ -305,8 +330,29 @@ def train_cross_encoder(
     that is one fold's training items only, on a fresh copy of ``model_name``,
     so no held-out item is ever scored by a model that saw its label. Runs a
     ``CrossEncoderTrainer`` (sentence-transformers >= 4.0) with nothing written
-    outside a temporary directory and nothing reported anywhere."""
-    from .encoder import _device_notes, _import_first, _warmup_kwargs, _with_save_safetensors
+    outside a temporary directory and nothing reported anywhere.
+
+    **Which epoch you get back.** With ``train_epochs == 1`` (the default) or
+    ``train_holdout_ratio == 0``, the state after the last epoch. Otherwise a
+    ``train_holdout_ratio`` slice of the examples -- stratified by ``classes``
+    (each example's positive class) when given -- is withheld from the gradient
+    and scored after every epoch by a ``CrossEncoderRerankingEvaluator`` (is the
+    positive ranked first among the item's candidates?); the Trainer reloads the
+    best epoch on ``train_select_metric`` and can stop early. The per-epoch table
+    is kept as ``reranker.training_history`` and saved beside the weights. The
+    holdout comes out of the caller's examples, i.e. out of one fold's training
+    rows, so selection stays in-fold."""
+    from transformers import EarlyStoppingCallback
+
+    from .encoder import (
+        MIN_EPOCH_HOLDOUT,
+        _device_notes,
+        _import_first,
+        _quiet_trainer,
+        _stratified_holdout,
+        _warmup_kwargs,
+        _with_save_safetensors,
+    )
 
     if not examples:
         logger.warning("cross-encoder fine-tuning skipped: no training lists could be mined")
@@ -323,6 +369,22 @@ def train_cross_encoder(
             "with a pretrained cross-encoder works on older versions."
         ) from exc
     _device_notes(config)
+    examples = list(examples)
+    groups = np.asarray(classes if classes is not None else np.zeros(len(examples)), dtype=np.int64)
+    ratio = config.train_holdout_ratio if config.train_epochs > 1 else 0.0
+    # Fixed seed: a rerun holds out the same lists (the determinism invariant).
+    fit_idx, hold_idx = _stratified_holdout(groups, ratio, 0)
+    if 0 < len(hold_idx) < MIN_EPOCH_HOLDOUT:
+        logger.warning(
+            "cross-encoder best-epoch selection disabled: a %d-item holdout (< %d) is too "
+            "small to rank epochs by; keeping the last epoch and training on everything",
+            len(hold_idx),
+            MIN_EPOCH_HOLDOUT,
+        )
+        fit_idx, hold_idx = np.arange(len(examples)), np.empty(0, dtype=np.intp)
+    selecting = len(hold_idx) > 0
+    holdout = [examples[int(i)] for i in hold_idx]
+    examples = [examples[int(i)] for i in fit_idx]
     dataset, loss = _train_dataset_and_loss(reranker.model, examples, config.train_loss)
     logger.info(
         "fine-tuning cross-encoder on %d item(s) (%d pair(s)), loss=%s, %d epoch(s)",
@@ -347,11 +409,121 @@ def train_cross_encoder(
         }
         if config.device == "cpu":
             kwargs["use_cpu"] = True
+        evaluator = None
+        callbacks: List[Any] = []
+        if selecting:
+            evaluator, select_key = _holdout_evaluator(holdout, config)
+            kwargs.update(
+                {
+                    "eval_strategy": "epoch",
+                    "save_strategy": "epoch",
+                    "load_best_model_at_end": True,
+                    "metric_for_best_model": select_key,
+                    "greater_is_better": True,
+                    "save_total_limit": 1,
+                    "save_only_model": True,  # weights only: no optimizer pickles
+                }
+            )
+            if config.train_early_stopping_patience > 0:
+                callbacks.append(
+                    EarlyStoppingCallback(
+                        early_stopping_patience=config.train_early_stopping_patience,
+                        early_stopping_threshold=config.train_select_min_delta,
+                    )
+                )
         args = _with_save_safetensors(args_cls(**kwargs))
-        trainer_cls(model=reranker.model, args=args, train_dataset=dataset, loss=loss).train()
+        trainer = trainer_cls(
+            model=reranker.model,
+            args=args,
+            train_dataset=dataset,
+            loss=loss,
+            evaluator=evaluator,
+            callbacks=callbacks,
+        )
+        _quiet_trainer(trainer)
+        trainer.train()
+        if selecting:
+            reranker.training_history = _ce_training_history(
+                trainer, select_key, config, n_fit=len(examples), n_holdout=len(holdout)
+            )
+            h = reranker.training_history
+            logger.info(
+                "cross-encoder: kept epoch %d of %d (%s=%.4f)%s",
+                h["best_epoch"],
+                h["epochs_run"],
+                config.train_select_metric,
+                h["epochs"][h["best_epoch"] - 1][config.train_select_metric]
+                if h["best_epoch"]
+                else float("nan"),
+                ", stopped early" if h["early_stopped"] else "",
+            )
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
     return reranker
+
+
+def _holdout_evaluator(
+    holdout: Sequence[Tuple[str, str, List[str]]], config: CrossEncoderConfig
+) -> Tuple[Any, str]:
+    """A ``CrossEncoderRerankingEvaluator`` over the held-out lists, and the
+    Trainer metric name for ``train_select_metric``. ``at_k`` is the longest list,
+    so MRR/NDCG are full-list, not truncated."""
+    from .encoder import _import_first
+
+    evaluator_cls = _import_first(
+        ("sentence_transformers.cross_encoder.evaluation",), "CrossEncoderRerankingEvaluator"
+    )
+    k = max(1 + len(negs) for _, _, negs in holdout)
+    samples = [{"query": q, "positive": [pos], "negative": list(negs)} for q, pos, negs in holdout]
+    evaluator = evaluator_cls(
+        samples,
+        at_k=k,
+        always_rerank_positives=True,
+        name="ce_holdout",
+        batch_size=config.batch_size,
+        show_progress_bar=False,
+        write_csv=False,
+    )
+    metric = config.train_select_metric
+    key = "eval_ce_holdout_map" if metric == "map" else f"eval_ce_holdout_{metric}@{k}"
+    return evaluator, key
+
+
+def _ce_training_history(
+    trainer: Any, select_key: str, config: CrossEncoderConfig, n_fit: int, n_holdout: int
+) -> Dict[str, Any]:
+    """JSON-clean per-epoch record, keyed by "mrr"/"ndcg"/"map". ``best_epoch`` is
+    the epoch whose checkpoint the Trainer reloaded (ties go to the earlier one)."""
+    evals = [
+        e for e in trainer.state.log_history if any(k.startswith("eval_ce_holdout") for k in e)
+    ]
+    epochs: List[Dict[str, Any]] = []
+    for number, entry in enumerate(evals, start=1):
+        row: Dict[str, Any] = {"epoch": number}
+        for key, value in entry.items():
+            if key.startswith("eval_ce_holdout_"):
+                row[key[len("eval_ce_holdout_") :].split("@")[0]] = float(value)
+        epochs.append(row)
+    best_epoch = 0
+    checkpoint = trainer.state.best_model_checkpoint
+    if checkpoint:
+        try:
+            step = int(os.path.basename(os.path.normpath(checkpoint)).rsplit("-", 1)[-1])
+            best_epoch = next((n for n, e in enumerate(evals, 1) if e.get("step") == step), 0)
+        except ValueError:
+            best_epoch = 0
+    return {
+        "select_metric": config.train_select_metric,
+        "select_min_delta": config.train_select_min_delta,
+        "early_stopping_patience": config.train_early_stopping_patience,
+        "n_fit_items": n_fit,
+        "n_holdout_items": n_holdout,
+        "best_epoch": best_epoch,
+        "epochs": epochs,
+        "epochs_requested": config.train_epochs,
+        "epochs_run": len(epochs),
+        "early_stopped": len(epochs) < config.train_epochs,
+    }
 
 
 # --------------------------------------------------------------- evidence

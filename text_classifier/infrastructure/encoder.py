@@ -843,6 +843,23 @@ def _training_arguments(
     return _with_save_safetensors(args_cls(**kwargs))
 
 
+def _quiet_trainer(trainer: Any) -> Any:
+    """Stop a Trainer printing its end-of-training summary to stdout.
+
+    With ``disable_tqdm=True`` transformers swaps the progress bar for a
+    ``PrinterCallback``, which prints every logged dict -- including the
+    ``{'train_runtime': ...}`` summary at the end of ``train()``, which is logged
+    even with ``logging_strategy="no"``. This package reports through ``logging``
+    instead, so the callback is removed."""
+    try:
+        from transformers import PrinterCallback
+
+        trainer.remove_callback(PrinterCallback)
+    except Exception:  # an older transformers without it: nothing to remove
+        pass
+    return trainer
+
+
 def _with_save_safetensors(args: Any) -> Any:
     """Supply ``save_safetensors`` on Trainer arguments that lack it.
 
@@ -1086,6 +1103,7 @@ def train_encoder(
             evaluator=evaluator,
             callbacks=callbacks,
         )
+        _quiet_trainer(trainer)
         trainer.train()
         if selecting:
             history = _training_history(

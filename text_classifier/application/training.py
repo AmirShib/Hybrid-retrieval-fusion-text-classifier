@@ -64,7 +64,7 @@ from ..infrastructure.reranker import (
     mine_training_lists,
     prescore_column,
     train_cross_encoder,
-    training_examples,
+    training_examples_with_classes,
 )
 from .evaluation import build_manifest, evaluate_decisions, write_evaluation_artifacts
 from .features import FeatureAssembler
@@ -577,11 +577,13 @@ class TrainingPipeline:
             seed=self.cfg.training.random_state,
         )
         document = next(d for d in ce_cfg.documents if d.name == ce_cfg.train_document)
-        examples = training_examples(lists, row_texts, label_space.definitions, document)
+        examples, classes = training_examples_with_classes(
+            lists, row_texts, label_space.definitions, document
+        )
         log.info(
             "cross-encoder: mined %d training list(s) from %d row(s)", len(examples), len(rows)
         )
-        train_cross_encoder(reranker, examples, ce_cfg)
+        train_cross_encoder(reranker, examples, ce_cfg, classes=classes)
 
     def _build_oof(self, texts: List[str], y: np.ndarray, label_space: LabelSpace) -> pd.DataFrame:
         assert self.assembler is not None  # set in run() before this is called

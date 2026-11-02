@@ -31,6 +31,22 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
   rejects training on the leave-one-out path (`n_folds = 1`, which would leak),
   without the signal configured, or with the token-overlap stand-in. Fine-tuning
   needs sentence-transformers >= 4.0. Tested offline on 6.2.0, 5.6.0 and 5.2.0.
+
+  Multi-epoch fine-tuning selects its best epoch, as the encoder does: with
+  `train_epochs > 1` a class-stratified `train_holdout_ratio` (default 0.1) of the
+  training lists is held out and scored after each epoch by a
+  `CrossEncoderRerankingEvaluator`; the Trainer reloads the best epoch on
+  `train_select_metric` (`mrr`/`ndcg`/`map`), with optional early stopping
+  (`train_early_stopping_patience`, `train_select_min_delta`). The shipped model's
+  per-epoch table is saved as `signals/cross-encoder/cross_encoder_training.json`.
+  Off at the default single epoch.
+
+  Verified end to end with a real multilingual cross-encoder
+  (`cross-encoder/mmarco-mMiniLMv2-L12-H384-v1`) on a Hebrew sample of the COICOP
+  example data, on sentence-transformers 5.2.0 + transformers 4.57.3 and on 6.2.0 +
+  5.22: training, saving, offline reload with identical predictions, and every
+  post-training CLI (evaluate, tune, importance, update with new examples or a new
+  class -- a class added after training is reranked like any other).
 - **Encoder fine-tune and model knobs, all defaulting to the old behaviour.**
   `encoder.learning_rate` (`2e-5`) and `encoder.weight_decay` (`0.01`) — the
   values `model.fit` used — are now configurable. `encoder.max_seq_length` sets the
@@ -76,6 +92,10 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
   unchanged; no torch is imported either way.
 
 ### Fixed
+- **Fine-tuning no longer prints a `{'train_runtime': ...}` line per run.** With
+  progress bars off, transformers' `PrinterCallback` printed the end-of-training
+  summary to stdout even with logging disabled; it is removed from both the encoder
+  and the cross-encoder trainers, which report through `logging` instead.
 - **Possible segfault when training on macOS.** On Macs using Homebrew's libomp,
   importing torch before xgboost makes xgboost's first `fit()` crash
   (`OMP: Error #179`). A normal training run does exactly that, because the

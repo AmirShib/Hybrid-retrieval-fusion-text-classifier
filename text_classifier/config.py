@@ -147,6 +147,8 @@ CROSS_ENCODER_VIEWS = (
 CROSS_ENCODER_SELECT_MODES = ("best", "all", "first")
 # T33 phase 3: cross-encoder fine-tuning objectives (see CrossEncoderConfig).
 CROSS_ENCODER_TRAIN_LOSSES = ("binary_cross_entropy", "lambda", "listnet")
+# Held-out reranking metrics best-epoch selection can pick the cross-encoder by.
+CROSS_ENCODER_SELECT_METRICS = ("mrr", "ndcg", "map")
 
 
 @dataclass
@@ -275,6 +277,18 @@ class CrossEncoderConfig:
     learning_rate: float = 2e-5
     weight_decay: float = 0.01
     warmup_ratio: float = 0.1
+    # Best-epoch selection, as for the encoder. With train_epochs > 1, a
+    # stratified `train_holdout_ratio` of the training lists is held out of the
+    # gradient and re-scored after every epoch (a reranking evaluator: does each
+    # item's true class come first among its candidates?), and the best epoch's
+    # weights are the ones kept. Ignored at train_epochs == 1 (nothing to choose
+    # between), so the default changes nothing. `train_select_metric` is "mrr"
+    # (default), "ndcg" or "map"; `train_early_stopping_patience` > 0 stops after
+    # that many epochs without an improvement larger than `train_select_min_delta`.
+    train_holdout_ratio: float = 0.1
+    train_select_metric: str = "mrr"
+    train_early_stopping_patience: int = 0
+    train_select_min_delta: float = 0.0
 
     def __post_init__(self) -> None:
         self.documents = [
@@ -839,6 +853,30 @@ class PipelineConfig:
                 ce.warmup_ratio,
                 0.0 <= ce.warmup_ratio < 1.0,
                 "in [0, 1)",
+            ),
+            (
+                "retrieval.cross_encoder.train_holdout_ratio",
+                ce.train_holdout_ratio,
+                0.0 <= ce.train_holdout_ratio <= 0.5,
+                "in [0, 0.5] (0 disables best-epoch selection)",
+            ),
+            (
+                "retrieval.cross_encoder.train_select_metric",
+                ce.train_select_metric,
+                ce.train_select_metric in CROSS_ENCODER_SELECT_METRICS,
+                f"one of {list(CROSS_ENCODER_SELECT_METRICS)}",
+            ),
+            (
+                "retrieval.cross_encoder.train_early_stopping_patience",
+                ce.train_early_stopping_patience,
+                ce.train_early_stopping_patience >= 0,
+                ">= 0 (0 trains every epoch)",
+            ),
+            (
+                "retrieval.cross_encoder.train_select_min_delta",
+                ce.train_select_min_delta,
+                ce.train_select_min_delta >= 0.0,
+                ">= 0",
             ),
             (
                 "retrieval.cross_encoder.gaps",

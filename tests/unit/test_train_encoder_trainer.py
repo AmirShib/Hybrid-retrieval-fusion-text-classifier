@@ -222,6 +222,15 @@ class TestBestEpochSelection:
         with open(os.path.join(out, SentenceTransformerEncoder.TRAINING_HISTORY_NAME)) as fh:
             assert json.load(fh) == encoder.training_history
 
+    def test_fine_tuning_prints_nothing_to_stdout(self, tiny_model, capsys):
+        """The Trainer's PrinterCallback used to print a {'train_runtime': ...}
+        summary per fine-tune; the package reports through logging instead."""
+        capsys.readouterr()
+        train_encoder(
+            _items(), _label_space(), _config(tiny_model, train_epochs=2, train_holdout_ratio=0.25)
+        )
+        assert "train_runtime" not in capsys.readouterr().out
+
     def test_working_directory_is_removed(self, tiny_model, monkeypatch):
         made: list = []
         real = tempfile.mkdtemp

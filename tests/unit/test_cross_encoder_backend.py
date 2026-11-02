@@ -52,6 +52,7 @@ def _write_tiny_cross_encoder(path: str, words, *, learnable: bool = False, seed
     import torch
     from transformers import BertConfig, BertForSequenceClassification, BertTokenizer
 
+    os.makedirs(path, exist_ok=True)
     with open(os.path.join(path, "vocab.txt"), "w") as fh:
         fh.write("\n".join(SPECIAL + sorted(set(words))))
     tok = BertTokenizer(os.path.join(path, "vocab.txt"))
@@ -204,6 +205,82 @@ class TestFineTuning:
             scores = ce.score([(query, positive)] + [(query, n) for n in negatives])
             assert scores[0] > scores[1:].max(), (query, scores)
 
+    def _learnable(self, tmp_path):
+        ls, items = _dataset()
+        words = {w for it in items for w in it.text.split()} | {
+            w for d in ls.descriptions for w in d.split()
+        }
+        return _write_tiny_cross_encoder(str(tmp_path), words, learnable=True)
+
+    # 24 lists over 3 positive classes: a 0.25 holdout is 6 lists (>= the floor of 4)
+    SELECT_EXAMPLES = EXAMPLES * 2
+    SELECT_CLASSES = [0, 1, 2] * 8
+
+    def test_multi_epoch_keeps_the_best_epoch_and_records_it(self, tmp_path):
+        path = self._learnable(tmp_path)
+        ce = build_reranker(_ce_config(path))
+        cfg = _ce_config(
+            path, train=True, train_epochs=4, train_holdout_ratio=0.25, learning_rate=1e-3,
+            train_batch_size=4, warmup_ratio=0.0,
+        )  # fmt: skip
+        train_cross_encoder(ce, self.SELECT_EXAMPLES, cfg, classes=self.SELECT_CLASSES)
+        h = ce.training_history
+        assert h["select_metric"] == "mrr" and h["epochs_run"] == 4
+        assert h["n_holdout_items"] == 6 and h["n_fit_items"] == 18
+        assert [e["epoch"] for e in h["epochs"]] == [1, 2, 3, 4]
+        scores = [e["mrr"] for e in h["epochs"]]
+        assert h["best_epoch"] == scores.index(max(scores)) + 1  # ties -> earlier epoch
+        json.dumps(h)
+
+    def test_history_is_saved_beside_the_weights(self, tmp_path):
+        path = self._learnable(tmp_path / "m")
+        ce = build_reranker(_ce_config(path))
+        cfg = _ce_config(path, train=True, train_epochs=2, train_holdout_ratio=0.25)
+        train_cross_encoder(ce, self.SELECT_EXAMPLES, cfg, classes=self.SELECT_CLASSES)
+        out = str(tmp_path / "saved")
+        ce.save(out)
+        with open(os.path.join(out, SentenceTransformersCrossEncoder.TRAINING_HISTORY_NAME)) as fh:
+            assert json.load(fh) == ce.training_history
+
+    def test_early_stopping_cuts_the_run_short(self, tmp_path):
+        path = self._learnable(tmp_path)
+        ce = build_reranker(_ce_config(path))
+        cfg = _ce_config(
+            path,
+            train=True,
+            train_epochs=6,
+            train_holdout_ratio=0.25,
+            train_early_stopping_patience=1,
+            train_select_min_delta=1.0,
+        )  # fmt: skip  (min_delta 1.0 is unbeatable, so patience runs out at once)
+        train_cross_encoder(ce, self.SELECT_EXAMPLES, cfg, classes=self.SELECT_CLASSES)
+        h = ce.training_history
+        assert h["early_stopped"] is True and h["epochs_run"] < 6
+
+    def test_single_epoch_does_no_selection(self, tiny_ce):
+        ce = build_reranker(_ce_config(tiny_ce))
+        train_cross_encoder(ce, self.SELECT_EXAMPLES, _ce_config(tiny_ce, train=True))
+        assert ce.training_history == {}
+
+    def test_too_small_a_holdout_disables_selection_with_a_warning(self, tiny_ce, caplog):
+        import logging as _logging
+
+        from text_classifier.infrastructure import reranker as reranker_mod
+
+        ce = build_reranker(_ce_config(tiny_ce))
+        cfg = _ce_config(tiny_ce, train=True, train_epochs=2, train_holdout_ratio=0.25)
+        with caplog.at_level(_logging.WARNING, logger=reranker_mod.logger.name):
+            train_cross_encoder(ce, EXAMPLES[:6], cfg, classes=[0, 1, 2] * 2)  # holdout of 0-3
+        assert ce.training_history == {}
+
+    def test_fine_tuning_prints_nothing_to_stdout(self, tiny_ce, capsys):
+        """The Trainer's PrinterCallback used to print a {'train_runtime': ...}
+        summary per fine-tune; the package reports through logging instead."""
+        ce = build_reranker(_ce_config(tiny_ce))
+        capsys.readouterr()
+        train_cross_encoder(ce, EXAMPLES, _ce_config(tiny_ce, train=True))
+        assert "train_runtime" not in capsys.readouterr().out
+
     def test_no_examples_is_a_no_op(self, tiny_ce):
         ce = build_reranker(_ce_config(tiny_ce))
         before = ce.score(PAIRS)
@@ -257,9 +334,9 @@ class TestPipeline:
             seen_rows.append(np.asarray(rows).copy())
             return real_fit(self, signal_providers, rows, *args, **kwargs)
 
-        def spy_train(reranker, examples, config):
+        def spy_train(reranker, examples, config, **kwargs):
             starts.append(reranker.score(PAIRS))  # weights at the start of training
-            return real_train(reranker, examples, config)
+            return real_train(reranker, examples, config, **kwargs)
 
         monkeypatch.setattr(TrainingPipeline, "_fit_cross_encoder", spy_fit)
         monkeypatch.setattr(training_mod, "train_cross_encoder", spy_train)

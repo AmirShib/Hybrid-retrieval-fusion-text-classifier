@@ -106,7 +106,7 @@ signal once T34 phase 2 lands.
 | T30 | 3    | Vectorize `InferencePipeline.predict` (drop the `.iterrows()` loop)            | done |
 | T31 | 3    | Optional FAISS/ANN backend behind the `DenseRetriever` port (needs T23)        | todo |
 | T32 | ~~3~~ 8 | BM25 memory profile for large corpora — **re-scoped to memory + throughput, moved to Tier 8** | in-review |
-| T33 | 3    | Cross-encoder rerank as a second-stage, multi-view signal (rewritten 2026-08-08) | in-review (phases 1-3 + fine-tuning) |
+| T33 | 3    | Cross-encoder rerank as a second-stage, multi-view signal (rewritten 2026-08-08) | done for release (cascade_from deferred) |
 | T34 | 3    | Pluggable retrieval signals + retrievers behind the registry (needs T23, T03)  | in-review (phase 1 + phase 2 landed 2026-08-05) |
 | T35 | 3    | Language-neutral BM25 defaults (drop hidden English stopwords)                | done |
 | T81 | 3    | Competition features: per-candidate margins + per-query top1−top2 gap (needs T03) | in-review |
