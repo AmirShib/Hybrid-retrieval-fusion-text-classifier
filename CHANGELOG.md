@@ -8,6 +8,19 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 
 ## [Unreleased]
 
+### Added
+- **Learned-sparse (SPLADE) retrieval signal (T94).** Add `"splade"` to
+  `signals` to get a sixth, round-one signal: a masked-language model's
+  per-word weights (`retrieval.splade.kind = "splade"`, any checkpoint with its
+  MLM head, e.g. a Hebrew BERT) scored as a sparse dot product against class
+  descriptions (`s_desc_*`) and the example pool (`s_knn_*`). It joins candidate
+  selection, so unlike the cross-encoder it can raise candidate recall.
+  `retrieval.splade.train` fine-tunes a fresh copy per fold (contrastive loss +
+  FLOPS sparsity penalty), leakage-free. Weights ship in the model dir as
+  safetensors. `kind = "hashing"` is the offline stand-in. Off by default; the
+  default config is unchanged. New `splade` install extra. `SignalProvider` gained
+  an optional `fit` hook so stateful signals are fitted per fold.
+
 ## [0.2.0] - 2026-11-02
 
 ### Added

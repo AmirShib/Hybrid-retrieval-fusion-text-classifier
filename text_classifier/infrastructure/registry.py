@@ -75,6 +75,7 @@ from .reranker import (
 )
 from .retrieval import DenseRetrieverAdapter, LexicalRetrieverAdapter
 from .signals import DenseSignalProvider, LexicalSignalProvider
+from .splade import SpladeSignalProvider
 
 
 # --------------------------------------------------------------------------- specs
@@ -674,5 +675,22 @@ register_feature_provider(
         # train-set-derived), so leakage-free like any corpus-dependent state.
         build=lambda pc: ClassKeywordOverlapProvider(**pc.params),
         load=lambda path, pc: ClassKeywordOverlapProvider.load(path),
+    ),
+)
+
+
+register_signal_provider(
+    "splade",
+    SignalProviderSpec(
+        # T94. Ignores `dense`/`lexical`: it owns its own sparse encoder and
+        # example index, fitted per fold through `SignalProvider.fit`. Building
+        # it is cheap (no model load) -- the schema check in
+        # `ArtifactRepository.load` builds one just to read `column_names()`.
+        build=lambda cfg, dense, lexical, ops: SpladeSignalProvider(
+            cfg.splade, ops, chunk=cfg.dense_chunk
+        ),
+        load=lambda directory, cfg: SpladeSignalProvider.load_from(
+            os.path.join(directory, "signals", "splade"), cfg.splade, cfg.dense_chunk
+        ),
     ),
 )

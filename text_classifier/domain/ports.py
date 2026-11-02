@@ -387,6 +387,20 @@ class SignalProvider(ABC):
         them (by ``name in ("dense", "lexical")``) so the *default* config's
         schema stays exactly ``FEATURE_NAMES`` rather than double-declaring it."""
 
+    def fit(  # noqa: B027 - optional hook, deliberately a no-op by default
+        self, texts: Sequence[str], labels: np.ndarray, label_space: LabelSpace
+    ) -> None:
+        """Fit any training-derived state on ``(texts, labels)`` (T94).
+
+        Optional: the default is a no-op, which is right for every provider that
+        wraps a retriever (the pipeline builds that retriever per fold itself)
+        or holds no learned state. A provider that owns its own index or model
+        overrides this. ``TrainingPipeline`` calls it once per fold with that
+        fold's *training* rows only, and once more on all rows for the deployed
+        model -- the same leakage-free discipline as ``FeatureProvider.fit`` and
+        the dense/lexical indices."""
+        return None
+
     @abstractmethod
     def build(self, ctx: SignalContext) -> List[SignalMatrix]:
         """Compute this provider's signal matrices for one query chunk."""
@@ -399,6 +413,30 @@ class SignalProvider(ABC):
     @abstractmethod
     def load(cls, path: str) -> "SignalProvider":
         """Reload a provider persisted by ``save`` — no labels, no network."""
+
+
+class SparseTextEncoder(ABC):
+    """Maps texts to sparse, non-negative weights over a fixed vocabulary (T94):
+    the learned-sparse (SPLADE) counterpart of ``TextEncoder``. Output is a
+    ``(n, vocab_size)`` sparse matrix (``scipy.sparse.csr_matrix``); the score
+    of a query against a document is their dot product. Not normalized -- like
+    BM25, magnitude carries meaning."""
+
+    @property
+    @abstractmethod
+    def vocab_size(self) -> int: ...
+
+    @abstractmethod
+    def encode(self, texts: Sequence[str]) -> Any:
+        """``(n, vocab_size)`` sparse matrix of term weights (>= 0)."""
+
+    def term(self, index: int) -> str:
+        """Human-readable vocabulary entry for ``index`` (explanations)."""
+        return str(index)
+
+    @abstractmethod
+    def save(self, directory: str) -> None:
+        """Persist to ``directory`` (portable formats only)."""
 
 
 class PairwiseReranker(ABC):

@@ -12,6 +12,8 @@ they score every class and their top-n form the candidate shortlist. Round two i
 providers declaring `needs_candidates` — a cross-encoder reranker today — which
 receive that shortlist and may only *reorder* it, never extend it. Candidate
 recall therefore stays a property of round one alone. Round two is off by default.
+Optional round-one signals beyond the five built-ins (T94: `"splade"`, learned-sparse)
+own their model/index and are fitted per fold through `SignalProvider.fit`.
 
 ## Architecture (hexagonal / DDD)
 ```

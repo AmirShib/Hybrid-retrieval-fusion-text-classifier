@@ -1,0 +1,19 @@
+{
+  "signals": ["dense", "lexical", "splade"],
+  "retrieval": {
+    "splade": {
+      "kind": "splade",
+      "model_name": "dicta-il/alephbertgimmel-base",
+      "max_length": 128,
+      "batch_size": 8,
+      "top_terms": 256,
+      "train": true,
+      "train_epochs": 2,
+      "train_batch_size": 8,
+      "train_negatives": 16,
+      "learning_rate": 2e-5,
+      "flops_query": 3e-4,
+      "flops_document": 1e-4
+    }
+  }
+}

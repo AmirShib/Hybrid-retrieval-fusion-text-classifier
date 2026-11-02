@@ -60,6 +60,9 @@ lightgbm = ["lightgbm"]
 # here: without it a locked install imports fine and then fails on the first
 # `datasets.Dataset`. (pip merely warns that a 3.x release has no `train` extra.)
 sentence-transformers = ["sentence-transformers[train]>=3.0"]
+# The learned-sparse (SPLADE) signal's real backend, retrieval.splade.kind="splade"
+# (T94). The offline "hashing" stand-in needs neither.
+splade = ["torch", "transformers>=4.30"]
 
 [project.urls]
 Repository = "https://github.com/amirshib/hybrid-retrieval-fusion-text-classifier"
