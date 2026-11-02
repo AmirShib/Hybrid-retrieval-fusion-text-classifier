@@ -195,13 +195,14 @@ def test_update_indexes_new_examples(tmp_path):
 
 
 # ---------------------------------------------------------------- real backend
-torch = pytest.importorskip("torch")
-transformers = pytest.importorskip("transformers")
-
-
 @pytest.fixture(scope="module")
 def tiny_mlm(tmp_path_factory):
-    """A tiny random BERT + word-level tokenizer saved to disk: no network."""
+    """A tiny random BERT + word-level tokenizer saved to disk: no network.
+
+    The torch/transformers skip lives here, not at module level, so only the
+    real-backend tests skip on a torch-free install (CI's main test matrix)."""
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("transformers")
     from tokenizers import Tokenizer, models, pre_tokenizers
     from transformers import BertConfig, BertForMaskedLM, PreTrainedTokenizerFast
 
