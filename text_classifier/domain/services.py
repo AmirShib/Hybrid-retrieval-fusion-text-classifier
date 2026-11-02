@@ -167,7 +167,9 @@ def _direct_signal_reqs(name: str) -> Set[str]:
     return reqs
 
 
-def core_feature_names(active_signals: Optional[Iterable[str]] = None) -> List[str]:
+def core_feature_names(
+    active_signals: Optional[Iterable[str]] = None, n_voting_signals: Optional[int] = None
+) -> List[str]:
     """``FEATURE_NAMES`` narrowed to the columns computable from
     ``active_signals`` (a name set that may include ``"dense"``/``"lexical"``
     plus any third-party signal kind -- only the two built-ins matter here).
@@ -178,11 +180,24 @@ def core_feature_names(active_signals: Optional[Iterable[str]] = None) -> List[s
     ``b_desc_sim`` without ``"lexical"``) is dropped; a column needing neither
     (``class_log_freq``) always survives; ``n_signal_agreement`` needs both,
     so it drops whenever either built-in is disabled -- with only one signal
-    active, "how many signals agree" carries no information."""
+    active, "how many signals agree" carries no information.
+
+    T94: ``n_voting_signals`` generalizes that last rule. When given, it is the
+    number of active *round-one* signal providers (built-in or optional, e.g.
+    SPLADE), and ``n_signal_agreement`` is kept whenever at least two vote --
+    so ``["dense", "splade"]`` keeps it. ``None`` keeps the original rule
+    (both built-ins required)."""
     if active_signals is None:
         return list(FEATURE_NAMES)
     active = set(active_signals)
-    return [n for n in FEATURE_NAMES if _direct_signal_reqs(n) <= active]
+    voters = (
+        n_voting_signals if n_voting_signals is not None else len(active & {"dense", "lexical"})
+    )
+    return [
+        n
+        for n in FEATURE_NAMES
+        if (voters >= 2 if n == "n_signal_agreement" else _direct_signal_reqs(n) <= active)
+    ]
 
 
 def feature_closure(requested: Iterable[str]) -> Set[str]:
@@ -236,7 +251,10 @@ def composed_feature_names(
     silently overwrite data in the assembled frame — the worst kind of
     train/infer disagreement."""
     active_builtin = {sp.name for sp in signal_providers if sp.name in ("dense", "lexical")}
-    names: List[str] = core_feature_names(active_builtin if signal_providers else None)
+    n_voting = sum(1 for sp in signal_providers if not getattr(sp, "needs_candidates", False))
+    names: List[str] = core_feature_names(
+        active_builtin if signal_providers else None, n_voting if signal_providers else None
+    )
     seen = set(names)
     for sp in signal_providers:
         if sp.name in ("dense", "lexical"):

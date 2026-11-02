@@ -21,6 +21,14 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
   default config is unchanged. New `splade` install extra. `SignalProvider` gained
   an optional `fit` hook so stateful signals are fitted per fold.
 
+### Changed
+- **`n_signal_agreement` now counts every shortlist-building signal (T94).** It
+  used to require exactly the five dense + BM25 picks and vanished otherwise; now
+  every round-one signal with a top-1 pick votes (SPLADE included; the
+  cross-encoder does not), and the column is kept whenever at least two round-one
+  signals are configured. Values for the default dense + BM25 config are
+  unchanged, so existing models load and score identically.
+
 ## [0.2.0] - 2026-11-02
 
 ### Added

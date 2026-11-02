@@ -326,3 +326,71 @@ def test_real_backend_end_to_end_with_training(tiny_mlm, tmp_path):
     before = InferencePipeline(artifacts).predict(texts)
     after = InferencePipeline(ArtifactRepository().load(model_dir)).predict(texts)
     assert np.allclose([p.confidence for p in before], [p.confidence for p in after], atol=1e-5)
+
+
+# ---------------------------------------------------------------- agreement
+def _oof_frame(signals):
+    cfg = PipelineConfig()
+    cfg.signals = signals
+    cfg.encoder.kind = "hashing"
+    cfg.training = TrainingConfig(
+        n_folds=3, random_state=0, target_precision=0.5, per_class_min_support=1
+    )
+    label_space, items = make_synthetic(n_classes=6, per_class=15, seed=5)
+    pipe = TrainingPipeline(cfg)
+    artifacts, _ = pipe.run(items, label_space)
+    texts = [it.text for it in items]
+    from text_classifier.application.features import FeatureAssembler
+    from text_classifier.domain import CandidatePolicy
+
+    asm = FeatureAssembler(label_space, CandidatePolicy(artifacts.config.candidate_top_n))
+    q = artifacts.encoder.encode(texts)
+    frame = asm.assemble(
+        texts,
+        q,
+        artifacts.dense,
+        artifacts.lexical,
+        10,
+        query_ids=np.arange(len(texts)),
+        signal_providers=artifacts.signal_providers,
+    )
+    return artifacts, frame
+
+
+@pytest.mark.parametrize(
+    "signals, voters",
+    [(["dense", "lexical"], 5), (["dense", "splade"], 5), (["dense", "lexical", "splade"], 7)],
+)
+def test_signal_agreement_counts_every_round_one_signal(signals, voters):
+    from text_classifier.domain.services import fusion_feature_names
+
+    artifacts, frame = _oof_frame(signals)
+    names = fusion_feature_names(artifacts.feature_providers, (), artifacts.signal_providers)
+    assert "n_signal_agreement" in names
+    assert frame.attrs["agreement_voters"] == voters
+    agree = frame["n_signal_agreement"].to_numpy()
+    assert agree.min() >= 0 and agree.max() <= voters - 1
+
+
+def test_signal_agreement_ignores_the_reranker_and_needs_two_voters():
+    from text_classifier.domain.services import fusion_feature_names
+
+    artifacts, frame = _oof_frame(["dense", "splade", "cross-encoder"])
+    assert frame.attrs["agreement_voters"] == 5  # ce.* picks do not vote
+    artifacts, _ = _oof_frame(["dense", "cross-encoder"])
+    names = fusion_feature_names(artifacts.feature_providers, (), artifacts.signal_providers)
+    assert "n_signal_agreement" not in names  # one round-one signal: nothing to agree
+
+
+def test_signal_report_uses_the_recorded_voter_count():
+    import pandas as pd
+
+    from text_classifier.application.signal_report import signal_report
+
+    df = pd.DataFrame(
+        {"item_id": [0, 0, 1], "is_true": [1, 0, 1], "n_signal_agreement": [6.0, 6.0, 3.0]}
+    )
+    df.attrs["agreement_voters"] = 7
+    rep = signal_report(df)["agreement"]
+    assert rep["mean_distinct_top_classes"] == pytest.approx((1 + 4) / 2)
+    assert rep["consensus_rate"] == pytest.approx(0.5)

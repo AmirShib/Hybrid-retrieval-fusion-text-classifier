@@ -318,6 +318,9 @@ class FeatureAssembler:
                 continue
             _collect(provider, ctx)
 
+        round_one_nodes = list(sig_matrices)
+        agreement_voters: Optional[int] = None
+
         # ---- candidate set = union of each declared candidate matrix's top-n ----
         mask = np.zeros((len(texts), C), dtype=bool)
         for value, positive_only in candidate_values:
@@ -421,20 +424,25 @@ class FeatureAssembler:
         if _want("class_log_freq"):
             data["class_log_freq"] = self._ops.log1p(class_freq[cols].astype(np.float64))
         if _want("n_signal_agreement"):
-            agreement_nodes = ("dense.desc", "dense.proto", "bm25.desc", "dense.knn", "bm25.knn")
+            # Every *round-one* matrix with a top1 pick votes (T94): the five
+            # built-in nodes by default -- exactly the old fixed list, so the
+            # default value is unchanged -- plus any optional shortlist signal
+            # such as SPLADE. Round-two (reranker) picks are excluded: they are
+            # restricted to the shortlist and would not be comparable votes.
             idxs = [
                 top1
-                for node in agreement_nodes
-                if node in sig_matrices and (top1 := sig_matrices[node].top1_idx) is not None
+                for node in round_one_nodes
+                if (top1 := sig_matrices[node].top1_idx) is not None
             ]
-            if len(idxs) == len(agreement_nodes):
+            if len(idxs) >= 2:
                 argstack = np.stack(idxs, axis=1)
                 n_agree = np.fromiter(
-                    (len(agreement_nodes) - len({v for v in r if v >= 0}) for r in argstack),
+                    (len(idxs) - len({v for v in r if v >= 0}) for r in argstack),
                     dtype=np.float64,
                     count=argstack.shape[0],
                 )
                 data["n_signal_agreement"] = n_agree[rows]
+                agreement_voters = len(idxs)
 
         # Any signal provider beyond the two built-ins ("dense"/"lexical") may
         # contribute columns outside FEATURE_NAMES; append them in provider
@@ -465,6 +473,10 @@ class FeatureAssembler:
         df["candidate"] = cols.astype(np.int64)
         if labels is not None:
             df["is_true"] = (cols == labels[rows]).astype(np.int64)
+        if agreement_voters is not None:
+            # How many signals voted, so a reader of `n_signal_agreement` can
+            # turn it back into "distinct top classes" (see signal_report).
+            df.attrs["agreement_voters"] = agreement_voters
         return df
 
     def _provider_columns(self, providers, texts, q_emb, rows, cols, needed=None) -> dict:
