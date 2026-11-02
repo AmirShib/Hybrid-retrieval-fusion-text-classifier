@@ -8,6 +8,8 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-02
+
 ### Added
 - **Learned-sparse (SPLADE) retrieval signal (T94).** Add `"splade"` to
   `signals` to get a sixth, round-one signal: a masked-language model's
