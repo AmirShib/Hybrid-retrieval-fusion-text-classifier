@@ -394,3 +394,47 @@ def test_signal_report_uses_the_recorded_voter_count():
     rep = signal_report(df)["agreement"]
     assert rep["mean_distinct_top_classes"] == pytest.approx((1 + 4) / 2)
     assert rep["consensus_rate"] == pytest.approx(0.5)
+
+
+# ---------------------------------------------------------------- per-candidate votes
+@pytest.mark.parametrize("signals", [["dense", "lexical"], ["dense", "lexical", "splade"]])
+def test_top1_votes_count_the_signals_that_picked_this_candidate(signals):
+    _, frame = _oof_frame(signals)
+    top1_cols = [c for c in frame.columns if c.startswith("is_") and c.endswith("_top1")]
+    expected = frame[top1_cols].sum(axis=1).to_numpy()
+    assert np.array_equal(frame["n_top1_votes"].to_numpy(), expected)
+    assert frame["n_top1_votes"].max() <= frame.attrs["agreement_voters"]
+
+
+def test_reranker_does_not_vote():
+    _, frame = _oof_frame(["dense", "splade", "cross-encoder"])
+    voting = [
+        c
+        for c in frame.columns
+        if c.startswith("is_") and c.endswith("_top1") and not c.startswith("is_ce_")
+    ]
+    assert np.array_equal(frame["n_top1_votes"].to_numpy(), frame[voting].sum(axis=1).to_numpy())
+
+
+def test_model_saved_before_the_votes_column_still_loads_and_scores(tmp_path):
+    """Simulate a pre-upgrade model: trained without the column, and with no
+    mention of it in its config (old code had never heard of it)."""
+    cfg = PipelineConfig()
+    cfg.fusion.drop_features = ["n_top1_votes"]
+    artifacts, _, items, _ = _train(cfg)
+    model_dir = str(tmp_path / "old_model")
+    ArtifactRepository().save(artifacts, model_dir)
+    meta_path = os.path.join(model_dir, "meta.json")
+    with open(meta_path) as fh:
+        meta = json.load(fh)
+    assert "n_top1_votes" not in meta["feature_names"]
+    meta["config"]["fusion"]["drop_features"] = []
+    with open(meta_path, "w") as fh:
+        json.dump(meta, fh)
+
+    texts = [it.text for it in items[:12]]
+    before = InferencePipeline(artifacts).predict(texts)
+    loaded = ArtifactRepository().load(model_dir)
+    after = InferencePipeline(loaded).predict(texts)
+    assert [p.top_key for p in before] == [p.top_key for p in after]
+    assert np.allclose([p.confidence for p in before], [p.confidence for p in after])

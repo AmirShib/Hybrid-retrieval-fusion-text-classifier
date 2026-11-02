@@ -45,6 +45,7 @@ from ..domain import (
     LexicalRetriever,
     SignalProvider,
     TextEncoder,
+    LEGACY_ABSENT_FEATURES,
     fusion_feature_names,
 )
 from .registry import (
@@ -608,12 +609,22 @@ class ArtifactRepository:
         schema_signal_providers = build_signal_providers(
             config.retrieval, components["signals"], None, None, None
         )
-        self._check_feature_schema(
-            meta.get("feature_names"),
-            fusion_feature_names(
-                feature_providers, config.fusion.drop_features, schema_signal_providers
-            ),
+        expected = fusion_feature_names(
+            feature_providers, config.fusion.drop_features, schema_signal_providers
         )
+        saved_names = meta.get("feature_names")
+        # A model saved before a core column existed (LEGACY_ABSENT_FEATURES) was,
+        # in effect, trained with it dropped. Only when treating it that way makes
+        # the saved schema match exactly do we adopt it; any other mismatch is
+        # real drift and is reported against the current schema below.
+        legacy = [n for n in LEGACY_ABSENT_FEATURES if n in expected]
+        if saved_names is not None and saved_names != expected and legacy:
+            drop = [*config.fusion.drop_features, *legacy]
+            as_legacy = fusion_feature_names(feature_providers, drop, schema_signal_providers)
+            if saved_names == as_legacy:
+                config.fusion.drop_features = drop
+                expected = as_legacy
+        self._check_feature_schema(saved_names, expected)
 
         label_space = LabelSpace([_class_from_meta(c) for c in meta["classes"]])
 

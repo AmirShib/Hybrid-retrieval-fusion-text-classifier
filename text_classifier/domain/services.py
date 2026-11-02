@@ -78,7 +78,19 @@ FEATURE_NAMES: List[str] = [
     "q_gap_d_desc",
     "q_gap_d_knn",
     "q_gap_b_desc",
+    # ``n_top1_votes`` (T94): how many round-one signals picked *this* candidate
+    # as their top-1 class -- the per-candidate counterpart of the per-query
+    # ``n_signal_agreement``. Same voters (every round-one top-1 pick; the
+    # reranker does not vote) and same presence rule (>= 2 round-one signals).
+    # Last in the list, and treated as dropped when loading a model saved before
+    # it existed (``LEGACY_ABSENT_FEATURES``), so older models score unchanged.
+    "n_top1_votes",
 ]
+
+# Core columns added after models were already in the field. A saved model whose
+# ``meta.json`` lacks one of these is loaded as if it had been trained with that
+# column in ``fusion.drop_features`` -- which is exactly how it was trained.
+LEGACY_ABSENT_FEATURES = ("n_top1_votes",)
 
 
 # What each core column (or intermediate) is built from (T87). Intermediates are
@@ -128,6 +140,14 @@ FEATURE_DEPS: Dict[str, Tuple[str, ...]] = {
     "norm_d_desc": ("dense.desc", "candidates"),
     "norm_b_desc": ("bm25.desc", "candidates"),
     "n_signal_agreement": (
+        "dense.desc",
+        "dense.proto",
+        "bm25.desc",
+        "dense.knn",
+        "bm25.knn",
+        "candidates",
+    ),
+    "n_top1_votes": (
         "dense.desc",
         "dense.proto",
         "bm25.desc",
@@ -196,7 +216,11 @@ def core_feature_names(
     return [
         n
         for n in FEATURE_NAMES
-        if (voters >= 2 if n == "n_signal_agreement" else _direct_signal_reqs(n) <= active)
+        if (
+            voters >= 2
+            if n in ("n_signal_agreement", "n_top1_votes")
+            else _direct_signal_reqs(n) <= active
+        )
     ]
 
 

@@ -28,6 +28,11 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
   cross-encoder does not), and the column is kept whenever at least two round-one
   signals are configured. Values for the default dense + BM25 config are
   unchanged, so existing models load and score identically.
+- **New feature `n_top1_votes`: how many shortlist-building signals picked
+  *this* candidate as their top class (T94).** The per-candidate counterpart of
+  `n_signal_agreement` (which is one value per item). Same voters, same
+  presence rule. Models saved before it existed load as if trained with it in
+  `fusion.drop_features` (which is how they were trained) and score unchanged.
 
 ## [0.2.0] - 2026-11-02
 

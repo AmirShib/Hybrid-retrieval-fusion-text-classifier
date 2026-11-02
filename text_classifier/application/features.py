@@ -423,6 +423,18 @@ class FeatureAssembler:
                 data["desc_proto_gap"] = g(dd.value) - g(dp.value)
         if _want("class_log_freq"):
             data["class_log_freq"] = self._ops.log1p(class_freq[cols].astype(np.float64))
+        if _want("n_top1_votes"):
+            # Per candidate: how many round-one top-1 picks name this class.
+            picks = [
+                top1
+                for node in round_one_nodes
+                if (top1 := sig_matrices[node].top1_idx) is not None
+            ]
+            if len(picks) >= 2:
+                votes = np.zeros(rows.shape[0], dtype=np.float64)
+                for top1 in picks:
+                    votes += cols == np.asarray(top1)[rows]
+                data["n_top1_votes"] = votes
         if _want("n_signal_agreement"):
             # Every *round-one* matrix with a top1 pick votes (T94): the five
             # built-in nodes by default -- exactly the old fixed list, so the

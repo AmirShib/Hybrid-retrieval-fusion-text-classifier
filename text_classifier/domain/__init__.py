@@ -34,6 +34,7 @@ from .services import (
     ThresholdTuner,
     composed_feature_names,
     feature_closure,
+    LEGACY_ABSENT_FEATURES,
     fusion_feature_names,
 )
 
@@ -60,6 +61,7 @@ __all__ = [
     "FEATURE_NAMES",
     "FEATURE_DEPS",
     "composed_feature_names",
+    "LEGACY_ABSENT_FEATURES",
     "fusion_feature_names",
     "feature_closure",
     "CandidatePolicy",
