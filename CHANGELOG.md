@@ -54,6 +54,13 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
   unchanged; no torch is imported either way.
 
 ### Fixed
+- **Possible segfault when training on macOS.** On Macs using Homebrew's libomp,
+  importing torch before xgboost makes xgboost's first `fit()` crash
+  (`OMP: Error #179`). A normal training run does exactly that, because the
+  sentence-transformers encoder loads torch before the fusion model loads xgboost;
+  only the test suite was protected. The package now imports xgboost when it loads.
+  This can't help if your own code imports torch before `text_classifier`. Linux is
+  unaffected (checked on two torch/xgboost version pairs).
 - **Rank features no longer depend on the CPU.** `ArrayOps.argsort` used numpy's
   default sort, which is neither stable nor portable: numpy 2.x dispatches it to
   CPU-specific SIMD kernels (AVX2/AVX-512, NEON), so tied scores — common with

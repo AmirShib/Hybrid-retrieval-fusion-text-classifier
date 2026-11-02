@@ -94,6 +94,28 @@ verification that didn't happen. Also unmeasured: whether this dev host's
 torch↔xgboost OpenMP conflict reproduces on the reference platform (Linux
 x86_64) — flagged, not assumed either way.
 
+## Progress (2026-11-02)
+
+- **torch↔xgboost OpenMP conflict: does not reproduce on Linux x86_64.** Checked
+  with torch imported first and an xgboost `fit()` after it, on two version pairs:
+  torch 2.12.1 (CPU) + xgboost 3.2.0 (the hash-locked environment) and torch
+  2.15 (CUDA build) + xgboost 3.4.1. Both fit cleanly.
+- **The macOS crash was reachable in production, not just in tests.** The fusion
+  model imports xgboost lazily, while the sentence-transformers encoder imports
+  torch earlier in a training run, which is exactly the crashing order;
+  `tests/conftest.py`'s fix only covered the test suite. `text_classifier/__init__.py`
+  now imports xgboost first (guarded by `tests/test_xgboost_import_order.py`,
+  which also asserts the package import still pulls in no torch). Unverifiable on
+  macOS from a Linux host; it is the same fix that works there for the tests.
+- **Rank kernels are now tie-deterministic** (`ArrayOps.argsort` is stable on both
+  backends, and the port contract requires it), which removes one source of
+  numpy↔torch drift on top of the CPU-dependence it was fixed for.
+- **Default stays `array_backend="auto"`** (decided 2026-11-02): the torch path
+  is parity-tested on CPU and only engages at large scale with a CUDA device.
+- **Still open, needs the owner's GPU host:** the device-parity test on real
+  CUDA, and `scripts/profile_devices` (transfer counts, VRAM vs `feature_chunk`).
+  The unchecked acceptance criteria below stay unchecked until those results are in.
+
 ## Sequencing decided 2026-08-04
 **T63 (torch-optional core) lands first.** This ticket adds a torch-dependent
 array backend, and T63 is the ticket that establishes where torch is allowed to
