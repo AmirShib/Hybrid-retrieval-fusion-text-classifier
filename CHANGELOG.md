@@ -8,6 +8,8 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-02
+
 ### Added
 - **A real cross-encoder backend for the rerank signal, with optional per-fold
   fine-tuning (T33 phase 3).** `retrieval.cross_encoder.kind = "cross-encoder"`
