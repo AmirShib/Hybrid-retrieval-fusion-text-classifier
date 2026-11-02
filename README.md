@@ -545,6 +545,84 @@ each time.
 Use `--in-place` to overwrite `--model` directly instead of writing a new
 directory.
 
+### Cross-encoder reranking (optional second stage)
+
+Off by default. When switched on, a cross-encoder reads each item *together with*
+a candidate class's text and scores the pair. That is more accurate than comparing
+two independently computed embeddings, and much more expensive, so it runs only on
+the round-one shortlist and can only **reorder** it, never add a class to it:
+candidate recall stays a property of round one.
+
+```json
+{
+  "signals": ["dense", "lexical", "cross-encoder"],
+  "retrieval": {
+    "cross_encoder": {
+      "kind": "cross-encoder",
+      "model_name": "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+      "params": {"max_length": 256}
+    }
+  }
+}
+```
+
+Pass that with `--config`. There is deliberately **no default model**: pick one that
+reads your language. For a non-English taxonomy use a multilingual reranker, e.g.
+`cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` (small) or `BAAI/bge-reranker-v2-m3`
+(large, stronger). The model must output one relevance score per pair.
+
+**What it scores.** For each item, the 10 shortlisted classes ranked best by the
+description similarity (`documents[].top_k`, `prescore_node`) are scored against two
+documents built from the class's structured taxonomy fields:
+
+- `pos`: the class definition plus the example most like the item;
+- `neg`: the exclusion or sibling note most like the item.
+
+That adds 15 feature columns (raw score, missing flag, rank, normalised score,
+margin, top1-top2 gap and top-1 flag per document, plus `ce_pos_neg_gap`: "fits the
+definition, but fits what it excludes better"). Classes outside the 10 get NaN,
+never 0. The `neg` document only does something if your classes carry
+`exclusions` / `sibling_distinctions` (see the structured class columns); without
+them its columns are all NaN, which is harmless but adds nothing.
+
+**Fine-tuning it on your data.** Add `"train": true` to `cross_encoder`:
+
+```json
+"cross_encoder": {
+  "kind": "cross-encoder",
+  "model_name": "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+  "train": true,
+  "train_loss": "binary_cross_entropy",
+  "train_negatives": 9,
+  "train_epochs": 1,
+  "learning_rate": 2e-5
+}
+```
+
+Training data is mined from each item's own round-one shortlist (computed
+leave-one-out, so the item never retrieves itself): the true class is the positive
+and the other shortlisted classes, hardest first, are the negatives. These are
+exactly the decisions the reranker faces at inference. `train_loss` is
+`binary_cross_entropy` (pointwise, positives up-weighted) or a listwise `lambda` /
+`listnet`.
+
+To stay leakage-free, a **fresh copy** of `model_name` is fine-tuned per fold on
+that fold's training items only, and once more on all items for the model that
+ships. No item is ever scored by a model that trained on its label. That means
+`n_folds + 1` fine-tunes per run, so it is practical on a GPU; it needs k-fold
+training (`n_folds >= 2`) and sentence-transformers >= 4.0.
+
+**Deployment.** The cross-encoder's weights (pretrained or fine-tuned) are saved
+into `model_dir/signals/cross-encoder/` as safetensors and loaded from there, so the
+deployed model works offline. Expect the model directory to grow by the reranker's
+size (about 100 MB for a MiniLM-sized model, over 1 GB for `bge-reranker-v2-m3`).
+
+**Cost.** About 20 cross-encoder calls per item (10 candidates × 2 documents)
+every time an item is scored, in training and at inference. On a GPU that is fine;
+on a CPU with a large corpus it will be the slowest stage by far. `top_k` and the
+document list are the levers. `cross_encoder.device` follows the same
+auto-detection as the encoder.
+
 ### Worked examples
 
 The two demos behind the [Results](#what-it-looks-like-in-practice) table, each

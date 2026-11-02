@@ -68,7 +68,11 @@ from .fusion import (
     XGBoostFusionModel,
     XGBRankerFusionModel,
 )
-from .reranker import CrossEncoderSignalProvider, TokenOverlapReranker
+from .reranker import (
+    CrossEncoderSignalProvider,
+    SentenceTransformersCrossEncoder,
+    TokenOverlapReranker,
+)
 from .retrieval import DenseRetrieverAdapter, LexicalRetrieverAdapter
 from .signals import DenseSignalProvider, LexicalSignalProvider
 
@@ -628,6 +632,18 @@ register_reranker(
         # test suite and `scripts/demo` exercise the second stage with.
         build=lambda cfg: TokenOverlapReranker(),
         load=lambda path, cfg: TokenOverlapReranker.load(path),
+    ),
+)
+
+register_reranker(
+    "cross-encoder",
+    RerankerSpec(
+        # T33 phase 3: a real sentence-transformers CrossEncoder (lazy import --
+        # registering it never imports torch). `build` loads `model_name`;
+        # `load` reads the weights the model dir carries, never the Hub, so a
+        # deployed model works offline and a fine-tuned one reloads as trained.
+        build=SentenceTransformersCrossEncoder.from_config,
+        load=lambda path, cfg: SentenceTransformersCrossEncoder.load(path, config=cfg),
     ),
 )
 

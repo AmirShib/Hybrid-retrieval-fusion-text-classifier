@@ -2,9 +2,11 @@
 
 Three things live here, in dependency order:
 
-1. ``TokenOverlapReranker`` — a ``PairwiseReranker`` that needs no model and no
-   network, so the whole path is exercised offline and in CI. The reranker
-   analogue of ``HashingEncoder``.
+1. The ``PairwiseReranker`` backends. ``TokenOverlapReranker`` needs no model and
+   no network, so the whole path is exercised offline and in CI (the reranker
+   analogue of ``HashingEncoder``). ``SentenceTransformersCrossEncoder`` is the
+   real one (T33 phase 3), with ``train_cross_encoder`` to fine-tune it on lists
+   mined by ``mine_training_lists`` from round-one shortlists.
 2. Evidence rendering — turning a ``ClassDefinition`` plus an ``EvidenceSpec``
    list into the document text a pair is scored against, with per-query
    selection among a view's entries.
@@ -24,9 +26,13 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+import logging
+import shutil
+import tempfile
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
+import pandas as pd
 
 from ..config import CrossEncoderConfig, CrossEncoderDocument, EvidenceSpec
 from ..domain import (
@@ -38,6 +44,7 @@ from ..domain import (
     SignalProvider,
 )
 from .array_ops import NumpyArrayOps
+from .device import resolve_device
 from .signals import _argmax_or_missing, _topn_mask
 
 
@@ -81,6 +88,270 @@ class TokenOverlapReranker(PairwiseReranker):
     @classmethod
     def load(cls, path: str, **kwargs) -> "TokenOverlapReranker":
         return cls()
+
+
+logger = logging.getLogger(__name__)
+
+
+# ------------------------------------------------------ real cross-encoder
+_CE_MODULES = ("sentence_transformers.cross_encoder",)
+
+
+def _require_cross_encoder() -> Any:
+    """``sentence_transformers.cross_encoder.CrossEncoder``, or the same actionable
+    install error the encoder raises (the extra is optional, T63)."""
+    from .encoder import _import_first, _require_sentence_transformers
+
+    _require_sentence_transformers()
+    return _import_first(_CE_MODULES, "CrossEncoder")
+
+
+def _identity_activation() -> Any:
+    import torch
+
+    return torch.nn.Identity()
+
+
+class SentenceTransformersCrossEncoder(PairwiseReranker):
+    """A sentence-transformers ``CrossEncoder`` behind the ``PairwiseReranker`` port.
+
+    ``score`` returns **raw logits**, as the port requires: the fusion model learns
+    the scale and the isotonic stage calibrates. That is forced explicitly with an
+    identity activation, because ``CrossEncoder.predict``'s default differs by
+    version -- 5.6+ applies a sigmoid to single-label models, 5.2 does not -- so
+    leaving it to the default would make the same model's features depend on the
+    installed library.
+
+    Persistence writes the model itself (safetensors + config + tokenizer) into
+    the model directory, and ``load`` reads only from there, so a deployed model
+    works on an air-gapped host and loading it never executes embedded code.
+    """
+
+    def __init__(self, model: Any, batch_size: int = 32):
+        labels = getattr(getattr(model, "config", None), "num_labels", 1)
+        if labels != 1:
+            raise ValueError(
+                f"cross-encoder model has num_labels={labels}; the rerank signal needs a "
+                "single relevance score per pair (num_labels=1), e.g. an ms-marco- or "
+                "bge-reranker-style model"
+            )
+        self._model = model
+        self._batch_size = batch_size
+
+    @property
+    def model(self) -> Any:
+        return self._model
+
+    @classmethod
+    def from_config(cls, config: CrossEncoderConfig) -> "SentenceTransformersCrossEncoder":
+        return cls._load(config.model_name, config)
+
+    @classmethod
+    def _load(cls, path: str, config: CrossEncoderConfig) -> "SentenceTransformersCrossEncoder":
+        CrossEncoder = _require_cross_encoder()
+        device = resolve_device(config.device, mps_ok=True)
+        logger.info("loading cross-encoder %s on device=%s", path, device)
+        return cls(CrossEncoder(path, device=device, **config.params), config.batch_size)
+
+    def score(self, pairs: Sequence[Tuple[str, str]]) -> np.ndarray:
+        if not pairs:
+            return np.empty(0, dtype=np.float32)
+        out = self._model.predict(
+            [list(p) for p in pairs],
+            batch_size=self._batch_size,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+            activation_fn=_identity_activation(),
+        )
+        return np.asarray(out, dtype=np.float32).reshape(-1)
+
+    def save(self, directory: str) -> None:
+        os.makedirs(directory, exist_ok=True)
+        self._model.save(directory)
+        with open(os.path.join(directory, "reranker.json"), "w") as fh:
+            json.dump({"kind": "cross-encoder"}, fh)
+
+    @classmethod
+    def load(cls, path: str, **kwargs) -> "SentenceTransformersCrossEncoder":
+        config = kwargs.get("config") or CrossEncoderConfig(kind="cross-encoder", model_name=path)
+        return cls._load(path, config)
+
+
+# ------------------------------------------------------ fine-tuning (phase 3)
+# Built-in round-one nodes -> the raw column that ranks a shortlist by them.
+# Used only to order hard negatives "hardest first"; any other prescore node
+# falls back to a seeded shuffle, which is still drawn from the shortlist.
+_PRESCORE_COLUMN = {
+    "dense.desc": "d_desc_sim",
+    "dense.proto": "d_proto_sim",
+    "dense.knn": "d_knn_sum",
+    "bm25.desc": "b_desc_sim",
+    "bm25.knn": "b_knn_sum",
+}
+
+
+def prescore_column(node: str) -> Optional[str]:
+    """The feature column that ranks candidates by round-one node ``node``."""
+    return _PRESCORE_COLUMN.get(node)
+
+
+def mine_training_lists(
+    shortlist: pd.DataFrame,
+    true_class: np.ndarray,
+    n_negatives: int,
+    order_column: Optional[str] = None,
+    seed: int = 0,
+) -> List[Tuple[int, int, List[int]]]:
+    """``(item, positive class, negative classes)`` per item, from its shortlist.
+
+    ``shortlist`` is a round-one feature frame (``item_id``/``candidate`` rows) for
+    the items being trained on, computed leave-one-out so no item retrieved
+    itself. The positive is the item's true class -- always, even when round one
+    missed it, since the reranker should learn what the right answer looks like.
+    Negatives are the other shortlisted classes: hardest first by
+    ``order_column`` when given (the candidates the prescore ranked highest are
+    the ones the reranker will have to beat), else a seeded shuffle; capped at
+    ``n_negatives``. An item whose shortlist holds nothing but its true class has
+    no negatives and is skipped."""
+    rng = np.random.default_rng(seed)
+    out: List[Tuple[int, int, List[int]]] = []
+    if shortlist.empty:
+        return out
+    for item, group in shortlist.groupby("item_id", sort=True):
+        item_i = int(item)
+        positive = int(true_class[item_i])
+        negs = group[group["candidate"].to_numpy() != positive]
+        if negs.empty:
+            continue
+        if order_column is not None and order_column in negs.columns:
+            scores = negs[order_column].to_numpy(dtype=np.float64)
+            scores = np.where(np.isnan(scores), -np.inf, scores)
+            order = np.argsort(-scores, kind="stable")
+        else:
+            order = rng.permutation(len(negs))
+        cands = negs["candidate"].to_numpy()[order][:n_negatives]
+        out.append((item_i, positive, [int(c) for c in cands]))
+    return out
+
+
+def training_examples(
+    lists: Sequence[Tuple[int, int, List[int]]],
+    texts: Sequence[str],
+    definitions: Sequence[ClassDefinition],
+    document: CrossEncoderDocument,
+) -> List[Tuple[str, str, List[str]]]:
+    """Render mined lists into ``(query, positive doc, negative docs)`` text.
+
+    Uses the same evidence rendering as scoring -- including query-adaptive
+    selection -- so the model is trained on exactly the documents it will see. A
+    class with no text for ``document`` renders ``""``; such a negative is dropped,
+    and an item whose positive renders empty is skipped (nothing to learn)."""
+    out: List[Tuple[str, str, List[str]]] = []
+    for item, positive, negatives in lists:
+        query = texts[item]
+        q_tokens = _tokens(query)
+        pos_doc = _render(definitions[positive], document, q_tokens)
+        if not pos_doc:
+            continue
+        neg_docs = [
+            d for d in (_render(definitions[c], document, q_tokens) for c in negatives) if d
+        ]
+        if neg_docs:
+            out.append((query, pos_doc, neg_docs))
+    return out
+
+
+def _train_dataset_and_loss(
+    model: Any, examples: Sequence[Tuple[str, str, List[str]]], loss_name: str
+) -> Tuple[Any, Any]:
+    from datasets import Dataset
+
+    from .encoder import _import_first
+
+    losses = "sentence_transformers.cross_encoder.losses"
+    if loss_name == "binary_cross_entropy":
+        query, doc, label = [], [], []
+        for q, pos, negs in examples:
+            query.extend([q] * (1 + len(negs)))
+            doc.extend([pos, *negs])
+            label.extend([1.0] + [0.0] * len(negs))
+        import torch
+
+        # Each item contributes one positive and several negatives; weight the
+        # positives up so the objective is not dominated by "say no".
+        n_pos = sum(1 for v in label if v == 1.0)
+        pos_weight = torch.tensor(max((len(label) - n_pos) / max(n_pos, 1), 1.0))
+        loss = _import_first((losses,), "BinaryCrossEntropyLoss")(model, pos_weight=pos_weight)
+        return Dataset.from_dict({"query": query, "doc": doc, "label": label}), loss
+    cls_name = {"lambda": "LambdaLoss", "listnet": "ListNetLoss"}[loss_name]
+    dataset = Dataset.from_dict(
+        {
+            "query": [q for q, _, _ in examples],
+            "docs": [[pos, *negs] for _, pos, negs in examples],
+            "labels": [[1] + [0] * len(negs) for _, _, negs in examples],
+        }
+    )
+    return dataset, _import_first((losses,), cls_name)(model)
+
+
+def train_cross_encoder(
+    reranker: SentenceTransformersCrossEncoder,
+    examples: Sequence[Tuple[str, str, List[str]]],
+    config: CrossEncoderConfig,
+) -> SentenceTransformersCrossEncoder:
+    """Fine-tune ``reranker``'s model in place on ``examples`` and return it.
+
+    The caller is responsible for *what* it trains on: in ``TrainingPipeline``
+    that is one fold's training items only, on a fresh copy of ``model_name``,
+    so no held-out item is ever scored by a model that saw its label. Runs a
+    ``CrossEncoderTrainer`` (sentence-transformers >= 4.0) with nothing written
+    outside a temporary directory and nothing reported anywhere."""
+    from .encoder import _device_notes, _import_first, _warmup_kwargs, _with_save_safetensors
+
+    if not examples:
+        logger.warning("cross-encoder fine-tuning skipped: no training lists could be mined")
+        return reranker
+    try:
+        trainer_cls = _import_first(_CE_MODULES, "CrossEncoderTrainer")
+        args_cls = _import_first(_CE_MODULES, "CrossEncoderTrainingArguments")
+    except ImportError as exc:
+        import sentence_transformers
+
+        raise ImportError(
+            "retrieval.cross_encoder.train needs sentence-transformers>=4.0 (its "
+            f"CrossEncoderTrainer); found {sentence_transformers.__version__}. Scoring "
+            "with a pretrained cross-encoder works on older versions."
+        ) from exc
+    _device_notes(config)
+    dataset, loss = _train_dataset_and_loss(reranker.model, examples, config.train_loss)
+    logger.info(
+        "fine-tuning cross-encoder on %d item(s) (%d pair(s)), loss=%s, %d epoch(s)",
+        len(examples),
+        sum(1 + len(n) for _, _, n in examples),
+        config.train_loss,
+        config.train_epochs,
+    )
+    work_dir = tempfile.mkdtemp(prefix="tc-cross-encoder-train-")
+    try:
+        kwargs: Dict[str, Any] = {
+            "output_dir": work_dir,
+            "num_train_epochs": config.train_epochs,
+            "per_device_train_batch_size": config.train_batch_size,
+            "learning_rate": config.learning_rate,
+            "weight_decay": config.weight_decay,
+            "report_to": "none",
+            "disable_tqdm": True,
+            "logging_strategy": "no",
+            "save_strategy": "no",
+            **_warmup_kwargs(config.warmup_ratio),
+        }
+        if config.device == "cpu":
+            kwargs["use_cpu"] = True
+        args = _with_save_safetensors(args_cls(**kwargs))
+        trainer_cls(model=reranker.model, args=args, train_dataset=dataset, loss=loss).train()
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+    return reranker
 
 
 # --------------------------------------------------------------- evidence
@@ -202,6 +473,16 @@ class CrossEncoderSignalProvider(SignalProvider):
         self._reranker = reranker
         self._cfg = config or CrossEncoderConfig()
         self._ops = ops or NumpyArrayOps()
+
+    @property
+    def reranker(self) -> PairwiseReranker:
+        """The backend this provider scores with (fine-tuned in place per fold
+        by ``TrainingPipeline`` when ``cross_encoder.train`` is on)."""
+        return self._reranker
+
+    @property
+    def config(self) -> CrossEncoderConfig:
+        return self._cfg
 
     # ---- schema -----------------------------------------------------------
     def candidate_features(self) -> Sequence[str]:

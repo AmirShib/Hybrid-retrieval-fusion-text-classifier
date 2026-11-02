@@ -58,6 +58,14 @@ from ..infrastructure import (
     resolve_array_backend,
 )
 from ..infrastructure.array_ops import NumpyArrayOps
+from ..infrastructure.reranker import (
+    CrossEncoderSignalProvider,
+    SentenceTransformersCrossEncoder,
+    mine_training_lists,
+    prescore_column,
+    train_cross_encoder,
+    training_examples,
+)
 from .evaluation import build_manifest, evaluate_decisions, write_evaluation_artifacts
 from .features import FeatureAssembler
 from .indexing import RetrievalIndexBuilder
@@ -505,6 +513,76 @@ class TrainingPipeline:
             provider.fit(fold_items, label_space)
         return providers
 
+    def _fit_cross_encoder(
+        self,
+        signal_providers: Sequence[SignalProvider],
+        rows: np.ndarray,
+        texts: List[str],
+        y: np.ndarray,
+        label_space: LabelSpace,
+        encoder: TextEncoder,
+        dense: DenseRetriever,
+        lexical: Optional[LexicalRetriever],
+        indexes: RetrievalIndexBuilder,
+    ) -> None:
+        """Fine-tune the cross-encoder in ``signal_providers`` on ``rows`` (T33).
+
+        No-op unless ``retrieval.cross_encoder.train`` is on. The provider's
+        reranker was just built fresh from ``model_name`` for this split, so each
+        fold trains its own copy and never inherits a model that saw the items it
+        is about to score.
+
+        Training lists come from each row's own round-one shortlist, computed
+        leave-one-out against the index built over ``rows`` (``self_ids``: the
+        row never retrieves itself as a neighbour, and its own vector is left out
+        of its class prototype) -- the same shortlists the reranker will face at
+        inference, minus the leak."""
+        ce_cfg = self.cfg.retrieval.cross_encoder
+        if not ce_cfg.train:
+            return
+        assert self.assembler is not None
+        provider = next(
+            (p for p in signal_providers if isinstance(p, CrossEncoderSignalProvider)), None
+        )
+        if provider is None:
+            return
+        reranker = provider.reranker
+        if not isinstance(reranker, SentenceTransformersCrossEncoder):
+            raise TypeError(
+                "retrieval.cross_encoder.train needs the trainable 'cross-encoder' backend; "
+                f"got {type(reranker).__name__}"
+            )
+        round_one = [p for p in signal_providers if not getattr(p, "needs_candidates", False)]
+        order_col = prescore_column(ce_cfg.prescore_node)
+        row_texts = [texts[int(i)] for i in rows]
+        local = np.arange(len(rows))
+        shortlist = self.assembler.assemble(
+            row_texts,
+            indexes.query_embeddings(encoder, rows),
+            dense,
+            lexical,
+            self.cfg.retrieval.k_neighbors,
+            query_ids=local,
+            query_labels=y[rows],
+            chunk=self.cfg.retrieval.feature_chunk,
+            self_ids=local,
+            requested=[order_col] if order_col else None,
+            signal_providers=round_one,
+        )
+        lists = mine_training_lists(
+            shortlist,
+            y[rows],
+            ce_cfg.train_negatives,
+            order_column=order_col,
+            seed=self.cfg.training.random_state,
+        )
+        document = next(d for d in ce_cfg.documents if d.name == ce_cfg.train_document)
+        examples = training_examples(lists, row_texts, label_space.definitions, document)
+        log.info(
+            "cross-encoder: mined %d training list(s) from %d row(s)", len(examples), len(rows)
+        )
+        train_cross_encoder(reranker, examples, ce_cfg)
+
     def _build_oof(self, texts: List[str], y: np.ndarray, label_space: LabelSpace) -> pd.DataFrame:
         assert self.assembler is not None  # set in run() before this is called
         indexes = self._index_builder(texts, y, label_space)
@@ -527,6 +605,11 @@ class TrainingPipeline:
             # -- built fresh per fold, exactly like `dense`/`lexical` above).
             signal_providers = build_signal_providers(
                 self.cfg.retrieval, self.cfg.signals, dense, lexical, self._assembler_ops
+            )
+            # T33 phase 3: fine-tune this fold's (fresh) cross-encoder on this
+            # fold's training rows only, before it scores the held-out rows.
+            self._fit_cross_encoder(
+                signal_providers, tr, texts, y, label_space, enc, dense, lexical, indexes
             )
             # T87: request only the columns the fusion model will actually be
             # fitted on. This is the accepted diagnostic-narrowing trade —
@@ -815,6 +898,20 @@ class TrainingPipeline:
         # same objects `_featurize_external`/the returned `DeployedArtifacts` use).
         self._signal_providers = build_signal_providers(
             self.cfg.retrieval, self.cfg.signals, dense, lexical, self._assembler_ops
+        )
+        # T33 phase 3: the shipped cross-encoder is fine-tuned on all rows. It
+        # scores only external val/test and new data, never these rows' features
+        # (those came from the per-fold models), so this is leakage-free.
+        self._fit_cross_encoder(
+            self._signal_providers,
+            np.arange(len(texts)),
+            texts,
+            y,
+            label_space,
+            encoder,
+            dense,
+            lexical,
+            indexes,
         )
         self._feature_names = fusion_feature_names(
             self._providers, self.cfg.fusion.drop_features, self._signal_providers

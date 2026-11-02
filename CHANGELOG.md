@@ -9,6 +9,28 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 ## [Unreleased]
 
 ### Added
+- **A real cross-encoder backend for the rerank signal, with optional per-fold
+  fine-tuning (T33 phase 3).** `retrieval.cross_encoder.kind = "cross-encoder"`
+  wraps a sentence-transformers `CrossEncoder` (`model_name` required; no default,
+  since the right model depends on your language; extra constructor args via
+  `params`, e.g. `max_length`). Scores are the model's raw logits, forced
+  explicitly because `CrossEncoder.predict`'s default activation differs between
+  versions (5.6+ applies a sigmoid, 5.2 does not). The weights are saved into the
+  model dir as safetensors and reloaded from there, so deployed models work
+  offline. `device` follows the encoder's auto-detection.
+
+  With `cross_encoder.train = true`, a fresh copy of the model is fine-tuned per
+  fold on that fold's training items only, and once more on all items for the
+  shipped model, so no item is scored by a model that saw its label. Training
+  lists are mined from each item's own round-one shortlist, computed leave-one-out
+  (true class positive, other shortlisted classes negative, hardest first by
+  `prescore_node`), rendered with `train_document` (default `pos`). Losses:
+  `binary_cross_entropy` (positives up-weighted), `lambda`, `listnet`. New fields:
+  `train`, `train_document`, `train_negatives`, `train_loss`, `train_epochs`,
+  `train_batch_size`, `learning_rate`, `weight_decay`, `warmup_ratio`. Validation
+  rejects training on the leave-one-out path (`n_folds = 1`, which would leak),
+  without the signal configured, or with the token-overlap stand-in. Fine-tuning
+  needs sentence-transformers >= 4.0. Tested offline on 6.2.0, 5.6.0 and 5.2.0.
 - **Encoder fine-tune and model knobs, all defaulting to the old behaviour.**
   `encoder.learning_rate` (`2e-5`) and `encoder.weight_decay` (`0.01`) — the
   values `model.fit` used — are now configurable. `encoder.max_seq_length` sets the

@@ -840,20 +840,27 @@ def _training_arguments(
                 "save_only_model": True,
             }
         )
-    args = args_cls(**kwargs)
+    return _with_save_safetensors(args_cls(**kwargs))
+
+
+def _with_save_safetensors(args: Any) -> Any:
+    """Supply ``save_safetensors`` on Trainer arguments that lack it.
+
+    transformers 5 dropped this argument (it always writes safetensors), but
+    sentence-transformers up to at least 5.2 still reads it when it saves a
+    checkpoint or the final model -- which best-epoch selection does every epoch.
+    Without it, those fine-tunes die with an AttributeError. Safetensors is what
+    was being written anyway, so supplying the old default is faithful."""
     if not hasattr(args, "save_safetensors"):
-        # transformers 5 dropped this argument (it always writes safetensors), but
-        # sentence-transformers up to at least 5.2 still reads it when it saves a
-        # checkpoint -- which best-epoch selection does every epoch. Without it,
-        # every selecting fine-tune dies with an AttributeError. Safetensors is
-        # what was being written anyway, so supplying the old default is faithful.
         args.save_safetensors = True
     return args
 
 
-def _device_notes(config: EncoderConfig) -> None:
+def _device_notes(config: Any) -> None:
     """Warn about the two ways the Trainer's device handling differs from
-    ``SentenceTransformer(device=...)``, which this package used to rely on."""
+    ``SentenceTransformer(device=...)``, which this package used to rely on.
+    ``config`` is anything with a ``device`` (an EncoderConfig or a
+    CrossEncoderConfig -- both fine-tune through a Trainer)."""
     device = config.device
     if device and device.startswith("cuda:"):
         logger.warning(

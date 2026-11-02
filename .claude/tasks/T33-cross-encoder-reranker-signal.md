@@ -1,6 +1,6 @@
 # T33 — Cross-encoder rerank as a second-stage, multi-view signal
 
-status: in-progress (phase 1 + most of phase 2 landed; phase 3 open)
+status: in-review (phases 1-3 landed; cascade_from still open)
 tier: 3
 depends_on: T34 (phase 2), T87, d4109d9 (structured taxonomy fields)
 
@@ -494,3 +494,31 @@ benchmarking the quality gain against the five-signal baseline (T40/T82);
 hyperparameter search; using the cross-encoder as a standalone ranker instead of
 a feature; embedding-based evidence selection (§3); raising candidate recall —
 the shortlist remains the ceiling on accuracy and this ticket does not move it.
+
+
+## Progress (2026-11-02) — phase 3 implemented, plus fine-tuning
+
+- `SentenceTransformersCrossEncoder` (`infrastructure/reranker.py`), registered as
+  reranker kind `"cross-encoder"`. Raw logits forced via an identity activation
+  (the library default differs by version: 5.6+ sigmoid, 5.2 none). Saves the
+  model into `signals/cross-encoder/` (safetensors) and reloads from there.
+  Rejects multi-label models. `model_name` is required; no default.
+- **Fine-tuning (pulled forward from a planned phase 4 at the owner's request):**
+  `TrainingPipeline._fit_cross_encoder` runs per fold on that fold's training rows
+  (and on all rows for deployment). The provider's reranker is built fresh from
+  `model_name` for each split, so no fold inherits weights that saw its held-out
+  items. Lists are mined leave-one-out with `assemble(self_ids=...)` against the
+  split's own index, then rendered with the scoring path's own evidence renderer.
+  `CrossEncoderTrainer` with BCE / LambdaLoss / ListNetLoss. Leave-one-out training
+  (`n_folds = 1`) is rejected by validation.
+- Tests: `tests/unit/test_cross_encoder_mining.py` (pure pandas) and
+  `tests/unit/test_cross_encoder_backend.py` (real library, tiny local BERT):
+  raw-logit parity with transformers, batching/order, portable save/load, learning
+  to rank for each loss, and the pipeline's leakage rule (per-fold rows = the
+  fold's training rows; every fine-tune starts from the pretrained weights).
+- Lesson recorded in the tests: a 1-layer, 16-wide random BERT cannot learn
+  query/document interaction at all (a plain PyTorch loop collapses it to a
+  constant too), so learning is asserted on a 64-wide, 2-layer model only.
+
+Still open: `cascade_from`; best-epoch selection for the cross-encoder (the
+encoder has it, the cross-encoder trains a fixed number of epochs); GPU timing.

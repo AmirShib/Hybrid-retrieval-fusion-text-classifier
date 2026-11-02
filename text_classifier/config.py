@@ -145,6 +145,8 @@ CROSS_ENCODER_VIEWS = (
 # which one fits depends on the query. For a *negative* view "best" also means
 # "the hardest negative" — the exclusion most at risk of being confused.
 CROSS_ENCODER_SELECT_MODES = ("best", "all", "first")
+# T33 phase 3: cross-encoder fine-tuning objectives (see CrossEncoderConfig).
+CROSS_ENCODER_TRAIN_LOSSES = ("binary_cross_entropy", "lambda", "listnet")
 
 
 @dataclass
@@ -223,11 +225,15 @@ class CrossEncoderConfig:
 
     # Registry key (see `register_reranker`). "token-overlap" is the offline,
     # dependency-free stand-in — the reranker analogue of `encoder.kind
-    # = "hashing"` — and is the only backend registered today, hence the
-    # default. T33 phase 3 adds the real "cross-encoder" backend.
+    # = "hashing"`. "cross-encoder" is a real sentence-transformers CrossEncoder
+    # (T33 phase 3): `model_name` is then required (a Hub id or a local dir) and
+    # there is deliberately no default model, since the right one depends on the
+    # language of your taxonomy. Its weights are saved into the model dir, so a
+    # deployed model needs no download.
     kind: str = "token-overlap"
-    model_name: str = ""  # backend-specific; unused by "token-overlap"
+    model_name: str = ""  # required for "cross-encoder"; unused by "token-overlap"
     batch_size: int = 32
+    # None = the same auto-detection the encoder uses (CUDA, then MPS, then CPU).
     device: Optional[str] = None
     # Which round-one signal ranks the shortlist to pick each document's
     # `top_k`. Already computed, so consulting it is free.
@@ -239,7 +245,36 @@ class CrossEncoderConfig:
     # discriminates — "matches the definition, but matches the exclusions
     # better" — has to be handed to it. Same reasoning as `desc_proto_gap`.
     gaps: List[List[str]] = field(default_factory=lambda: [["pos", "neg"]])
+    # Extra CrossEncoder constructor kwargs, e.g. {"max_length": 256} (truncation
+    # in tokens) or {"trust_remote_code": True}.
     params: Dict[str, Any] = field(default_factory=dict)
+    # ---- fine-tuning (T33 phase 3). Off by default: a pretrained cross-encoder
+    # never sees your labels, so it can score held-out items safely. With
+    # `train`, a FRESH copy of `model_name` is fine-tuned per fold on that fold's
+    # training items only (and once more on all items for the deployed model),
+    # so no item is ever scored by a model that trained on its label. That costs
+    # n_folds + 1 fine-tunes per run -- practical on a GPU. Requires k-fold
+    # training (n_folds >= 2): leave-one-out scores the training items with the
+    # deployed model, which would have seen them.
+    #
+    # Training lists are mined from each training item's own round-one shortlist,
+    # computed leave-one-out against the fold's index (the item never retrieves
+    # itself): the true class is the positive, and up to `train_negatives` other
+    # shortlisted classes -- hardest first by `prescore_node` -- are negatives.
+    # These are exactly the decisions the reranker faces at inference. Pairs are
+    # rendered with `train_document` (a name from `documents`, "pos" by default);
+    # the other documents are scored by the same fine-tuned model.
+    train: bool = False
+    train_document: str = "pos"
+    train_negatives: int = 9
+    # "binary_cross_entropy" (pointwise, positives up-weighted to balance the
+    # negatives), or listwise "lambda" / "listnet" (one list per item).
+    train_loss: str = "binary_cross_entropy"
+    train_epochs: int = 1
+    train_batch_size: int = 16
+    learning_rate: float = 2e-5
+    weight_decay: float = 0.01
+    warmup_ratio: float = 0.1
 
     def __post_init__(self) -> None:
         self.documents = [
@@ -732,6 +767,78 @@ class PipelineConfig:
                 [e.max_chars for d in ce.documents for e in d.evidence],
                 all(e.max_chars >= 1 for d in ce.documents for e in d.evidence),
                 ">= 1 for every evidence slot",
+            ),
+            (
+                "retrieval.cross_encoder.model_name",
+                ce.model_name,
+                ce.kind != "cross-encoder" or bool(str(ce.model_name).strip()),
+                "set when kind is 'cross-encoder' (a Hub model id or a local directory; there is no default, since the right model depends on your language)",
+            ),
+            (
+                "retrieval.cross_encoder.train",
+                ce.train,
+                not ce.train or "cross-encoder" in self.signals,
+                "used only with 'cross-encoder' in signals (otherwise nothing would be trained)",
+            ),
+            (
+                "retrieval.cross_encoder.train",
+                ce.train,
+                not ce.train or ce.kind == "cross-encoder",
+                "used only with kind 'cross-encoder' (the token-overlap stand-in has no weights to train)",
+            ),
+            (
+                "retrieval.cross_encoder.train",
+                ce.train,
+                not ce.train or self.training.n_folds >= 2,
+                "used only with k-fold training (n_folds >= 2): leave-one-out scores the training items with the deployed model, which would have trained on them",
+            ),
+            (
+                "retrieval.cross_encoder.train_document",
+                ce.train_document,
+                ce.train_document in ce_doc_names,
+                f"one of the configured document names {sorted(ce_doc_names)}",
+            ),
+            (
+                "retrieval.cross_encoder.train_negatives",
+                ce.train_negatives,
+                ce.train_negatives >= 1,
+                ">= 1",
+            ),
+            (
+                "retrieval.cross_encoder.train_loss",
+                ce.train_loss,
+                ce.train_loss in CROSS_ENCODER_TRAIN_LOSSES,
+                f"one of {list(CROSS_ENCODER_TRAIN_LOSSES)}",
+            ),
+            (
+                "retrieval.cross_encoder.train_epochs",
+                ce.train_epochs,
+                ce.train_epochs >= 1,
+                ">= 1",
+            ),
+            (
+                "retrieval.cross_encoder.train_batch_size",
+                ce.train_batch_size,
+                ce.train_batch_size >= 1,
+                ">= 1",
+            ),
+            (
+                "retrieval.cross_encoder.learning_rate",
+                ce.learning_rate,
+                ce.learning_rate > 0.0,
+                "> 0",
+            ),
+            (
+                "retrieval.cross_encoder.weight_decay",
+                ce.weight_decay,
+                ce.weight_decay >= 0.0,
+                ">= 0",
+            ),
+            (
+                "retrieval.cross_encoder.warmup_ratio",
+                ce.warmup_ratio,
+                0.0 <= ce.warmup_ratio < 1.0,
+                "in [0, 1)",
             ),
             (
                 "retrieval.cross_encoder.gaps",
