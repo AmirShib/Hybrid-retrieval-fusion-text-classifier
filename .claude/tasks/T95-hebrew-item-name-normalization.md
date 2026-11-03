@@ -1,6 +1,6 @@
 # T95 — Hebrew item-name cleaning, parsing and normalization
 
-status: todo
+status: in-progress (stages 0-4 implemented as functions; stage 5 wiring + ablation open)
 tier: 3
 depends_on: none (feeds every signal; pairs with T94 SPLADE domain adaptation)
 
@@ -42,6 +42,23 @@ dictionaries, must run at training and at inference.
   Only a whitelist of verified pairs (`עפרון`/`עיפרון`, `לשער`/`לשיער`, `מאורז`/`מארז`).
 - `גל` is both "gel" (geresh dropped) and "wave". Map it only in product
   context, or let the learned signals cope.
+
+## Progress (2026-11-03)
+Stages 0-4 are implemented in `text_classifier/infrastructure/hebrew_text.py`
+(`HebrewItemNormalizer`, `clean_dataframe`, `extract_fields`), with 50 tests in
+`tests/unit/test_hebrew_text.py`. Nothing removes product words: the cleaned text
+has 3.5% *more* characters than the raw text (expansions, spaces).
+
+On the full file: 86,225 rows changed; vocabulary 55,076 -> ~38.7k tokens;
+singletons 32,446 -> ~19.2k; 68 placeholders dropped; 163 names with conflicting
+labels (up from 110, because spelling variants now collapse). `base_qty` filled for
+52.9% of rows.
+
+Audit findings folded in: bare `<number> מ` is meters on foil and ml on cosmetics,
+so it is left as written; mined geresh merges are limited to ג/צ/ז/ת, are ≥ 3 letters,
+and exclude real words (צלי, דרגה, גוני, ...); truncation completion skips any stub
+that appears mid-name elsewhere (ילד, שני). Not done: Stage 5 wiring into the
+pipelines, glued-word splitting (`שטוחקרם`), and the ablation.
 
 ## Design
 
