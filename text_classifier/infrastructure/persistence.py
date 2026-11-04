@@ -49,7 +49,7 @@ from ..domain import (
     fusion_feature_names,
 )
 from .registry import (
-    build_signal_providers,
+    build_signal_provider_schemas,
     calibrator_spec,
     dense_retriever_spec,
     encoder_spec,
@@ -606,8 +606,8 @@ class ArtifactRepository:
         # schema-drift contract as encoder/fusion/calibrator/dense/lexical kind
         # mismatches.
         feature_providers = self._load_providers(directory, meta, config)
-        schema_signal_providers = build_signal_providers(
-            config.retrieval, components["signals"], None, None, None
+        schema_signal_providers = build_signal_provider_schemas(
+            config.retrieval, components["signals"]
         )
         expected = fusion_feature_names(
             feature_providers, config.fusion.drop_features, schema_signal_providers

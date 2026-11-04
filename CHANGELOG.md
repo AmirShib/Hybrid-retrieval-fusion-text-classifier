@@ -8,6 +8,19 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 
 ## [Unreleased]
 
+### Fixed
+- **Loading a model with the cross-encoder signal no longer loads the base
+  model.** The feature-schema check in `ArtifactRepository.load` built every
+  signal provider just to read its column names, and for
+  `retrieval.cross_encoder.kind = "cross-encoder"` that loaded
+  `cross_encoder.model_name` (the untrained base model) on top of the
+  fine-tuned one in `signals/cross-encoder/`. Predictions were unaffected, but
+  each load paid for a second model and logged Hugging Face warnings pointing at
+  the base model's path ("Some weights of BertForSequenceClassification were not
+  initialized from the model checkpoint at ..."), and a host without the base
+  model could not load at all. `SignalProviderSpec` gained an optional `schema`
+  builder for providers whose `build` is expensive; the cross-encoder uses it.
+
 ## [0.3.0] - 2026-11-02
 
 ### Added

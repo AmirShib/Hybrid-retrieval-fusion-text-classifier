@@ -93,6 +93,23 @@ class TokenOverlapReranker(PairwiseReranker):
 logger = logging.getLogger(__name__)
 
 
+class SchemaOnlyReranker(PairwiseReranker):
+    """Placeholder backend for a ``CrossEncoderSignalProvider`` that exists only
+    to report ``column_names()`` (the load-time schema check). It holds no
+    model, so building one is free and touches no files; scoring or saving it
+    is a bug and raises."""
+
+    def score(self, pairs: Sequence[Tuple[str, str]]) -> np.ndarray:
+        raise RuntimeError("SchemaOnlyReranker cannot score: it exists only for column_names()")
+
+    def save(self, directory: str) -> None:
+        raise RuntimeError("SchemaOnlyReranker cannot be saved: it holds no model")
+
+    @classmethod
+    def load(cls, path: str, **kwargs) -> "SchemaOnlyReranker":
+        raise RuntimeError("SchemaOnlyReranker cannot be loaded: it holds no model")
+
+
 # ------------------------------------------------------ real cross-encoder
 _CE_MODULES = ("sentence_transformers.cross_encoder",)
 
