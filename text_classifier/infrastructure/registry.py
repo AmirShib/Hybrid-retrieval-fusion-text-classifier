@@ -70,6 +70,7 @@ from .fusion import (
 )
 from .reranker import (
     CrossEncoderSignalProvider,
+    SchemaOnlyReranker,
     SentenceTransformersCrossEncoder,
     TokenOverlapReranker,
 )
@@ -167,13 +168,22 @@ class SignalProviderSpec:
     ``load`` receives the *model directory* + ``RetrievalConfig``, mirroring
     ``DenseRetrieverSpec.load``'s directory-based load. Persisting is the
     provider's own ``save(path)`` (the ``SignalProvider`` ABC's uniform
-    contract) — no separate spec-level save callable is needed."""
+    contract) — no separate spec-level save callable is needed.
+
+    ``schema`` (optional) builds a provider good only for ``column_names()``.
+    ``ArtifactRepository.load`` uses it for the feature-schema check, before
+    anything is read from disk. Set it whenever ``build`` is expensive or
+    touches external resources (e.g. loads a model from ``model_name``):
+    without it the check falls back to ``build`` with ``dense=lexical=None``,
+    which for such a provider loads a model only to read its column names --
+    and, on an air-gapped host, may need a base model that was never shipped."""
 
     build: Callable[
         [RetrievalConfig, Optional[DenseRetriever], Optional[LexicalRetriever], Optional[ArrayOps]],
         SignalProvider,
     ]
     load: Callable[[str, RetrievalConfig], SignalProvider]
+    schema: Optional[Callable[[RetrievalConfig], SignalProvider]] = None
 
 
 @dataclass(frozen=True)
@@ -398,6 +408,25 @@ def build_signal_providers(
             providers.append(LexicalSignalProvider(lexical, array_ops))
         else:
             providers.append(signal_provider_spec(kind).build(cfg, dense, lexical, array_ops))
+    return providers
+
+
+def build_signal_provider_schemas(
+    cfg: RetrievalConfig, signal_kinds: Sequence[str]
+) -> List[SignalProvider]:
+    """Providers fit only for reading ``column_names()`` -- never built against
+    data, never scored, and never allowed to load a model. Each kind uses its
+    spec's ``schema`` builder when it has one, else ``build`` with no
+    retrievers (cheap for every provider that loads nothing at construction).
+    Raises the same "unknown signal provider kind" error as
+    ``build_signal_providers``."""
+    providers: List[SignalProvider] = []
+    for kind in signal_kinds:
+        if kind in ("dense", "lexical"):
+            providers.extend(build_signal_providers(cfg, [kind], None, None))
+            continue
+        spec = signal_provider_spec(kind)
+        providers.append(spec.schema(cfg) if spec.schema else spec.build(cfg, None, None, None))
     return providers
 
 
@@ -663,6 +692,10 @@ register_signal_provider(
             ),
             cfg.cross_encoder,
         ),
+        # Columns depend on `cfg.cross_encoder.documents`/`gaps` only, so the
+        # load-time schema check needs no model -- `build` would load the
+        # *base* `model_name`, not the fine-tuned weights in the model dir.
+        schema=lambda cfg: CrossEncoderSignalProvider(SchemaOnlyReranker(), cfg.cross_encoder),
     ),
 )
 

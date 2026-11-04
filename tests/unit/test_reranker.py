@@ -635,3 +635,32 @@ def test_invalid_cross_encoder_config_is_rejected(mutate, match):
     mutate(cfg.retrieval.cross_encoder)
     with pytest.raises(ValueError, match=match):
         cfg.validate()
+
+
+def test_loading_a_model_never_builds_the_base_reranker(tmp_path, monkeypatch):
+    """Load must reconstruct the reranker from ``signals/cross-encoder/`` only.
+
+    Regression: the schema check in ``ArtifactRepository.load`` used to *build*
+    every signal provider just to read ``column_names()``, which for the real
+    backend loaded ``cross_encoder.model_name`` -- the untrained base model --
+    on top of the fine-tuned one. On an air-gapped host that produced a
+    "weights not initialized from the model checkpoint at <base model>" warning
+    (and a failed load when the base model was not shipped)."""
+    from text_classifier.infrastructure import registry
+
+    cfg = _config()
+    _, _, out = _train(cfg, tmp_path)
+
+    original = registry._RERANKERS["token-overlap"]
+
+    def _forbidden(_cfg):
+        raise AssertionError("load() built the base reranker from cross_encoder.model_name")
+
+    monkeypatch.setitem(
+        registry._RERANKERS,
+        "token-overlap",
+        registry.RerankerSpec(build=_forbidden, load=original.load),
+    )
+    inf = InferencePipeline(ArtifactRepository().load(out))
+    preds = inf.predict(["supermarket grocery food store"])
+    assert preds[0].top_key == "retail_food"
