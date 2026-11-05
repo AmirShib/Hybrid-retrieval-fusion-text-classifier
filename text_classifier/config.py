@@ -490,6 +490,43 @@ class FeatureProviderConfig:
     params: Dict[str, Any] = field(default_factory=dict)
 
 
+CLEANUP_ACTIONS = ("keep", "drop", "relabel")
+
+
+@dataclass
+class CleanupConfig:
+    """Training-data cleanup round (T96; see ``application/cleanup.py``).
+
+    Off by default. When on, training first runs an extra out-of-fold pass over
+    the training items, flags suspicious rows, applies the actions below, and
+    then trains on the cleaned items. Every flagged row -- acted on or not -- is
+    written to ``review_file`` in the output directory (UTF-8 with BOM, so
+    Hebrew opens correctly in Excel). Only training rows are ever changed;
+    external validation/test sets are not touched.
+
+    Defaults are the conservative, measured ones: junk is dropped and exact
+    label conflicts resolved by majority, while model-detected likely mislabels
+    are only flagged (``mislabel_action="keep"``) -- on the Hebrew COICOP data
+    dropping or relabelling them did not improve accuracy on an untouched test
+    set, because the flagged rows mix real label errors with hard-but-correct
+    rows. Switch it to "drop" or "relabel" after reviewing the file."""
+
+    enabled: bool = False
+    drop_junk: bool = True
+    # "relabel": minority rows of an exact-text conflict take the majority label
+    # (ties are kept and flagged). "keep": flag only.
+    conflict_action: str = "relabel"
+    detect_mislabels: bool = True  # needs k-fold training (n_folds >= 2)
+    mislabel_action: str = "keep"
+    min_suggested_share: float = 0.9  # model's share for the other class, at least
+    max_label_share: float = 0.05  # ... and for the row's own label, at most
+    require_knn_agreement: bool = True  # a nearest-neighbour signal must agree too
+    ambiguous_share: float = 0.3  # both classes at least this -> "ambiguous"
+    cross_fit_folds: int = 5
+    cross_fit_trees: int = 250
+    review_file: str = "suspicious_rows.csv"
+
+
 @dataclass
 class FeaturesConfig:
     """Custom fusion features. ``providers`` is an *ordered* list — the
@@ -561,6 +598,7 @@ class PipelineConfig:
     calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     features: FeaturesConfig = field(default_factory=FeaturesConfig)
+    cleanup: CleanupConfig = field(default_factory=CleanupConfig)
     candidate_top_n: int = 10
     # When ties at a signal's top-n cutoff would admit more than this many times
     # `candidate_top_n` classes, cut that signal to exactly `candidate_top_n`
@@ -973,6 +1011,42 @@ class PipelineConfig:
                 "None or >= 1",
             )
         )
+        cu = self.cleanup
+        checks += [
+            (
+                "cleanup.mislabel_action",
+                cu.mislabel_action,
+                cu.mislabel_action in CLEANUP_ACTIONS,
+                f"one of {list(CLEANUP_ACTIONS)}",
+            ),
+            (
+                "cleanup.conflict_action",
+                cu.conflict_action,
+                cu.conflict_action in ("keep", "relabel"),
+                "'keep' or 'relabel'",
+            ),
+            (
+                "cleanup.min_suggested_share",
+                cu.min_suggested_share,
+                0 < cu.min_suggested_share <= 1,
+                "in (0, 1]",
+            ),
+            (
+                "cleanup.max_label_share",
+                cu.max_label_share,
+                0 <= cu.max_label_share < 1,
+                "in [0, 1)",
+            ),
+            (
+                "cleanup.ambiguous_share",
+                cu.ambiguous_share,
+                0 < cu.ambiguous_share <= 0.5,
+                "in (0, 0.5]",
+            ),
+            ("cleanup.cross_fit_folds", cu.cross_fit_folds, cu.cross_fit_folds >= 2, ">= 2"),
+            ("cleanup.cross_fit_trees", cu.cross_fit_trees, cu.cross_fit_trees >= 1, ">= 1"),
+            ("cleanup.review_file", cu.review_file, bool(str(cu.review_file).strip()), "non-empty"),
+        ]
         sp = self.retrieval.splade
         checks += [
             # T94. Like the cross-encoder block: checked even when switched off.
@@ -1083,6 +1157,7 @@ class PipelineConfig:
             calibration=_build_section(CalibrationConfig, data, "calibration"),
             training=_build_section(TrainingConfig, data, "training"),
             features=_build_features_section(data),
+            cleanup=_build_section(CleanupConfig, data, "cleanup"),
             candidate_top_n=data.get("candidate_top_n", cls().candidate_top_n),
             array_backend=data.get("array_backend", cls().array_backend),
             signals=list(data.get("signals", cls().signals)),

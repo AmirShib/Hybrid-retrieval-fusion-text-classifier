@@ -9,6 +9,20 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 ## [Unreleased]
 
 ### Added
+- **Training-data cleanup round (`--cleanup`, config section `cleanup`).** Before
+  training, an extra out-of-fold pass flags suspicious training rows: `junk`
+  (placeholders, no letters) is dropped; exact-text `label_conflict`s take the
+  majority label (ties kept); `likely_mislabel` (a fusion model cross-fitted by
+  item is confident in another class, gives the label <= 5%, and a kNN signal
+  agrees), `ambiguous` and `not_shortlisted` rows are flagged. Every flagged row
+  is written to `suspicious_rows.csv` (UTF-8 with BOM, most actionable first)
+  with the suggested label, the scores and the reason; `evaluation.json` and the
+  model card get a summary. Likely mislabels are **kept by default**
+  (`mislabel_action = "keep"`): on 20k Hebrew COICOP items, dropping or
+  relabelling them moved accuracy on an untouched test set by -0.23 to -0.07
+  points (within noise), because the flagged rows mix real label errors with
+  hard-but-correct rows. No action may push a class below `n_folds` rows. Only
+  training rows are touched; external validation/test sets never are.
 - **Training progress (`--progress`, `training.progress`).** One log line per
   stage (each fold, the final model, fusion + calibration + evaluation) with the
   elapsed time, the estimated time remaining and the estimated finish time; an

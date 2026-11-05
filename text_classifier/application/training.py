@@ -71,6 +71,7 @@ from .evaluation import build_manifest, evaluate_decisions, write_evaluation_art
 from .features import FeatureAssembler
 from .indexing import RetrievalIndexBuilder
 from .scoring import add_confidence, select_feature_columns, top_per_item
+from .cleanup import CleanupResult, run_cleanup, write_review_file
 from .importance import signal_contributions
 from .signal_report import signal_report
 
@@ -165,6 +166,7 @@ class TrainingPipeline:
         self._indexes: Optional[RetrievalIndexBuilder] = None
         # Replaced per run() by the run's plan; a disabled no-op until then.
         self._progress = TrainingProgress([], [], enabled=False)
+        self.cleanup_result: Optional[CleanupResult] = None
 
     def _index_builder(
         self, texts: Sequence[str], y: np.ndarray, label_space: LabelSpace
@@ -289,8 +291,9 @@ class TrainingPipeline:
             folds = ["final model", "leave-one-out features"]
         else:
             folds = [f"fold {i + 1}/{n}" for i in range(n)] + ["final model"]
+        pre = ["cleanup (extra out-of-fold pass)"] if self.cfg.cleanup.enabled else []
         return TrainingProgress(
-            folds + ["fusion + calibration + evaluation"],
+            pre + folds + ["fusion + calibration + evaluation"],
             fold_like=folds,
             output_dir=output_dir,
             enabled=self.cfg.training.progress,
@@ -328,6 +331,22 @@ class TrainingPipeline:
         # and this run's array backend.
         self._shared_encoder = None
         self._indexes = None
+
+        # T96: the cleanup round -- an extra out-of-fold pass that flags and
+        # (per config) fixes training rows, then everything below trains on the
+        # cleaned items. Validation/test sets are deliberately not passed in.
+        self.cleanup_result = None
+        if self.cfg.cleanup.enabled:
+            with self._progress.stage("cleanup (extra out-of-fold pass)"):
+                result = self._cleanup(items, label_space, texts, y)
+            self.cleanup_result = result
+            if output_dir:
+                path = write_review_file(result.review, output_dir, self.cfg.cleanup.review_file)
+                log.info("cleanup: %d suspicious row(s) written to %s", len(result.review), path)
+            items = result.items
+            texts = [it.text for it in items]
+            y = np.array(label_space.encode_labels([it.label for it in items]), dtype=np.int64)
+            self._indexes = None  # the caches belong to the pre-cleanup corpus
 
         roles = self.cfg.training.fold_roles(
             external_val=val_items is not None, external_test=test_items is not None
@@ -386,6 +405,11 @@ class TrainingPipeline:
             # is the "which signals carry my data" evidence a data scientist reads
             # alongside the headline metrics.
             evaluation = {**evaluation, "signal_report": signal_report(oof)}
+            if self.cleanup_result is not None:
+                evaluation["cleanup"] = {
+                    **self.cleanup_result.summary,
+                    "review_file": self.cfg.cleanup.review_file,
+                }
             # Persist the held-out evaluation + a provenance manifest next to the
             # model so a trained directory carries its own evidence: how it scored,
             # on what, and with which version/config. This is what makes a deployed
@@ -990,6 +1014,39 @@ class TrainingPipeline:
             if contrib is not None:
                 evaluation["signal_contributions"] = contrib
         return report, evaluation
+
+    def _cleanup(self, items, label_space, texts, y) -> CleanupResult:
+        """Flag and fix training rows (T96) before the real training pass.
+
+        The model-based checks need honest per-item scores, i.e. the same
+        out-of-fold features training uses; that is one extra k-fold pass (with
+        any per-fold fine-tunes it includes). Its progress lines are muted --
+        the cleanup stage reports as one step."""
+        cfg = self.cfg.cleanup
+        oof = None
+        if cfg.detect_mislabels and self.cfg.training.n_folds >= 2:
+            saved = self._progress
+            self._progress = TrainingProgress([], [], enabled=False)
+            try:
+                oof = self._build_oof(texts, y, label_space)
+            finally:
+                self._progress = saved
+            self._indexes = None
+        elif cfg.detect_mislabels:
+            log.warning("cleanup: mislabel checks need n_folds >= 2; only junk/conflicts checked")
+        return run_cleanup(
+            items,
+            label_space,
+            cfg,
+            min_per_class=max(self.cfg.training.n_folds, 1),
+            oof=oof,
+            feature_names=(
+                [c for c in oof.columns if c not in ("item_id", "candidate", "is_true", "fold")]
+                if oof is not None
+                else None
+            ),
+            seed=self.cfg.training.random_state,
+        )
 
     def _feature_groups(self) -> Dict[str, str]:
         """Feature column -> the signal (or feature provider) that produced it.

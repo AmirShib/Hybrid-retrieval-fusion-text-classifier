@@ -124,7 +124,8 @@ signal once T34 phase 2 lands.
 | T92 | 4    | Encoder fine-tuning via SentenceTransformerTrainer + pooling/max_seq_length/lr/weight-decay knobs; MNRL default | in-review |
 | T93 | 0    | CPU-independent rank features (stable argsort) + CI green again              | done |
 | T94 | 3    | Learned-sparse (SPLADE) round-one signal, optional per-fold fine-tuning       | in-review |
-| T95 | 3    | Hebrew item-name cleaning, parsing and normalization (profiled on 160k rows)  | todo |
+| T95 | 3    | Hebrew item-name cleaning, parsing and normalization (profiled on 160k rows)  | in-progress |
+| T96 | 3    | Training-data cleanup round + review file (automatic, conservative defaults)  | in-review |
 | T82 | 4    | Retrain-based feature ablation: `drop_features` + seeded sweep harness (needs T40) | in-review |
 | T45 | 4    | Per-class calibration behind `ConfidenceCalibrator` port (needs T42)           | done |
 | T50 | 5    | Pin requirements for air-gapped reproducibility (hash-locked)                  | done |

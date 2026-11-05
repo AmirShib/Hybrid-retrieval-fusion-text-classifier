@@ -341,6 +341,23 @@ def _models_section(models: Optional[Dict[str, Any]]) -> List[str]:
     return lines + [""]
 
 
+def _cleanup_section(cu: Optional[Dict[str, Any]]) -> List[str]:
+    if not cu:
+        return []
+    acts = cu.get("by_action") or {}
+    issues = ", ".join(f"{k} {v}" for k, v in (cu.get("by_issue") or {}).items()) or "none"
+    return [
+        "",
+        "## Training-data cleanup",
+        "",
+        f"- **Rows:** {cu.get('rows_in')} in, {cu.get('rows_out')} trained on",
+        f"- **Flagged:** {cu.get('flagged')} ({issues})",
+        f"- **Applied:** {acts.get('dropped', 0)} dropped, {acts.get('relabeled', 0)} relabeled, "
+        f"{acts.get('kept', 0)} kept for review (likely mislabels: `{cu.get('mislabel_action')}`)",
+        f"- **Review file:** `{cu.get('review_file')}`",
+    ]
+
+
 def _contributions_section(contrib: Optional[Dict[str, Any]], pct: Any) -> List[str]:
     """The model card's "which signals drive decisions" section."""
     if not contrib or not contrib.get("by_signal"):
@@ -464,6 +481,7 @@ def render_model_card(manifest: Dict[str, Any], evaluation: Dict[str, Any]) -> s
                 f"- **Skipped (columns not assembled, e.g. `drop_features`):** {', '.join(skipped)}"
             )
     lines += _contributions_section(evaluation.get("signal_contributions"), pct)
+    lines += _cleanup_section(evaluation.get("cleanup"))
     lines += [
         "",
         "See `evaluation.json` for the per-class breakdown, reliability table, "
