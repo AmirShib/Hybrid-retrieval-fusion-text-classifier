@@ -8,7 +8,24 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-05
+
 ### Added
+- **Hebrew item-name normalizer (T95):
+  `text_classifier.infrastructure.hebrew_text`.** `HebrewItemNormalizer` cleans
+  supermarket-style item names without removing information: unifies quote and
+  geresh variants and CSV-escape debris, splits numbers and dot-joined words from
+  the words they are glued to, writes each unit one way after a number (a bare
+  `מ` is left alone: it is meters on foil and ml on cosmetics), expands verified
+  abbreviations (`ח"פ`, `תפו"א`, `א.ד.ט`, ...), merges geresh spelling variants
+  learned from the data (`ציפס` -> `צ'יפס`; real words such as `צלי` are protected),
+  and completes a last word cut off by the source when that is unambiguous.
+  `extract_fields` reads quantity (normalized to g / ml / units / cm), pack count,
+  percent, kosher/dietary/promo marks and Latin tokens. `clean_dataframe` does a
+  whole table and reports conflicting labels. Fit on training names, `save`/`load`
+  as JSON, reuse at inference. Measured on 20k Hebrew COICOP items: +0.96
+  accuracy points. Not wired into the pipelines yet: apply it to the text before
+  training and before inference.
 - **Training-data cleanup round (`--cleanup`, config section `cleanup`).** Before
   training, an extra out-of-fold pass flags suspicious training rows: `junk`
   (placeholders, no letters) is dropped; exact-text `label_conflict`s take the
