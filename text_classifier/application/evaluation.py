@@ -353,7 +353,11 @@ def _cleanup_section(cu: Optional[Dict[str, Any]]) -> List[str]:
         f"- **Rows:** {cu.get('rows_in')} in, {cu.get('rows_out')} trained on",
         f"- **Flagged:** {cu.get('flagged')} ({issues})",
         f"- **Applied:** {acts.get('dropped', 0)} dropped, {acts.get('relabeled', 0)} relabeled, "
-        f"{acts.get('kept', 0)} kept for review (likely mislabels: `{cu.get('mislabel_action')}`)",
+        f"{acts.get('quarantined', 0)} quarantined"
+        + (f" (from {', '.join(cu.get('quarantine_from') or [])})" if cu.get("quarantined") else "")
+        + f", {acts.get('kept', 0)} kept for review (likely mislabels: "
+        f"`{cu.get('mislabel_action')}`)",
+        f"- **Rounds:** {cu.get('rounds_run', 1)}",
         f"- **Review file:** `{cu.get('review_file')}`",
     ]
 

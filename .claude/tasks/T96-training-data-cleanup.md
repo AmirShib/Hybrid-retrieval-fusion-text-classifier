@@ -18,9 +18,17 @@ mixed real label errors (oranges labelled beef) with correct rows the model got
 wrong (ice-cream bars labelled ice cream; model said sweets), and the suggestion
 itself was often wrong. Hence `mislabel_action="keep"` by default.
 
+## Controls added (2026-11-05)
+Cleanup pass: `signals`, `n_folds`, `train_epochs`, `fine_tune`; `rounds`;
+detector: `detector_params`, `knn_agreement_signals`, `min_knn_agreeing`;
+actions: `not_shortlisted_action`, `ambiguous_action`, `quarantine` +
+`quarantine_from` (`knn_pool`, `fine_tune`; implemented at every row-consuming
+site: per-fold/final encoder fine-tune, index build, SPLADE fit, cross-encoder
+mining + fine-tune, stored corpus, LOO self positions); `max_changed_fraction`;
+`review_decisions` (human decisions first, locked against automation).
+
 ## Open
-- Re-measure with a neural encoder and real class descriptions (the detector
-  is only as good as the honest model behind it).
+- Re-measure keep / quarantine / drop with a neural encoder, fine-tuning and
+  real class descriptions, on an untouched test set.
 - Per-row weights (down-weight instead of drop) need sample-weight support in
   the fusion port.
-- Use reviewed `suspicious_rows.csv` decisions as an input on the next run.

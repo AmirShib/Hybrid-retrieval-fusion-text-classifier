@@ -23,6 +23,16 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
   points (within noise), because the flagged rows mix real label errors with
   hard-but-correct rows. No action may push a class below `n_folds` rows. Only
   training rows are touched; external validation/test sets never are.
+  Controls: `signals`, `n_folds`, `train_epochs` and `fine_tune` (`same`/`off`)
+  make the cleanup pass cheaper than training (e.g. skip the cross-encoder);
+  `rounds` repeats detect -> act until nothing changes; `detector_params`
+  (XGBoost), `knn_agreement_signals` + `min_knn_agreeing`; per-issue actions
+  (`not_shortlisted_action`, `ambiguous_action`); `max_changed_fraction` caps
+  model-based changes, most confident first; action `quarantine` keeps a row for
+  the fusion model but out of the kNN pools and/or fine-tunes
+  (`quarantine_from`); `review_decisions` reads a reviewed `suspicious_rows.csv`
+  (`decision` column: keep / drop / quarantine / relabel:<class>), applied first
+  and exempt from every automatic rule, matched on text + label across runs.
 - **Training progress (`--progress`, `training.progress`).** One log line per
   stage (each fold, the final model, fusion + calibration + evaluation) with the
   elapsed time, the estimated time remaining and the estimated finish time; an

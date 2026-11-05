@@ -17,6 +17,7 @@ indices, built once up front and reused), never through the out-of-fold loop.
 
 from __future__ import annotations
 
+import copy
 import logging
 from collections import Counter
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -71,7 +72,7 @@ from .evaluation import build_manifest, evaluate_decisions, write_evaluation_art
 from .features import FeatureAssembler
 from .indexing import RetrievalIndexBuilder
 from .scoring import add_confidence, select_feature_columns, top_per_item
-from .cleanup import CleanupResult, run_cleanup, write_review_file
+from .cleanup import CleanupResult, read_review_decisions, run_cleanup, write_review_file
 from .importance import signal_contributions
 from .signal_report import signal_report
 
@@ -118,6 +119,16 @@ def fit_calibration_and_abstention(
                 grp["conf"].to_numpy(), grp["is_true"].to_numpy(), target_precision
             )
     return calibrator, AbstentionPolicy(global_thr, per_class)
+
+
+def _positions(rows: np.ndarray, pool: np.ndarray) -> np.ndarray:
+    """Each of ``rows``' position within ``pool`` (row indices), or -1."""
+    rows = np.asarray(rows, dtype=np.intp)
+    pool = np.asarray(pool, dtype=np.intp)
+    size = int(max(rows.max(initial=-1), pool.max(initial=-1))) + 1
+    pos = np.full(size, -1, dtype=np.intp)
+    pos[pool] = np.arange(len(pool))
+    return pos[rows]
 
 
 class TrainingPipeline:
@@ -167,6 +178,10 @@ class TrainingPipeline:
         # Replaced per run() by the run's plan; a disabled no-op until then.
         self._progress = TrainingProgress([], [], enabled=False)
         self.cleanup_result: Optional[CleanupResult] = None
+        # T96: rows kept in training but out of the parts `quarantine_from`
+        # names, and the rows the deployment pool was built over.
+        self._quarantine: Optional[np.ndarray] = None
+        self._deploy_pool: Optional[np.ndarray] = None
 
     def _index_builder(
         self, texts: Sequence[str], y: np.ndarray, label_space: LabelSpace
@@ -336,10 +351,14 @@ class TrainingPipeline:
         # (per config) fixes training rows, then everything below trains on the
         # cleaned items. Validation/test sets are deliberately not passed in.
         self.cleanup_result = None
+        self._quarantine = None
+        self._deploy_pool = None
         if self.cfg.cleanup.enabled:
             with self._progress.stage("cleanup (extra out-of-fold pass)"):
-                result = self._cleanup(items, label_space, texts, y)
+                result = self._cleanup(items, label_space)
             self.cleanup_result = result
+            if result.quarantined.any():
+                self._quarantine = result.quarantined
             if output_dir:
                 path = write_review_file(result.review, output_dir, self.cfg.cleanup.review_file)
                 log.info("cleanup: %d suspicious row(s) written to %s", len(result.review), path)
@@ -399,7 +418,10 @@ class TrainingPipeline:
             repo = ArtifactRepository()
             repo.save(artifacts, output_dir)
             if self.cfg.training.store_corpus:
-                repo.save_corpus(output_dir, items)
+                # `update` rebuilds the BM25 pool from this corpus, so rows kept
+                # out of the kNN pools stay out of it too.
+                pool = self._pool_rows(np.arange(len(items)))
+                repo.save_corpus(output_dir, [items[int(i)] for i in pool])
             # Per-signal diagnostics from the leakage-free out-of-fold rows: how each
             # retrieval technique performs *alone*, before fusion combines them. This
             # is the "which signals carry my data" evidence a data scientist reads
@@ -660,8 +682,13 @@ class TrainingPipeline:
         dense: DenseRetriever,
         lexical: Optional[LexicalRetriever],
         indexes: RetrievalIndexBuilder,
+        pool_rows: Optional[np.ndarray] = None,
     ) -> None:
         """Fine-tune the cross-encoder in ``signal_providers`` on ``rows`` (T33).
+
+        ``pool_rows`` are the rows ``dense``/``lexical`` were built over, when
+        that differs from ``rows`` (T96 quarantine): each mining query then masks
+        itself out at its own pool position, or nowhere if it is not in the pool.
 
         No-op unless ``retrieval.cross_encoder.train`` is on. The provider's
         reranker was just built fresh from ``model_name`` for this split, so each
@@ -692,6 +719,7 @@ class TrainingPipeline:
         order_col = prescore_column(ce_cfg.prescore_node)
         row_texts = [texts[int(i)] for i in rows]
         local = np.arange(len(rows))
+        self_pos = local if pool_rows is None else _positions(rows, pool_rows)
         shortlist = self.assembler.assemble(
             row_texts,
             indexes.query_embeddings(encoder, rows),
@@ -701,7 +729,7 @@ class TrainingPipeline:
             query_ids=local,
             query_labels=y[rows],
             chunk=self.cfg.retrieval.feature_chunk,
-            self_ids=local,
+            self_ids=self_pos,
             requested=[order_col] if order_col else None,
             signal_providers=round_one,
         )
@@ -731,12 +759,15 @@ class TrainingPipeline:
         frames, recall_hits, total = [], 0, 0
         for fold, (tr, va) in enumerate(skf.split(texts, y)):
             self._progress.start(f"fold {fold + 1}/{self.cfg.training.n_folds}")
-            enc = self._encoder_for_split(tr, texts, y, label_space, shared)
+            # T96 quarantine: suspected rows stay in the fold (they are scored and
+            # train the fusion model) but are left out of what `quarantine_from` names.
+            pool = self._pool_rows(tr)
+            enc = self._encoder_for_split(self._tune_rows(tr), texts, y, label_space, shared)
             # This fold's retrieval state, over its *training* rows only — the
             # leakage rule. Whether that reuses the run-wide caches (T88/T32) or
             # rebuilds from scratch is the index builder's decision, made once
             # and applied identically here and in `_build_deployment_index`.
-            dense, lexical = indexes.build(enc, tr)
+            dense, lexical = indexes.build(enc, pool)
             # Providers are fit on this fold's training rows only (leakage-free).
             providers = self._fit_providers(tr, texts, y, label_space)
             # T34 phase 2: the SignalProviders for this fold, wrapping this
@@ -747,11 +778,22 @@ class TrainingPipeline:
             )
             # T94: fit any stateful signal (e.g. SPLADE's encoder + index) on
             # this fold's training rows only.
-            self._fit_signal_providers(signal_providers, tr, texts, y, label_space)
+            self._fit_signal_providers(
+                signal_providers, self._signal_rows(tr), texts, y, label_space
+            )
             # T33 phase 3: fine-tune this fold's (fresh) cross-encoder on this
             # fold's training rows only, before it scores the held-out rows.
             self._fit_cross_encoder(
-                signal_providers, tr, texts, y, label_space, enc, dense, lexical, indexes
+                signal_providers,
+                self._tune_rows(tr),
+                texts,
+                y,
+                label_space,
+                enc,
+                dense,
+                lexical,
+                indexes,
+                pool_rows=pool,
             )
             # T87: request only the columns the fusion model will actually be
             # fitted on. This is the accepted diagnostic-narrowing trade —
@@ -815,6 +857,22 @@ class TrainingPipeline:
         assert self.assembler is not None  # set in run() before this is called
         indexes = self._index_builder(texts, y, label_space)
         self_ids = np.arange(len(texts))
+        # T96: with quarantined rows left out of the pool, an item's own pool
+        # position is not its row number (and is -1 if it is not in the pool).
+        pool = self._deploy_pool
+        self_pos = (
+            self_ids if pool is None or len(pool) == len(texts) else _positions(self_ids, pool)
+        )
+        if (
+            self._quarantine is not None
+            and "splade" in self.cfg.signals
+            and not np.array_equal(self._signal_rows(self_ids), self._pool_rows(self_ids))
+        ):
+            raise ValueError(
+                "leave-one-out with SPLADE needs cleanup.quarantine_from to include "
+                "'knn_pool' whenever it includes 'fine_tune' (SPLADE's pool and fine-tune "
+                "are fitted together, so its pool would not line up with the others)"
+            )
         # T89: `_build_deployment_index` ran first on this path and, on the
         # shared-encoder path, already encoded exactly this corpus into the
         # cache — the builder owns that corpus, so reusing it whole needs no
@@ -830,7 +888,7 @@ class TrainingPipeline:
             query_labels=y,
             chunk=self.cfg.retrieval.feature_chunk,
             providers=self._providers,
-            self_ids=self_ids,
+            self_ids=self_pos,
             requested=self._feature_names,
             signal_providers=self._signal_providers,
         )
@@ -1015,37 +1073,105 @@ class TrainingPipeline:
                 evaluation["signal_contributions"] = contrib
         return report, evaluation
 
-    def _cleanup(self, items, label_space, texts, y) -> CleanupResult:
-        """Flag and fix training rows (T96) before the real training pass.
+    # ------------------------------------------------------------- T96 cleanup
+    def _cleanup(self, items, label_space) -> CleanupResult:
+        """Flag and fix training rows before the real training pass.
 
-        The model-based checks need honest per-item scores, i.e. the same
-        out-of-fold features training uses; that is one extra k-fold pass (with
-        any per-fold fine-tunes it includes). Its progress lines are muted --
-        the cleanup stage reports as one step."""
-        cfg = self.cfg.cleanup
-        oof = None
-        if cfg.detect_mislabels and self.cfg.training.n_folds >= 2:
-            saved = self._progress
-            self._progress = TrainingProgress([], [], enabled=False)
-            try:
-                oof = self._build_oof(texts, y, label_space)
-            finally:
-                self._progress = saved
-            self._indexes = None
-        elif cfg.detect_mislabels:
+        The model-based checks need honest per-item scores: an out-of-fold pass
+        over the items, built from ``_cleanup_pass_config()`` (its own signals,
+        folds, epochs, fine-tuning), repeated per round. Its progress lines are
+        muted -- the cleanup reports as one stage."""
+        cu = self.cfg.cleanup
+        decisions = (
+            read_review_decisions(cu.review_decisions, label_space) if cu.review_decisions else None
+        )
+        pass_cfg = self._cleanup_pass_config()
+        oof_fn = None
+        if cu.detect_mislabels and pass_cfg.training.n_folds >= 2:
+
+            def oof_fn(current):
+                return self._cleanup_oof(current, label_space, pass_cfg)
+
+        elif cu.detect_mislabels:
             log.warning("cleanup: mislabel checks need n_folds >= 2; only junk/conflicts checked")
         return run_cleanup(
             items,
             label_space,
-            cfg,
-            min_per_class=max(self.cfg.training.n_folds, 1),
-            oof=oof,
-            feature_names=(
-                [c for c in oof.columns if c not in ("item_id", "candidate", "is_true", "fold")]
-                if oof is not None
-                else None
-            ),
+            cu,
+            min_per_class=max(self.cfg.training.n_folds, pass_cfg.training.n_folds, 1),
+            oof_fn=oof_fn,
             seed=self.cfg.training.random_state,
+            decisions=decisions,
+        )
+
+    def _cleanup_pass_config(self) -> PipelineConfig:
+        """This run's config with the cleanup-pass overrides applied."""
+        cu = self.cfg.cleanup
+        c = copy.deepcopy(self.cfg)
+        c.cleanup.enabled = False
+        c.training.progress = False
+        if cu.signals:
+            c.signals = list(cu.signals)
+        if "splade" not in c.signals:
+            c.retrieval.splade.train = False
+        if "cross-encoder" not in c.signals:
+            c.retrieval.cross_encoder.train = False
+        if cu.n_folds:
+            c.training.n_folds = cu.n_folds
+        if cu.train_epochs:
+            c.encoder.train_epochs = cu.train_epochs
+            c.retrieval.splade.train_epochs = cu.train_epochs
+            c.retrieval.cross_encoder.train_epochs = cu.train_epochs
+        if cu.fine_tune == "off":
+            c.training.use_per_fold_encoder = False
+            c.retrieval.splade.train = False
+            c.retrieval.cross_encoder.train = False
+        return c
+
+    def _cleanup_oof(self, current, label_space, pass_cfg) -> Tuple[pd.DataFrame, List[str]]:
+        texts = [it.text for it in current]
+        y = np.array(label_space.encode_labels([it.label for it in current]), dtype=np.int64)
+        saved = (self.cfg, self._progress, self._quarantine, self._signal_providers)
+        self.cfg, self._progress, self._quarantine = (
+            pass_cfg,
+            TrainingProgress([], [], enabled=False),
+            None,
+        )
+        self._indexes = None
+        try:
+            oof = self._build_oof(texts, y, label_space)
+        finally:
+            self.cfg, self._progress, self._quarantine, self._signal_providers = saved
+            self._indexes = None  # those caches belong to the cleanup pass's corpus
+        names = [c for c in oof.columns if c not in ("item_id", "candidate", "is_true", "fold")]
+        return oof, names
+
+    def _quarantined_for(self, target: str) -> Optional[np.ndarray]:
+        q = self._quarantine
+        if q is None or target not in self.cfg.cleanup.quarantine_from:
+            return None
+        return q
+
+    def _rows_without(self, rows, masks) -> np.ndarray:
+        rows = np.asarray(rows, dtype=np.intp)
+        out = rows
+        for m in masks:
+            if m is not None:
+                out = out[~m[out]]
+        return out
+
+    def _pool_rows(self, rows) -> np.ndarray:
+        """``rows`` minus those quarantined from the kNN example pools."""
+        return self._rows_without(rows, [self._quarantined_for("knn_pool")])
+
+    def _tune_rows(self, rows) -> np.ndarray:
+        """``rows`` minus those quarantined from fine-tuning."""
+        return self._rows_without(rows, [self._quarantined_for("fine_tune")])
+
+    def _signal_rows(self, rows) -> np.ndarray:
+        """SPLADE fits its pool and its fine-tune together: excluded if either is."""
+        return self._rows_without(
+            rows, [self._quarantined_for("knn_pool"), self._quarantined_for("fine_tune")]
         )
 
     def _feature_groups(self) -> Dict[str, str]:
@@ -1078,9 +1204,13 @@ class TrainingPipeline:
         exact index the model will use in production.
         """
         indexes = self._index_builder(texts, y, label_space)
+        all_rows = np.arange(len(texts))
+        pool = self._pool_rows(all_rows)
+        self._deploy_pool = pool
         if self._use_per_fold_encoder():
             items = [
-                LabeledItem(texts[i], label_space.key_at(int(y[i]))) for i in range(len(texts))
+                LabeledItem(texts[i], label_space.key_at(int(y[i])))
+                for i in self._tune_rows(all_rows)
             ]
             encoder = fit_encoder(self.cfg.encoder, items, label_space)
         else:
@@ -1090,7 +1220,7 @@ class TrainingPipeline:
         # the leave-one-out path this runs first and populates them for
         # `_build_loo`. Either way there is exactly one encode/tokenize pass
         # over the corpus per run.
-        dense, lexical = indexes.build(encoder, None)
+        dense, lexical = indexes.build(encoder, None if len(pool) == len(texts) else pool)
         # Custom feature providers fit on *all* training rows — the version
         # that ships in the model and scores external val/test sets. The composed
         # schema (core + provider columns) is what the fusion/eval steps select by.
@@ -1105,14 +1235,14 @@ class TrainingPipeline:
         # only external sets and new data -- or, on the leave-one-out path,
         # training items with themselves masked out of the index).
         self._fit_signal_providers(
-            self._signal_providers, np.arange(len(texts)), texts, y, label_space
+            self._signal_providers, self._signal_rows(all_rows), texts, y, label_space
         )
         # T33 phase 3: the shipped cross-encoder is fine-tuned on all rows. It
         # scores only external val/test and new data, never these rows' features
         # (those came from the per-fold models), so this is leakage-free.
         self._fit_cross_encoder(
             self._signal_providers,
-            np.arange(len(texts)),
+            self._tune_rows(all_rows),
             texts,
             y,
             label_space,
@@ -1120,6 +1250,7 @@ class TrainingPipeline:
             dense,
             lexical,
             indexes,
+            pool_rows=pool,
         )
         self._feature_names = fusion_feature_names(
             self._providers, self.cfg.fusion.drop_features, self._signal_providers
