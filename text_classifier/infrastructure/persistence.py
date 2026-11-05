@@ -49,7 +49,7 @@ from ..domain import (
     fusion_feature_names,
 )
 from .registry import (
-    build_signal_providers,
+    build_signal_provider_schemas,
     calibrator_spec,
     dense_retriever_spec,
     encoder_spec,
@@ -585,6 +585,10 @@ class ArtifactRepository:
         self._check_package_version(meta.get("package_version"))
 
         config = PipelineConfig.from_dict(meta["config"])
+        # Saved before the tie cap existed: that model was trained, calibrated and
+        # thresholded on uncapped shortlists, so keep scoring it that way.
+        if "candidate_tie_cap" not in (meta.get("config") or {}):
+            config.candidate_tie_cap = None
         if device is not None:
             config.encoder.device = device
         # Dispatch each swappable component through the registry by its recorded
@@ -606,8 +610,8 @@ class ArtifactRepository:
         # schema-drift contract as encoder/fusion/calibrator/dense/lexical kind
         # mismatches.
         feature_providers = self._load_providers(directory, meta, config)
-        schema_signal_providers = build_signal_providers(
-            config.retrieval, components["signals"], None, None, None
+        schema_signal_providers = build_signal_provider_schemas(
+            config.retrieval, components["signals"]
         )
         expected = fusion_feature_names(
             feature_providers, config.fusion.drop_features, schema_signal_providers

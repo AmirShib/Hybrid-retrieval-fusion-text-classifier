@@ -8,6 +8,107 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-05
+
+### Added
+- **Hebrew item-name normalizer (T95):
+  `text_classifier.infrastructure.hebrew_text`.** `HebrewItemNormalizer` cleans
+  supermarket-style item names without removing information: unifies quote and
+  geresh variants and CSV-escape debris, splits numbers and dot-joined words from
+  the words they are glued to, writes each unit one way after a number (a bare
+  `מ` is left alone: it is meters on foil and ml on cosmetics), expands verified
+  abbreviations (`ח"פ`, `תפו"א`, `א.ד.ט`, ...), merges geresh spelling variants
+  learned from the data (`ציפס` -> `צ'יפס`; real words such as `צלי` are protected),
+  and completes a last word cut off by the source when that is unambiguous.
+  `extract_fields` reads quantity (normalized to g / ml / units / cm), pack count,
+  percent, kosher/dietary/promo marks and Latin tokens. `clean_dataframe` does a
+  whole table and reports conflicting labels. Fit on training names, `save`/`load`
+  as JSON, reuse at inference. Measured on 20k Hebrew COICOP items: +0.96
+  accuracy points. Not wired into the pipelines yet: apply it to the text before
+  training and before inference.
+- **Training-data cleanup round (`--cleanup`, config section `cleanup`).** Before
+  training, an extra out-of-fold pass flags suspicious training rows: `junk`
+  (placeholders, no letters) is dropped; exact-text `label_conflict`s take the
+  majority label (ties kept); `likely_mislabel` (a fusion model cross-fitted by
+  item is confident in another class, gives the label <= 5%, and a kNN signal
+  agrees), `ambiguous` and `not_shortlisted` rows are flagged. Every flagged row
+  is written to `suspicious_rows.csv` (UTF-8 with BOM, most actionable first)
+  with the suggested label, the scores and the reason; `evaluation.json` and the
+  model card get a summary. Likely mislabels are **kept by default**
+  (`mislabel_action = "keep"`): on 20k Hebrew COICOP items, dropping or
+  relabelling them moved accuracy on an untouched test set by -0.23 to -0.07
+  points (within noise), because the flagged rows mix real label errors with
+  hard-but-correct rows. No action may push a class below `n_folds` rows. Only
+  training rows are touched; external validation/test sets never are.
+  Controls: `signals`, `n_folds`, `train_epochs` and `fine_tune` (`same`/`off`)
+  make the cleanup pass cheaper than training (e.g. skip the cross-encoder);
+  `rounds` repeats detect -> act until nothing changes; `detector_params`
+  (XGBoost), `knn_agreement_signals` + `min_knn_agreeing`; per-issue actions
+  (`not_shortlisted_action`, `ambiguous_action`); `max_changed_fraction` caps
+  model-based changes, most confident first; action `quarantine` keeps a row for
+  the fusion model but out of the kNN pools and/or fine-tunes
+  (`quarantine_from`); `review_decisions` reads a reviewed `suspicious_rows.csv`
+  (`decision` column: keep / drop / quarantine / relabel:<class>), applied first
+  and exempt from every automatic rule, matched on text + label across runs.
+- **Training progress (`--progress`, `training.progress`).** One log line per
+  stage (each fold, the final model, fusion + calibration + evaluation) with the
+  elapsed time, the estimated time remaining and the estimated finish time; an
+  overall progress bar; per-step bars inside the encoder, cross-encoder and SPLADE
+  fine-tunes; and a live `progress.json` in the output directory, rewritten after
+  every stage and marked `done` or `failed` at the end. The estimate averages the
+  fold-like stages (the final model build costs about one fold); the last step is
+  reported as not estimated. Off by default; display only.
+- **`evaluation.json` → `signal_contributions` and a model-card section "Which
+  signals drive the fusion model's decisions".** Share of the fusion model's SHAP
+  attribution per signal (every configured signal, plus `cross-signal` columns),
+  the most and least used features, and the full per-feature table, on the
+  held-out rows.
+- **`evaluation.json` → `manifest.models` and a model-card "Models" table.** Per
+  component: base model, whether it was trained on this run's data, and where the
+  deployed weights are. The config alone names only the base checkpoint, e.g.
+  `cross_encoder.model_name` after a fine-tune.
+
+### Fixed
+- **The candidate shortlist could contain every class.** A signal's top-n kept
+  every class tied with the n-th score; when a signal scores most classes
+  identically (measured: TF-IDF item vectors vs label-name descriptions, cosine
+  exactly 0 for 100% of pairs) that admitted all classes, so a 55-class model
+  scored 55 candidates per item. New `candidate_tie_cap` (default 2.0): ties
+  are kept unless they would admit more than `2 x candidate_top_n`, then the
+  signal is cut to exactly `candidate_top_n` by class order. Measured on 20k
+  Hebrew COICOP items: 55 -> 19 candidates per item, training 267 s -> 92 s
+  (with the change below), candidate recall 100% -> 99.3%, accuracy 90.45% ->
+  90.57%. Models saved without the setting keep uncapped shortlists on load.
+- **Class prototypes were computed with an n x dim scatter.** Now one sparse
+  matrix product on the numpy backend: 39x faster on a 20k x 3,000 matrix,
+  identical results.
+- **Per-signal diagnostics covered only dense + BM25.** `signal_report` (and the
+  model card) now include SPLADE and every cross-encoder document (marked as round
+  two: its pick is the best within the shortlist), and discover any other signal by
+  its `is_<name>_top1` column. The agreement line reads against the real number of
+  voting signals instead of a hardcoded 5.
+- **XGBoost on GPU warned "Falling back to prediction using DMatrix due to
+  mismatched devices" on every prediction.** Features were handed over as host
+  arrays to a CUDA booster. Prediction now moves them to the GPU first when CuPy is
+  installed, and otherwise builds the `DMatrix` explicitly (the same data path,
+  without the mismatch). CPU prediction is unchanged and numerically identical.
+- **Ties in calibrated confidence picked the alphabetically-first class.**
+  Isotonic calibration is a step function, so an item's top candidates often share
+  one calibrated value; `top_key`, ranks and top-k then fell back to class order.
+  They are now ordered by the raw fusion score. Measured on the Hebrew COICOP data:
+  0.5% of items changed, accuracy 89.79% → 89.96%.
+- **Loading a model with the cross-encoder signal no longer loads the base
+  model.** The feature-schema check in `ArtifactRepository.load` built every
+  signal provider just to read its column names, and for
+  `retrieval.cross_encoder.kind = "cross-encoder"` that loaded
+  `cross_encoder.model_name` (the untrained base model) on top of the
+  fine-tuned one in `signals/cross-encoder/`. Predictions were unaffected, but
+  each load paid for a second model and logged Hugging Face warnings pointing at
+  the base model's path ("Some weights of BertForSequenceClassification were not
+  initialized from the model checkpoint at ..."), and a host without the base
+  model could not load at all. `SignalProviderSpec` gained an optional `schema`
+  builder for providers whose `build` is expensive; the cross-encoder uses it.
+
 ## [0.3.0] - 2026-11-02
 
 ### Added

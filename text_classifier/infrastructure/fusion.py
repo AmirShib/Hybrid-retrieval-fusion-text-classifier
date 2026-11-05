@@ -59,6 +59,43 @@ def _isotonic_from_breakpoints(
     return iso
 
 
+def _optional_cupy() -> Any:
+    try:
+        import cupy  # type: ignore[import-not-found]
+    except Exception:  # noqa: BLE001 - absent, or present without a usable GPU
+        return None
+    return cupy
+
+
+def xgb_predict_values(booster: Any, X: np.ndarray, device: str, cupy: Any = None) -> np.ndarray:
+    """``booster``'s prediction values for ``X``, with the data on the booster's device.
+
+    Handing a CUDA booster a host (numpy) array makes XGBoost log "Falling back
+    to prediction using DMatrix due to mismatched devices" on *every* call and
+    copy the data itself. Instead:
+
+    - ``device`` is CUDA and CuPy is available: the features are moved to the
+      GPU once and predicted there (no mismatch, no fallback).
+    - ``device`` is CUDA without CuPy: an explicit ``DMatrix`` -- the same data
+      path XGBoost would fall back to, minus the mismatch and the warning.
+      (XGBoost returns GPU predictions as CuPy arrays, so without CuPy there is
+      no GPU-resident output to read.)
+    - otherwise (CPU): numpy in-place prediction, as before.
+
+    Returns float64 numpy, the transformed value (probability for
+    ``binary:logistic``; the score for a ranking objective)."""
+    from xgboost import DMatrix
+
+    X = np.asarray(X, dtype=np.float32)
+    if str(device).startswith("cuda"):
+        cupy = cupy if cupy is not None else _optional_cupy()
+        if cupy is not None:
+            out = booster.inplace_predict(cupy.asarray(X), predict_type="value")
+            return np.asarray(cupy.asnumpy(out), dtype=np.float64)
+        return np.asarray(booster.predict(DMatrix(X, missing=np.nan)), dtype=np.float64)
+    return np.asarray(booster.inplace_predict(X, predict_type="value"), dtype=np.float64)
+
+
 class XGBoostFusionModel(FusionModel):
     def __init__(self, params: Dict[str, Any], auto_scale_pos_weight: bool = True):
         self._params = dict(params)
@@ -89,8 +126,11 @@ class XGBoostFusionModel(FusionModel):
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         assert self._model is not None, "fusion model not fitted"
-        self._model.set_params(device=resolve_device(self._device_override))
-        return self._model.predict_proba(np.asarray(X, dtype=np.float32))[:, 1]
+        device = resolve_device(self._device_override)
+        self._model.set_params(device=device)
+        # Binary objective: the booster's "value" is P(class 1) -- exactly
+        # predict_proba(X)[:, 1] -- but read with the data on the model's device.
+        return xgb_predict_values(self._model.get_booster(), X, device)
 
     def predict_contribs(self, X: np.ndarray) -> Optional[np.ndarray]:
         """SHAP contributions from the booster: ``(n, n_features + 1)`` where each
@@ -264,8 +304,9 @@ class XGBRankerFusionModel(FusionModel):
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         assert self._model is not None and self._iso is not None, "fusion model not fitted"
-        self._model.set_params(device=resolve_device(self._device_override))
-        raw = np.asarray(self._model.predict(np.asarray(X, dtype=np.float32)), dtype=np.float64)
+        device = resolve_device(self._device_override)
+        self._model.set_params(device=device)
+        raw = xgb_predict_values(self._model.get_booster(), X, device)
         return np.clip(self._iso.transform(raw), 0.0, 1.0)
 
     def save(self, path: str) -> None:

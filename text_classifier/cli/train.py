@@ -208,6 +208,23 @@ def main() -> None:
         "1 (single-threaded); -1 uses all CPU cores.",
     )
     p.add_argument(
+        "--cleanup",
+        action="store_true",
+        default=None,
+        help="run the training-data cleanup round first: drop junk rows, resolve exact "
+        "label conflicts by majority, flag likely mislabels, and write every suspicious "
+        "row to --out/suspicious_rows.csv (UTF-8 with BOM). Fine-tune settings in the "
+        "config's `cleanup` section",
+    )
+    p.add_argument(
+        "--progress",
+        action="store_true",
+        default=None,
+        help="report progress: one line per stage (each fold, the final model, fusion) "
+        "with the estimated time remaining, an overall bar, per-step bars inside "
+        "fine-tunes, and a live progress.json in --out",
+    )
+    p.add_argument(
         "--per-fold-encoder",
         action="store_true",
         default=None,
@@ -297,6 +314,10 @@ def main() -> None:
             cfg.retrieval.bm25_token_kwargs["stop_words"] = args.bm25_stop_words
     if args.per_fold_encoder:
         cfg.training.use_per_fold_encoder = True
+    if args.progress:
+        cfg.training.progress = True
+    if args.cleanup:
+        cfg.cleanup.enabled = True
     if args.store_corpus is not None:
         cfg.training.store_corpus = args.store_corpus
 

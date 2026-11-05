@@ -18,7 +18,8 @@ ground-truth flag), so the same report serves training and standalone evaluation
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+import re
+from typing import Any, Dict, Iterable, List, Sequence
 
 import numpy as np
 import pandas as pd
@@ -39,6 +40,38 @@ SIGNALS: Dict[str, Dict[str, str]] = {
     },
     "bm25_knn": {"top1": "is_b_knn_top1", "score": "b_knn_max", "missing": "b_knn_missing"},
 }
+
+# Optional signals (T94 SPLADE; T33 cross-encoder documents). Reported whenever
+# their columns are present; never listed as "skipped" when absent, because an
+# absent optional signal is simply not configured. Any *other* signal is found
+# by its ``is_<name>_top1`` column (see ``_discovered``), so a new signal shows
+# up here without editing this module.
+OPTIONAL_SIGNALS: Dict[str, Dict[str, Any]] = {
+    "splade_description": {"top1": "is_s_desc_top1", "missing": "s_desc_missing", "round": 1},
+    "splade_knn": {"top1": "is_s_knn_top1", "missing": "s_knn_missing", "round": 1},
+}
+_TOP1 = re.compile(r"^is_(.+)_top1$")
+
+
+def _discovered(columns: Sequence[str], known: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+    """Signals present in ``columns`` but not in ``known`` top1 columns.
+
+    Cross-encoder documents (``is_ce_<doc>_top1``) are round two: their pick is
+    the best *within the shortlist*, so ``fired_rate`` there means "reranked at
+    least one candidate" -- still comparable, but not a full retrieval."""
+    known = set(known)
+    out: Dict[str, Dict[str, Any]] = {}
+    for col in columns:
+        m = _TOP1.match(col)
+        if not m or col in known:
+            continue
+        stem = m.group(1)
+        if stem.startswith("ce_"):
+            name = f"cross_encoder_{stem[3:]}"
+            out[name] = {"top1": col, "missing": f"{stem}_missing", "round": 2}
+        else:
+            out[stem] = {"top1": col, "missing": f"{stem}_missing", "round": None}
+    return out
 
 
 def _empty_report() -> Dict[str, Any]:
@@ -72,7 +105,7 @@ def signal_report(features: pd.DataFrame) -> Dict[str, Any]:
         - ``candidate_missing_rate`` (signals that can miss only): fraction of
           candidate rows the signal did not score (its ``NaN`` "not retrieved" rate).
     - ``agreement`` — ``mean_distinct_top_classes`` (1 = every firing signal points
-      at the same class, up to 5 = all disagree) and ``consensus_rate`` (fraction of
+      at the same class, up to ``n_voting_signals`` = all disagree) and ``consensus_rate`` (fraction of
       items where the firing signals unanimously agree).
     - ``skipped_signals`` — signals whose columns are absent from ``features``
       (T87: a model trained with ``drop_features`` narrows the assembled frame,
@@ -94,10 +127,15 @@ def signal_report(features: pd.DataFrame) -> Dict[str, Any]:
 
     per_signal: List[Dict[str, Any]] = []
     skipped: List[str] = []
-    for name, cols in SIGNALS.items():
+    optional = {**OPTIONAL_SIGNALS}
+    known = [c["top1"] for c in SIGNALS.values()] + [c["top1"] for c in optional.values()]
+    optional.update(_discovered(list(features.columns), known))
+    plan = [(n, c, True) for n, c in SIGNALS.items()] + [(n, c, False) for n, c in optional.items()]
+    for name, cols, core in plan:
         flag_col = cols["top1"]
         if flag_col not in features.columns:
-            skipped.append(name)
+            if core:
+                skipped.append(name)
             continue
         # Exactly one candidate per item carries the flag — the signal's own top
         # pick — and none when the signal did not fire for that item.
@@ -109,6 +147,9 @@ def signal_report(features: pd.DataFrame) -> Dict[str, Any]:
             "top1_accuracy": n_correct / n_items,
             "fired_rate": n_fired / n_items,
             "top1_precision_when_fired": (n_correct / n_fired) if n_fired else None,
+            # 1 = shortlist-building signal; 2 = reranker (its pick is the best
+            # *within* the shortlist).
+            "round": cols.get("round", 1),
         }
         miss = cols.get("missing")
         if miss and miss in features.columns:
@@ -128,6 +169,9 @@ def signal_report(features: pd.DataFrame) -> Dict[str, Any]:
         agreement = {
             "mean_distinct_top_classes": float(distinct.mean()),
             "consensus_rate": float((distinct <= 1.0).mean()),
+            # How many signals vote (every round-one top-1 pick), so the
+            # mean above reads against its real maximum.
+            "n_voting_signals": int(voters),
         }
 
     return {

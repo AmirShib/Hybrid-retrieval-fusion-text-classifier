@@ -44,6 +44,7 @@ from ..domain import (
     SignalProvider,
 )
 from .array_ops import NumpyArrayOps
+from .._progress import show_training_bars
 from .device import resolve_device
 from .signals import _argmax_or_missing, _topn_mask
 
@@ -91,6 +92,23 @@ class TokenOverlapReranker(PairwiseReranker):
 
 
 logger = logging.getLogger(__name__)
+
+
+class SchemaOnlyReranker(PairwiseReranker):
+    """Placeholder backend for a ``CrossEncoderSignalProvider`` that exists only
+    to report ``column_names()`` (the load-time schema check). It holds no
+    model, so building one is free and touches no files; scoring or saving it
+    is a bug and raises."""
+
+    def score(self, pairs: Sequence[Tuple[str, str]]) -> np.ndarray:
+        raise RuntimeError("SchemaOnlyReranker cannot score: it exists only for column_names()")
+
+    def save(self, directory: str) -> None:
+        raise RuntimeError("SchemaOnlyReranker cannot be saved: it holds no model")
+
+    @classmethod
+    def load(cls, path: str, **kwargs) -> "SchemaOnlyReranker":
+        raise RuntimeError("SchemaOnlyReranker cannot be loaded: it holds no model")
 
 
 # ------------------------------------------------------ real cross-encoder
@@ -402,7 +420,7 @@ def train_cross_encoder(
             "learning_rate": config.learning_rate,
             "weight_decay": config.weight_decay,
             "report_to": "none",
-            "disable_tqdm": True,
+            "disable_tqdm": not show_training_bars(),  # on with training.progress
             "logging_strategy": "no",
             "save_strategy": "no",
             **_warmup_kwargs(config.warmup_ratio),

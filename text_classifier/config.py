@@ -490,6 +490,79 @@ class FeatureProviderConfig:
     params: Dict[str, Any] = field(default_factory=dict)
 
 
+CLEANUP_ACTIONS = ("keep", "drop", "relabel", "quarantine")
+QUARANTINE_TARGETS = ("knn_pool", "fine_tune")
+KNN_AGREEMENT_SIGNALS = ("dense", "lexical", "splade")
+
+
+@dataclass
+class CleanupConfig:
+    """Training-data cleanup round (T96; see ``application/cleanup.py``).
+
+    Off by default. When on, training first runs an extra out-of-fold pass over
+    the training items, flags suspicious rows, applies the actions below, and
+    then trains on the cleaned items. Every flagged row -- acted on or not -- is
+    written to ``review_file`` in the output directory (UTF-8 with BOM, so
+    Hebrew opens correctly in Excel). Only training rows are ever changed;
+    external validation/test sets are not touched.
+
+    Defaults are the conservative, measured ones: junk is dropped and exact
+    label conflicts resolved by majority, while model-detected likely mislabels
+    are only flagged (``mislabel_action="keep"``) -- on the Hebrew COICOP data
+    dropping or relabelling them did not improve accuracy on an untouched test
+    set, because the flagged rows mix real label errors with hard-but-correct
+    rows. Switch it to "drop" or "relabel" after reviewing the file.
+
+    Actions: "keep" (flag only), "drop", "relabel" (to the suggested class), and
+    "quarantine": the row stays in the training data -- the fusion model still
+    learns from it -- but is kept out of the parts listed in ``quarantine_from``:
+    "knn_pool" (the dense / BM25 / SPLADE example pools and class prototypes,
+    where a wrong label votes directly at inference) and/or "fine_tune" (the
+    encoder, SPLADE and cross-encoder fine-tunes). SPLADE fits its pool and its
+    fine-tune together, so it leaves a quarantined row out when either is listed.
+
+    The cleanup pass can be made cheaper than training with ``signals``,
+    ``n_folds``, ``train_epochs`` and ``fine_tune="off"``; empty = same as training."""
+
+    enabled: bool = False
+    # ---- the cleanup pass itself (None/empty = same as training)
+    signals: Optional[List[str]] = None  # e.g. ["dense", "lexical"]: skip costly signals
+    n_folds: Optional[int] = None
+    train_epochs: Optional[int] = None  # every fine-tune in the cleanup pass
+    fine_tune: str = "same"  # "same" | "off" (pretrained models only: fast, weaker)
+    rounds: int = 1  # repeat detect -> act on the cleaned data until nothing changes
+    drop_junk: bool = True
+    # "relabel": minority rows of an exact-text conflict take the majority label
+    # (ties are kept and flagged). "keep": flag only.
+    conflict_action: str = "relabel"
+    detect_mislabels: bool = True  # needs k-fold training (n_folds >= 2)
+    mislabel_action: str = "keep"
+    min_suggested_share: float = 0.9  # model's share for the other class, at least
+    max_label_share: float = 0.05  # ... and for the row's own label, at most
+    require_knn_agreement: bool = True  # a nearest-neighbour signal must agree too
+    ambiguous_share: float = 0.3  # both classes at least this -> "ambiguous"
+    # Which kNN signals vote on "the rival class", and how many must agree.
+    knn_agreement_signals: Optional[List[str]] = None  # None = every one computed
+    min_knn_agreeing: int = 1
+    not_shortlisted_action: str = "keep"  # keep | drop | quarantine
+    ambiguous_action: str = "keep"  # keep | drop | quarantine
+    quarantine_from: List[str] = field(default_factory=lambda: ["knn_pool", "fine_tune"])
+    # Cap on model-based changes (drop/relabel/quarantine of likely mislabels,
+    # not-shortlisted and ambiguous rows) as a fraction of the input rows, most
+    # confident first. Junk, conflicts and human decisions are not capped.
+    max_changed_fraction: Optional[float] = None
+    # ---- the detector (an XGBoost model cross-fitted by item)
+    cross_fit_folds: int = 5
+    cross_fit_trees: int = 250
+    detector_params: Dict[str, Any] = field(default_factory=dict)  # merged over the defaults
+    # ---- files
+    review_file: str = "suspicious_rows.csv"
+    # A reviewed copy of review_file: rows with a `decision` (keep / drop /
+    # quarantine / relabel:<class>) are applied first and exempt from every
+    # automatic rule. Matched on text + label, so it keeps applying across runs.
+    review_decisions: Optional[str] = None
+
+
 @dataclass
 class FeaturesConfig:
     """Custom fusion features. ``providers`` is an *ordered* list — the
@@ -508,6 +581,12 @@ class TrainingConfig:
     per_class_min_support: int = 100
     use_per_fold_encoder: bool = False  # True = rigorous (refit encoder per fold), expensive
     random_state: int = 0
+    # Report progress while training: one log line per stage (each fold, the
+    # final model, fusion + calibration) with the estimated time remaining, an
+    # overall progress bar, per-step bars inside fine-tunes, and a live
+    # `progress.json` in the output directory. Display only: never changes the
+    # trained model. CLI: --progress.
+    progress: bool = False
     # Persist the raw training corpus (text + label, gzip-compressed JSONL) into
     # the model dir as corpus.jsonl.gz. `text-classifier-update` needs it
     # to add labeled examples later without retraining (BM25's IDF is
@@ -555,7 +634,14 @@ class PipelineConfig:
     calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     features: FeaturesConfig = field(default_factory=FeaturesConfig)
+    cleanup: CleanupConfig = field(default_factory=CleanupConfig)
     candidate_top_n: int = 10
+    # When ties at a signal's top-n cutoff would admit more than this many times
+    # `candidate_top_n` classes, cut that signal to exactly `candidate_top_n`
+    # (ties broken by class order). Measured: with TF-IDF and label-name
+    # descriptions every description similarity was exactly 0, so all classes
+    # tied and every item got every class as a "candidate". None = keep all ties.
+    candidate_tie_cap: Optional[float] = 2.0
     # T34 phase 2: which SignalProvider(s) compute the retrieval signals that
     # feed candidate selection + the core feature columns. Registry keys (see
     # infrastructure/registry.py's register_signal_provider), mirroring how
@@ -953,6 +1039,117 @@ class PipelineConfig:
                 f"referring only to configured document names {sorted(ce_doc_names)}",
             ),
         ]
+        checks.append(
+            (
+                "candidate_tie_cap",
+                self.candidate_tie_cap,
+                self.candidate_tie_cap is None or self.candidate_tie_cap >= 1,
+                "None or >= 1",
+            )
+        )
+        cu = self.cleanup
+        checks += [
+            (
+                "cleanup.mislabel_action",
+                cu.mislabel_action,
+                cu.mislabel_action in CLEANUP_ACTIONS,
+                f"one of {list(CLEANUP_ACTIONS)}",
+            ),
+            (
+                "cleanup.conflict_action",
+                cu.conflict_action,
+                cu.conflict_action in ("keep", "relabel"),
+                "'keep' or 'relabel'",
+            ),
+            (
+                "cleanup.min_suggested_share",
+                cu.min_suggested_share,
+                0 < cu.min_suggested_share <= 1,
+                "in (0, 1]",
+            ),
+            (
+                "cleanup.max_label_share",
+                cu.max_label_share,
+                0 <= cu.max_label_share < 1,
+                "in [0, 1)",
+            ),
+            (
+                "cleanup.ambiguous_share",
+                cu.ambiguous_share,
+                0 < cu.ambiguous_share <= 0.5,
+                "in (0, 0.5]",
+            ),
+            ("cleanup.cross_fit_folds", cu.cross_fit_folds, cu.cross_fit_folds >= 2, ">= 2"),
+            ("cleanup.cross_fit_trees", cu.cross_fit_trees, cu.cross_fit_trees >= 1, ">= 1"),
+            ("cleanup.review_file", cu.review_file, bool(str(cu.review_file).strip()), "non-empty"),
+            (
+                "cleanup.signals",
+                cu.signals,
+                cu.signals is None
+                or (
+                    bool(cu.signals)
+                    and len(set(cu.signals)) == len(cu.signals)
+                    and any(s != "cross-encoder" for s in cu.signals)
+                ),
+                "None, or a non-empty duplicate-free list with at least one shortlist "
+                "signal (the cross-encoder only reranks)",
+            ),
+            ("cleanup.n_folds", cu.n_folds, cu.n_folds is None or cu.n_folds >= 2, "None or >= 2"),
+            (
+                "cleanup.train_epochs",
+                cu.train_epochs,
+                cu.train_epochs is None or cu.train_epochs >= 1,
+                "None or >= 1",
+            ),
+            ("cleanup.fine_tune", cu.fine_tune, cu.fine_tune in ("same", "off"), "'same' or 'off'"),
+            ("cleanup.rounds", cu.rounds, cu.rounds >= 1, ">= 1"),
+            (
+                "cleanup.knn_agreement_signals",
+                cu.knn_agreement_signals,
+                cu.knn_agreement_signals is None
+                or (
+                    bool(cu.knn_agreement_signals)
+                    and set(cu.knn_agreement_signals) <= set(KNN_AGREEMENT_SIGNALS)
+                ),
+                f"None or a non-empty subset of {list(KNN_AGREEMENT_SIGNALS)}",
+            ),
+            (
+                "cleanup.min_knn_agreeing",
+                cu.min_knn_agreeing,
+                1 <= cu.min_knn_agreeing <= len(cu.knn_agreement_signals or KNN_AGREEMENT_SIGNALS),
+                "between 1 and the number of kNN agreement signals",
+            ),
+            (
+                "cleanup.not_shortlisted_action",
+                cu.not_shortlisted_action,
+                cu.not_shortlisted_action in ("keep", "drop", "quarantine"),
+                "keep, drop or quarantine",
+            ),
+            (
+                "cleanup.ambiguous_action",
+                cu.ambiguous_action,
+                cu.ambiguous_action in ("keep", "drop", "quarantine"),
+                "keep, drop or quarantine",
+            ),
+            (
+                "cleanup.quarantine_from",
+                cu.quarantine_from,
+                bool(cu.quarantine_from) and set(cu.quarantine_from) <= set(QUARANTINE_TARGETS),
+                f"a non-empty subset of {list(QUARANTINE_TARGETS)}",
+            ),
+            (
+                "cleanup.max_changed_fraction",
+                cu.max_changed_fraction,
+                cu.max_changed_fraction is None or 0 <= cu.max_changed_fraction <= 1,
+                "None or in [0, 1]",
+            ),
+            (
+                "cleanup.detector_params",
+                sorted(cu.detector_params),
+                isinstance(cu.detector_params, dict),
+                "a dict of XGBoost parameters",
+            ),
+        ]
         sp = self.retrieval.splade
         checks += [
             # T94. Like the cross-encoder block: checked even when switched off.
@@ -1063,6 +1260,7 @@ class PipelineConfig:
             calibration=_build_section(CalibrationConfig, data, "calibration"),
             training=_build_section(TrainingConfig, data, "training"),
             features=_build_features_section(data),
+            cleanup=_build_section(CleanupConfig, data, "cleanup"),
             candidate_top_n=data.get("candidate_top_n", cls().candidate_top_n),
             array_backend=data.get("array_backend", cls().array_backend),
             signals=list(data.get("signals", cls().signals)),

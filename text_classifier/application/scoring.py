@@ -54,7 +54,27 @@ def add_confidence(
     raw = fusion.predict_proba(X)
     out = features.copy()
     out["conf"] = calibrator.transform(raw, classes=features["candidate"].to_numpy())
+    # Kept for ranking: isotonic calibration is a step function, so an item's
+    # top candidates often share one calibrated value. Ties are then broken by
+    # the fusion model's own score, not by class index (see `_RANK_KEYS`).
+    out[RAW_SCORE] = np.asarray(raw, dtype=np.float64)
     return out
+
+
+RAW_SCORE = "raw_score"
+
+
+def _rank_order(scored: pd.DataFrame) -> pd.DataFrame:
+    """Sort by item, then calibrated confidence, then raw fusion score (desc).
+
+    Without the raw-score key, candidates tied on calibrated confidence kept
+    their assembly order -- class index ascending -- so the reported top-1 for a
+    tie was the alphabetically-first label rather than the one the fusion model
+    scored higher (measured: ~1% of items on the Hebrew COICOP data). A frame
+    without ``raw_score`` (built elsewhere) falls back to the old order."""
+    keys = ["item_id", "conf"] + ([RAW_SCORE] if RAW_SCORE in scored.columns else [])
+    asc = [True] + [False] * (len(keys) - 1)
+    return scored.sort_values(keys, ascending=asc, kind="stable")
 
 
 def rank_candidates(scored: pd.DataFrame, k: Optional[int] = None) -> pd.DataFrame:
@@ -63,14 +83,15 @@ def rank_candidates(scored: pd.DataFrame, k: Optional[int] = None) -> pd.DataFra
 
     Every consumer of a scored frame — ``top_k_per_item``, ``explain``,
     ``explain_records`` — needs exactly this, and each used to spell it out
-    again. The tie-breaking is part of the contract, not an accident: the sort
-    is pandas' default stable quicksort-on-ties, so equal confidences keep their
-    assembly order (candidate-index ascending), which is what makes ``rank`` and
-    the reported top-1 agree across the three call sites. The index is reset so
+    again. The tie-breaking is part of the contract, not an accident: equal
+    calibrated confidences are ordered by the raw fusion score, and only an exact
+    tie on both keeps assembly order (candidate-index ascending, stable sort).
+    One shared ordering (``_rank_order``) is what makes ``rank`` and the reported
+    top-1 agree across every call site. The index is reset so
     positional row numbers align with any array computed from the result (the
     contributions matrix in ``explain_records`` relies on this).
     """
-    ranked = scored.sort_values(["item_id", "conf"], ascending=[True, False]).reset_index(drop=True)
+    ranked = _rank_order(scored).reset_index(drop=True)
     ranked["rank"] = ranked.groupby("item_id", sort=False).cumcount() + 1
     if k is not None:
         ranked = ranked[ranked["rank"] <= k].reset_index(drop=True)
@@ -85,7 +106,7 @@ def top_per_item(scored: pd.DataFrame) -> pd.DataFrame:
     merge is ``how="left"`` — so it stays a float column; consumers must check
     for NaN before indexing into it.
     """
-    scored = scored.sort_values(["item_id", "conf"], ascending=[True, False])
+    scored = _rank_order(scored)
     grp = scored.groupby("item_id", sort=False)
     top = grp.head(1).copy()
 

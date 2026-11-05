@@ -603,12 +603,23 @@ def _prototypes_and_freq(
         if n
         else np.zeros(n_classes, dtype=np.int64)
     )
-    rows = np.repeat(labels, dim)
-    cols = np.tile(np.arange(dim), n)
-    values = ops.asarray(emb, dtype=np.float64).reshape(-1)
-    class_sum = ops.to_host(
-        ops.scatter_add(ops.zeros((n_classes, dim), dtype=np.float64), rows, cols, values)
-    )
+    if ops.name == "numpy":
+        # Class sums as one sparse product: (C, n) membership matrix @ (n, dim).
+        # The scatter below materializes n * dim (row, col, value) triples --
+        # hundreds of millions for TF-IDF-sized vectors; this touches each
+        # embedding once. Same float64 accumulation; sums agree to float
+        # rounding (summation order differs).
+        member = sparse.csr_matrix(
+            (np.ones(n, dtype=np.float64), (labels, np.arange(n))), shape=(n_classes, n)
+        )
+        class_sum = np.asarray(member @ np.asarray(emb, dtype=np.float64))
+    else:
+        rows = np.repeat(labels, dim)
+        cols = np.tile(np.arange(dim), n)
+        values = ops.asarray(emb, dtype=np.float64).reshape(-1)
+        class_sum = ops.to_host(
+            ops.scatter_add(ops.zeros((n_classes, dim), dtype=np.float64), rows, cols, values)
+        )
     counts = freq.astype(np.float64)[:, None]
     with np.errstate(invalid="ignore", divide="ignore"):
         mean = class_sum / counts
