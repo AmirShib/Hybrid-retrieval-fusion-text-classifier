@@ -53,6 +53,7 @@ from ..domain import (
     SparseTextEncoder,
 )
 from .array_ops import NumpyArrayOps
+from .._progress import show_training_bars
 from .device import resolve_device
 from .signals import _argmax_or_missing, _scatter_knn
 
@@ -275,10 +276,18 @@ def train_splade(
     sched = get_linear_schedule_with_warmup(opt, int(config.warmup_ratio * steps), steps)
     all_classes = np.arange(C)
     last = float("nan")
+    from tqdm.auto import tqdm
+
     for epoch in range(config.train_epochs):
         order = rng.permutation(n)
         total, batches = 0.0, 0
-        for start in range(0, n, bs):
+        steps_bar = tqdm(
+            range(0, n, bs),
+            desc=f"splade epoch {epoch + 1}/{config.train_epochs}",
+            unit="batch",
+            disable=not show_training_bars() or None,
+        )
+        for start in steps_bar:
             idx = order[start : start + bs]
             pos = np.unique(labels[idx])
             others = np.setdiff1d(all_classes, pos, assume_unique=True)

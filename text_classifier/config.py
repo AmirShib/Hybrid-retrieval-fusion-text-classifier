@@ -508,6 +508,12 @@ class TrainingConfig:
     per_class_min_support: int = 100
     use_per_fold_encoder: bool = False  # True = rigorous (refit encoder per fold), expensive
     random_state: int = 0
+    # Report progress while training: one log line per stage (each fold, the
+    # final model, fusion + calibration) with the estimated time remaining, an
+    # overall progress bar, per-step bars inside fine-tunes, and a live
+    # `progress.json` in the output directory. Display only: never changes the
+    # trained model. CLI: --progress.
+    progress: bool = False
     # Persist the raw training corpus (text + label, gzip-compressed JSONL) into
     # the model dir as corpus.jsonl.gz. `text-classifier-update` needs it
     # to add labeled examples later without retraining (BM25's IDF is

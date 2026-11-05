@@ -44,6 +44,7 @@ from ..domain import (
     SignalProvider,
 )
 from .array_ops import NumpyArrayOps
+from .._progress import show_training_bars
 from .device import resolve_device
 from .signals import _argmax_or_missing, _topn_mask
 
@@ -419,7 +420,7 @@ def train_cross_encoder(
             "learning_rate": config.learning_rate,
             "weight_decay": config.weight_decay,
             "report_to": "none",
-            "disable_tqdm": True,
+            "disable_tqdm": not show_training_bars(),  # on with training.progress
             "logging_strategy": "no",
             "save_strategy": "no",
             **_warmup_kwargs(config.warmup_ratio),

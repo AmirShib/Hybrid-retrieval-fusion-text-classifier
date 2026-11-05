@@ -19,13 +19,14 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import StratifiedKFold
 
 from .._messages import format_preview
+from .._progress import TrainingProgress, training_bars
 from ..config import CalibrationConfig, PipelineConfig
 from ..domain import (
     AbstentionPolicy,
@@ -70,6 +71,7 @@ from .evaluation import build_manifest, evaluate_decisions, write_evaluation_art
 from .features import FeatureAssembler
 from .indexing import RetrievalIndexBuilder
 from .scoring import add_confidence, select_feature_columns, top_per_item
+from .importance import signal_contributions
 from .signal_report import signal_report
 
 log = logging.getLogger(__name__)
@@ -161,6 +163,8 @@ class TrainingPipeline:
         # first index-construction site builds them (`_index_builder`).
         self._shared_encoder: Optional[TextEncoder] = None
         self._indexes: Optional[RetrievalIndexBuilder] = None
+        # Replaced per run() by the run's plan; a disabled no-op until then.
+        self._progress = TrainingProgress([], [], enabled=False)
 
     def _index_builder(
         self, texts: Sequence[str], y: np.ndarray, label_space: LabelSpace
@@ -269,6 +273,37 @@ class TrainingPipeline:
         val_items = None if val_items is None else list(val_items)
         test_items = None if test_items is None else list(test_items)
         self._validate_inputs(items, label_space, val_items, test_items)
+        self._progress = self._progress_plan(output_dir)
+        try:
+            with training_bars(self.cfg.training.progress):
+                result = self._run(items, label_space, output_dir, val_items, test_items)
+        except BaseException:
+            self._progress.finish("failed")
+            raise
+        self._progress.finish("done")
+        return result
+
+    def _progress_plan(self, output_dir: Optional[str]) -> TrainingProgress:
+        n = self.cfg.training.n_folds
+        if n == 1:
+            folds = ["final model", "leave-one-out features"]
+        else:
+            folds = [f"fold {i + 1}/{n}" for i in range(n)] + ["final model"]
+        return TrainingProgress(
+            folds + ["fusion + calibration + evaluation"],
+            fold_like=folds,
+            output_dir=output_dir,
+            enabled=self.cfg.training.progress,
+        )
+
+    def _run(
+        self,
+        items: List[LabeledItem],
+        label_space: LabelSpace,
+        output_dir: Optional[str],
+        val_items: Optional[List[LabeledItem]],
+        test_items: Optional[List[LabeledItem]],
+    ) -> Tuple[DeployedArtifacts, CoverageReport]:
         # T84: resolved once per run from this run's scale (auto picks numpy vs.
         # a device-resident backend from T83's crossover; explicit always wins).
         # The same instance is threaded through every FeatureAssembler/
@@ -302,11 +337,15 @@ class TrainingPipeline:
         if self.cfg.training.n_folds == 1:
             # Leave-one-out: build the deployment index first, then featurize every
             # training item against it with itself masked out — no k-fold loop.
-            encoder, dense, lexical = self._build_deployment_index(texts, y, label_space)
-            oof = self._build_loo(texts, y, label_space, encoder, dense, lexical)
+            with self._progress.stage("final model"):
+                encoder, dense, lexical = self._build_deployment_index(texts, y, label_space)
+            with self._progress.stage("leave-one-out features"):
+                oof = self._build_loo(texts, y, label_space, encoder, dense, lexical)
         else:
-            oof = self._build_oof(texts, y, label_space)
-            encoder, dense, lexical = self._build_deployment_index(texts, y, label_space)
+            oof = self._build_oof(texts, y, label_space)  # times each fold itself
+            with self._progress.stage("final model"):
+                encoder, dense, lexical = self._build_deployment_index(texts, y, label_space)
+        self._progress.start("fusion + calibration + evaluation")
         val_feats = None
         if val_items is not None:
             val_feats, _ = self._featurize_external(val_items, label_space, encoder, dense, lexical)
@@ -321,6 +360,7 @@ class TrainingPipeline:
         report, evaluation = self._evaluate(
             oof, roles, y, label_space, fusion, calibrator, abstention, test_feats, test_y
         )
+        self._progress.done("fusion + calibration + evaluation")
 
         artifacts = DeployedArtifacts(
             self.cfg,
@@ -354,10 +394,65 @@ class TrainingPipeline:
                 config=self.cfg,
                 n_evaluated=report.n_items,
                 splits=self._split_provenance(val_items, test_items),
+                models=self._model_provenance(),
             )
             write_evaluation_artifacts(output_dir, evaluation, manifest)
             log.info("saved trained pipeline + evaluation to %s", output_dir)
         return artifacts, report
+
+    def _model_provenance(self) -> Dict[str, Any]:
+        """What each learned component actually is, for the manifest.
+
+        The config only says what a component was *built from*: after a
+        fine-tune, ``cross_encoder.model_name`` still names the base checkpoint
+        while the shipped weights are the fine-tuned ones in the model dir. This
+        states it explicitly per component -- base model, whether it was
+        trained on this run's data, and where the deployed weights live."""
+        cfg = self.cfg
+        enc_trained = self._use_per_fold_encoder()
+        st = cfg.encoder.kind == "sentence-transformers"
+        out: Dict[str, Any] = {
+            "encoder": {
+                "kind": cfg.encoder.kind,
+                "base_model": cfg.encoder.model_name_or_path if st else None,
+                "trained_on_this_data": enc_trained,
+                "how": (
+                    ("fine-tuned per fold + once on all items" if st else "fitted per fold")
+                    if enc_trained
+                    else "used as loaded (not trained by this run)"
+                ),
+                "deployed_weights": "encoder/",
+            }
+        }
+        signals: Dict[str, Any] = {}
+        for name in cfg.signals:
+            if name == "dense":
+                signals[name] = {"round": 1, "model": "the encoder above", "index": "dense.npz"}
+            elif name == "lexical":
+                signals[name] = {
+                    "round": 1,
+                    "model": "BM25 (fitted per fold)",
+                    "index": "lexical.npz",
+                }
+            elif name in ("splade", "cross-encoder"):
+                sub = cfg.retrieval.splade if name == "splade" else cfg.retrieval.cross_encoder
+                real = sub.kind in ("splade", "cross-encoder")
+                signals[name] = {
+                    "round": 1 if name == "splade" else 2,
+                    "kind": sub.kind,
+                    "base_model": sub.model_name if real else None,
+                    "trained_on_this_data": bool(sub.train),
+                    "how": (
+                        "fine-tuned per fold + once on all items"
+                        if sub.train
+                        else ("used as loaded" if real else "offline stand-in, no model")
+                    ),
+                    "deployed_weights": f"signals/{name}/",
+                }
+            else:
+                signals[name] = {"round": None, "deployed_weights": f"signals/{name}/"}
+        out["signals"] = signals
+        return out
 
     @staticmethod
     def _split_provenance(
@@ -609,6 +704,7 @@ class TrainingPipeline:
         )
         frames, recall_hits, total = [], 0, 0
         for fold, (tr, va) in enumerate(skf.split(texts, y)):
+            self._progress.start(f"fold {fold + 1}/{self.cfg.training.n_folds}")
             enc = self._encoder_for_split(tr, texts, y, label_space, shared)
             # This fold's retrieval state, over its *training* rows only — the
             # leakage rule. Whether that reuses the run-wide caches (T88/T32) or
@@ -665,6 +761,7 @@ class TrainingPipeline:
             recall_hits += int(feats.groupby("item_id")["is_true"].max().sum())
             total += len(va)
             log.info("fold %d: %d items, %d feature rows", fold, len(va), len(feats))
+            self._progress.done(f"fold {fold + 1}/{self.cfg.training.n_folds}")
 
         recall = recall_hits / max(total, 1)
         log.info("candidate recall = %.4f (the ceiling on system accuracy)", recall)
@@ -880,7 +977,33 @@ class TrainingPipeline:
             "n_per_class_thresholds": len(abstention.per_class),
             "per_class": {label_space.key_at(c): thr for c, thr in abstention.per_class.items()},
         }
+        # Which signals the fusion model actually leans on, measured on the same
+        # held-out rows as the metrics above, grouped by the signal that produced
+        # each column -- every configured signal, not only dense/BM25.
+        if len(te):
+            X = select_feature_columns(
+                te, self._feature_names, context="signal_contributions"
+            ).to_numpy(dtype=np.float32)
+            contrib = signal_contributions(fusion, X, self._feature_names, self._feature_groups())
+            if contrib is not None:
+                evaluation["signal_contributions"] = contrib
         return report, evaluation
+
+    def _feature_groups(self) -> Dict[str, str]:
+        """Feature column -> the signal (or feature provider) that produced it.
+        Columns no single provider owns (``n_signal_agreement``, ``n_top1_votes``,
+        ``desc_proto_gap``, ``class_log_freq``) are left out and reported as
+        ``cross-signal``."""
+        cross = {"n_signal_agreement", "n_top1_votes", "desc_proto_gap", "class_log_freq"}
+        groups: Dict[str, str] = {}
+        for sp in self._signal_providers:
+            for col in sp.column_names():
+                if col not in cross:
+                    groups[col] = sp.name
+        for fp in self._providers:
+            for col in fp.names():
+                groups[col] = f"provider:{type(fp).__name__}"
+        return groups
 
     # ---------------------------------------------------------------- (5) deploy
     def _build_deployment_index(

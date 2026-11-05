@@ -33,6 +33,7 @@ import numpy as np
 
 from ..config import EncoderConfig
 from ..domain import ENCODER_SELECTION_METRICS, LabeledItem, LabelSpace, TextEncoder
+from .._progress import show_training_bars
 from .device import resolve_device
 
 if TYPE_CHECKING:  # torch-free at runtime; the type is only for checkers
@@ -816,7 +817,7 @@ def _training_arguments(
         "weight_decay": config.weight_decay,
         "batch_sampler": BatchSamplers.NO_DUPLICATES,
         "report_to": "none",  # nothing is sent anywhere: the host may be air-gapped
-        "disable_tqdm": True,
+        "disable_tqdm": not show_training_bars(),  # on with training.progress
         "logging_strategy": "no",
         **_warmup_kwargs(config.warmup_ratio),
     }

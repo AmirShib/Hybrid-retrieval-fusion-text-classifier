@@ -8,7 +8,41 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 
 ## [Unreleased]
 
+### Added
+- **Training progress (`--progress`, `training.progress`).** One log line per
+  stage (each fold, the final model, fusion + calibration + evaluation) with the
+  elapsed time, the estimated time remaining and the estimated finish time; an
+  overall progress bar; per-step bars inside the encoder, cross-encoder and SPLADE
+  fine-tunes; and a live `progress.json` in the output directory, rewritten after
+  every stage and marked `done` or `failed` at the end. The estimate averages the
+  fold-like stages (the final model build costs about one fold); the last step is
+  reported as not estimated. Off by default; display only.
+- **`evaluation.json` → `signal_contributions` and a model-card section "Which
+  signals drive the fusion model's decisions".** Share of the fusion model's SHAP
+  attribution per signal (every configured signal, plus `cross-signal` columns),
+  the most and least used features, and the full per-feature table, on the
+  held-out rows.
+- **`evaluation.json` → `manifest.models` and a model-card "Models" table.** Per
+  component: base model, whether it was trained on this run's data, and where the
+  deployed weights are. The config alone names only the base checkpoint, e.g.
+  `cross_encoder.model_name` after a fine-tune.
+
 ### Fixed
+- **Per-signal diagnostics covered only dense + BM25.** `signal_report` (and the
+  model card) now include SPLADE and every cross-encoder document (marked as round
+  two: its pick is the best within the shortlist), and discover any other signal by
+  its `is_<name>_top1` column. The agreement line reads against the real number of
+  voting signals instead of a hardcoded 5.
+- **XGBoost on GPU warned "Falling back to prediction using DMatrix due to
+  mismatched devices" on every prediction.** Features were handed over as host
+  arrays to a CUDA booster. Prediction now moves them to the GPU first when CuPy is
+  installed, and otherwise builds the `DMatrix` explicitly (the same data path,
+  without the mismatch). CPU prediction is unchanged and numerically identical.
+- **Ties in calibrated confidence picked the alphabetically-first class.**
+  Isotonic calibration is a step function, so an item's top candidates often share
+  one calibrated value; `top_key`, ranks and top-k then fell back to class order.
+  They are now ordered by the raw fusion score. Measured on the Hebrew COICOP data:
+  0.5% of items changed, accuracy 89.79% → 89.96%.
 - **Loading a model with the cross-encoder signal no longer loads the base
   model.** The feature-schema check in `ArtifactRepository.load` built every
   signal provider just to read its column names, and for

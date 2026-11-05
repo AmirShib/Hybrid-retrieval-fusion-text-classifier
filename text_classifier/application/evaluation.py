@@ -288,6 +288,7 @@ def build_manifest(
     config: Any,
     n_evaluated: Optional[int] = None,
     splits: Optional[Dict[str, Any]] = None,
+    models: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """A provenance record: package version, timestamp, data shape, and config.
 
@@ -310,7 +311,68 @@ def build_manifest(
     }
     if splits is not None:
         manifest["splits"] = splits
+    if models is not None:
+        # What each learned component *is* (base model, trained here or not, where
+        # the deployed weights live) -- the config alone names only the base model.
+        manifest["models"] = models
     return manifest
+
+
+def _models_section(models: Optional[Dict[str, Any]]) -> List[str]:
+    """The model card's "Models" table: what was deployed, not just configured."""
+    if not models:
+        return []
+    rows = [("encoder", models.get("encoder") or {})]
+    rows += list((models.get("signals") or {}).items())
+    lines = [
+        "## Models",
+        "",
+        "`Base model` is the starting checkpoint; the deployed weights are the ones in the "
+        "model directory, fine-tuned on this data when `Trained here` says so.",
+        "",
+        "| Component | Round | Base model | Trained here | Deployed weights |",
+        "|-----------|-------|------------|--------------|------------------|",
+    ]
+    for name, m in rows:
+        base = m.get("base_model") or m.get("model") or m.get("kind") or "-"
+        trained = m.get("how") or ("yes" if m.get("trained_on_this_data") else "no")
+        where = m.get("deployed_weights") or m.get("index") or "-"
+        lines.append(f"| {name} | {m.get('round') or '-'} | {base} | {trained} | `{where}` |")
+    return lines + [""]
+
+
+def _contributions_section(contrib: Optional[Dict[str, Any]], pct: Any) -> List[str]:
+    """The model card's "which signals drive decisions" section."""
+    if not contrib or not contrib.get("by_signal"):
+        return []
+    lines = [
+        "",
+        "## Which signals drive the fusion model's decisions (held-out)",
+        "",
+        "Share of the fusion model's total score attribution (mean |SHAP contribution|) "
+        "carried by each signal's feature columns, on the held-out rows. This is "
+        "*use by the model*, not standalone accuracy (see the table above). For the "
+        "accuracy cost of removing a signal, run `text-classifier-importance`.",
+        "",
+        "| Signal | Share | Features |",
+        "|--------|-------|----------|",
+    ]
+    for g in contrib["by_signal"]:
+        lines.append(f"| {g['signal']} | {pct(g['share'])} | {g['n_features']} |")
+    top = contrib.get("top_features") or []
+    low = contrib.get("least_used_features") or []
+    if top:
+        lines += [
+            "",
+            "- **Most used features:** "
+            + ", ".join(f"`{f['feature']}` ({pct(f['share'])})" for f in top[:5]),
+        ]
+    if low:
+        lines.append(
+            "- **Least used features:** "
+            + ", ".join(f"`{f['feature']}` ({pct(f['share'])})" for f in low[:5])
+        )
+    return lines
 
 
 def render_model_card(manifest: Dict[str, Any], evaluation: Dict[str, Any]) -> str:
@@ -340,6 +402,7 @@ def render_model_card(manifest: Dict[str, Any], evaluation: Dict[str, Any]) -> s
         f"- **Encoder / fusion / calibrator:** {enc} / {fus} / {cal_kind}",
         f"- **Target accuracy on accepted:** {target}",
         "",
+        *_models_section(manifest.get("models")),
         "## Headline metrics (held-out)",
         "",
         f"- **Coverage:** {pct(o.get('coverage'))} "
@@ -377,7 +440,8 @@ def render_model_card(manifest: Dict[str, Any], evaluation: Dict[str, Any]) -> s
         ]
         for e in per_signal:
             lines.append(
-                f"| {e.get('signal', '?')} | {pct(e.get('top1_accuracy'))} | "
+                f"| {e.get('signal', '?')}{' (reranker)' if e.get('round') == 2 else ''} | "
+                f"{pct(e.get('top1_accuracy'))} | "
                 f"{pct(e.get('fired_rate'))} | {pct(e.get('top1_precision_when_fired'))} |"
             )
         ag = sig.get("agreement") or {}
@@ -386,14 +450,20 @@ def render_model_card(manifest: Dict[str, Any], evaluation: Dict[str, Any]) -> s
                 "",
                 f"- **Mean distinct top picks across signals:** "
                 f"{num(ag.get('mean_distinct_top_classes'))} "
-                "(1 = every firing signal agrees, up to 5 = all disagree)",
+                f"(1 = every firing signal agrees, up to {ag.get('n_voting_signals', 5)} = all disagree)",
                 f"- **Full-consensus rate:** {pct(ag.get('consensus_rate'))}",
             ]
+        if any(e.get("round") == 2 for e in per_signal):
+            lines.append(
+                "- *(reranker)* rows pick the best class **within the shortlist** the "
+                "other signals built, so they are not a full retrieval."
+            )
         skipped = sig.get("skipped_signals") or []
         if skipped:
             lines.append(
                 f"- **Skipped (columns not assembled, e.g. `drop_features`):** {', '.join(skipped)}"
             )
+    lines += _contributions_section(evaluation.get("signal_contributions"), pct)
     lines += [
         "",
         "See `evaluation.json` for the per-class breakdown, reliability table, "
