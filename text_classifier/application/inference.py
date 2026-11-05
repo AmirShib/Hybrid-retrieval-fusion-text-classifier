@@ -43,7 +43,8 @@ class InferencePipeline:
     def __init__(self, artifacts: DeployedArtifacts):
         self._a = artifacts
         self._assembler = FeatureAssembler(
-            artifacts.label_space, CandidatePolicy(artifacts.config.candidate_top_n)
+            artifacts.label_space,
+            CandidatePolicy(artifacts.config.candidate_top_n, artifacts.config.candidate_tie_cap),
         )
         # Custom feature providers shipped with the model, plus the composed
         # schema (core + provider columns) the fusion model was trained on. Empty /

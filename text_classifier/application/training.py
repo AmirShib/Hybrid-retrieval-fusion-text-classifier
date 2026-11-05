@@ -316,7 +316,9 @@ class TrainingPipeline:
         )
         self._ops = build_array_ops(backend)
         self.assembler = FeatureAssembler(
-            label_space, CandidatePolicy(self.cfg.candidate_top_n), self._assembler_ops
+            label_space,
+            CandidatePolicy(self.cfg.candidate_top_n, self.cfg.candidate_tie_cap),
+            self._assembler_ops,
         )
         texts = [it.text for it in items]
         y = np.array(label_space.encode_labels([it.label for it in items]), dtype=np.int64)

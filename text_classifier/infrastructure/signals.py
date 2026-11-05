@@ -34,7 +34,11 @@ from .array_ops import NumpyArrayOps
 
 
 def _topn_mask(
-    M: np.ndarray, n: int, positive_only: bool = False, ops: Optional[ArrayOps] = None
+    M: np.ndarray,
+    n: int,
+    positive_only: bool = False,
+    ops: Optional[ArrayOps] = None,
+    tie_cap: Optional[float] = None,
 ) -> np.ndarray:
     """Boolean (b, C) mask of each row's top-n columns. NaN ranks last; -inf
     selections (all-missing) are dropped. Ties may admit slightly more than n.
@@ -60,7 +64,27 @@ def _topn_mask(
         Mf = ops.where(Mf > 0, Mf, -np.inf)
     best, _ = ops.topk(Mf, n, axis=1)
     kth = best[:, n - 1 : n]  # (b, 1): the nth-best value in each row
-    return (Mf >= kth) & ops.isfinite(Mf)
+    mask = (Mf >= kth) & ops.isfinite(Mf)
+    if tie_cap is None:
+        return mask
+    # Ties at the cutoff are kept -- a tie there is genuinely ambiguous -- unless
+    # they would admit more than ``tie_cap * n`` classes. Then the row is cut to
+    # exactly n, ties broken by class index (stable sort: reproducible). Without
+    # this, a signal whose score is a constant for most classes (e.g. cosine
+    # exactly 0 between TF-IDF item vectors and label-name descriptions) admits
+    # *every* class, and the shortlist stops being a shortlist.
+    limit = int(np.ceil(tie_cap * n))
+    host = ops.to_host(mask)
+    over = host.sum(axis=1) > limit
+    if not over.any():
+        return mask
+    vals = ops.to_host(Mf)[over]
+    order = np.argsort(-vals, axis=1, kind="stable")[:, :n]
+    exact = np.zeros_like(vals, dtype=bool)
+    np.put_along_axis(exact, order, True, axis=1)
+    host = host.copy()
+    host[over] = exact & np.isfinite(vals)
+    return ops.asarray(host)
 
 
 def _scatter_knn(

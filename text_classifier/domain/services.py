@@ -360,6 +360,10 @@ class CandidatePolicy:
     across signals, so the true ceiling on accuracy is candidate recall."""
 
     top_n_per_signal: int = 10
+    # Cut a signal's top-n to exactly n when ties at the cutoff would admit more
+    # than ``tie_cap * n`` classes. ``None`` = keep every tie (the pre-cap
+    # behaviour, kept for models saved before this setting existed).
+    tie_cap: Optional[float] = None
 
 
 @dataclass(frozen=True, slots=True)

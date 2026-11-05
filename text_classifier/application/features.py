@@ -324,7 +324,9 @@ class FeatureAssembler:
         # ---- candidate set = union of each declared candidate matrix's top-n ----
         mask = np.zeros((len(texts), C), dtype=bool)
         for value, positive_only in candidate_values:
-            mask |= _topn_mask(value, n, positive_only=positive_only, ops=self._ops)
+            mask |= _topn_mask(
+                value, n, positive_only=positive_only, ops=self._ops, tie_cap=self._policy.tie_cap
+            )
         rows, cols = np.nonzero(mask)
         if rows.size == 0:
             empty_cols = _effective_names(providers, requested, signal_providers) + (

@@ -28,6 +28,19 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
   `cross_encoder.model_name` after a fine-tune.
 
 ### Fixed
+- **The candidate shortlist could contain every class.** A signal's top-n kept
+  every class tied with the n-th score; when a signal scores most classes
+  identically (measured: TF-IDF item vectors vs label-name descriptions, cosine
+  exactly 0 for 100% of pairs) that admitted all classes, so a 55-class model
+  scored 55 candidates per item. New `candidate_tie_cap` (default 2.0): ties
+  are kept unless they would admit more than `2 x candidate_top_n`, then the
+  signal is cut to exactly `candidate_top_n` by class order. Measured on 20k
+  Hebrew COICOP items: 55 -> 19 candidates per item, training 267 s -> 92 s
+  (with the change below), candidate recall 100% -> 99.3%, accuracy 90.45% ->
+  90.57%. Models saved without the setting keep uncapped shortlists on load.
+- **Class prototypes were computed with an n x dim scatter.** Now one sparse
+  matrix product on the numpy backend: 39x faster on a 20k x 3,000 matrix,
+  identical results.
 - **Per-signal diagnostics covered only dense + BM25.** `signal_report` (and the
   model card) now include SPLADE and every cross-encoder document (marked as round
   two: its pick is the best within the shortlist), and discover any other signal by

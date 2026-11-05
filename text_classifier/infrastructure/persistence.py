@@ -585,6 +585,10 @@ class ArtifactRepository:
         self._check_package_version(meta.get("package_version"))
 
         config = PipelineConfig.from_dict(meta["config"])
+        # Saved before the tie cap existed: that model was trained, calibrated and
+        # thresholded on uncapped shortlists, so keep scoring it that way.
+        if "candidate_tie_cap" not in (meta.get("config") or {}):
+            config.candidate_tie_cap = None
         if device is not None:
             config.encoder.device = device
         # Dispatch each swappable component through the registry by its recorded

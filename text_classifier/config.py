@@ -562,6 +562,12 @@ class PipelineConfig:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     features: FeaturesConfig = field(default_factory=FeaturesConfig)
     candidate_top_n: int = 10
+    # When ties at a signal's top-n cutoff would admit more than this many times
+    # `candidate_top_n` classes, cut that signal to exactly `candidate_top_n`
+    # (ties broken by class order). Measured: with TF-IDF and label-name
+    # descriptions every description similarity was exactly 0, so all classes
+    # tied and every item got every class as a "candidate". None = keep all ties.
+    candidate_tie_cap: Optional[float] = 2.0
     # T34 phase 2: which SignalProvider(s) compute the retrieval signals that
     # feed candidate selection + the core feature columns. Registry keys (see
     # infrastructure/registry.py's register_signal_provider), mirroring how
@@ -959,6 +965,14 @@ class PipelineConfig:
                 f"referring only to configured document names {sorted(ce_doc_names)}",
             ),
         ]
+        checks.append(
+            (
+                "candidate_tie_cap",
+                self.candidate_tie_cap,
+                self.candidate_tie_cap is None or self.candidate_tie_cap >= 1,
+                "None or >= 1",
+            )
+        )
         sp = self.retrieval.splade
         checks += [
             # T94. Like the cross-encoder block: checked even when switched off.

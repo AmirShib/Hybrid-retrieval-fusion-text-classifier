@@ -97,7 +97,10 @@ def retune(
         artifacts.config.fusion.drop_features,
         artifacts.signal_providers,
     )
-    assembler = FeatureAssembler(label_space, CandidatePolicy(artifacts.config.candidate_top_n))
+    assembler = FeatureAssembler(
+        label_space,
+        CandidatePolicy(artifacts.config.candidate_top_n, artifacts.config.candidate_tie_cap),
+    )
     texts = [it.text for it in items]
     y = np.array(label_space.encode_labels([it.label for it in items]), dtype=np.int64)
 
