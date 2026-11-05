@@ -70,6 +70,8 @@ def signal_contributions(
     feature_names: Sequence[str],
     feature_groups: Dict[str, str],
     n_extremes: int = 10,
+    max_rows: Optional[int] = 20_000,
+    seed: int = 0,
 ) -> Optional[Dict[str, Any]]:
     """Per-*signal* share of the fusion model's attribution, plus the most and
     least used individual features.
@@ -78,7 +80,16 @@ def signal_contributions(
     produced it; columns not in it are grouped as ``"cross-signal"`` (features
     computed across signals, e.g. ``n_signal_agreement``, ``class_log_freq``).
     Every column is covered, for every configured signal -- built-in or not.
-    Returns ``None`` when the fusion backend has no additive attribution."""
+    Returns ``None`` when the fusion backend has no additive attribution.
+
+    SHAP costs scale with rows x trees; on a large held-out set it dominated
+    training time (88 s of a 273 s run on 20k Hebrew items). ``max_rows`` scores a
+    seeded uniform sample instead -- shares averaged over 20k rows are stable to
+    well under a percentage point. ``None`` uses every row."""
+    n_total = int(X.shape[0])
+    if max_rows is not None and n_total > max_rows:
+        pick = np.sort(np.random.default_rng(seed).choice(n_total, size=max_rows, replace=False))
+        X = X[pick]
     rows = global_feature_importance(fusion, X, feature_names)
     if rows is None:
         return None
@@ -98,6 +109,7 @@ def signal_contributions(
     return {
         "computed_on": "held-out rows",
         "n_rows": int(X.shape[0]),
+        "n_rows_available": n_total,
         "by_signal": by_signal,
         "top_features": rows[:n_extremes],
         "least_used_features": least,
