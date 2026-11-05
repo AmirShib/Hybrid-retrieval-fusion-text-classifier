@@ -5,8 +5,9 @@ brands, kosher marks, promotions and every content word stay in the text. What
 changes is how they are written, so that the same thing is always spelled the
 same way and each meaningful word is its own token.
 
-Profiled on ``examples/coicop_hebrew/_data.csv`` (159,594 names). The problems
-each step fixes, with counts, are in ``.claude/tasks/T95-*.md``.
+Built from a profile of ``examples/coicop_hebrew/_data.csv`` (159,594 names):
+CSV-escaped gershayim (``מ""ל``), backticks used as a geresh, numbers glued to
+words, names cut at 40 characters, placeholder rows and conflicting labels.
 
 Usage::
 
