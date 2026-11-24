@@ -303,6 +303,40 @@ class CrossEncoderConfig:
 SPLADE_KINDS = ("hashing", "splade")
 
 
+# T97: class-side texts the contrastive lexical signal may build a candidate's word
+# set from. Positive evidence only: "exclusions"/"siblings" describe what a class
+# is *not*, and folding them into its word set would turn them into support.
+CONTRASTIVE_VIEWS = ("description", "core", "examples", "inclusions")
+# Upper bound on training-data neighbours per candidate. Labels in the training
+# data can be wrong, and every neighbour widens a candidate's word set.
+MAX_CONTRASTIVE_NEIGHBORS = 5
+
+
+@dataclass
+class ContrastiveLexicalConfig:
+    """The round-two contrastive lexical signal (T97). Reached by adding
+    ``"contrastive-lexical"`` to ``PipelineConfig.signals``; inert otherwise.
+
+    For each shortlisted candidate it compares the item's words with *every*
+    shortlisted candidate's words, weighting each word by how rare it is within
+    that shortlist, and reports how much of the deciding evidence the candidate
+    holds and how much its strongest competitor holds against it. Tokenization is
+    ``RetrievalConfig.bm25_token_kwargs``, so it always matches BM25.
+
+    - ``views``: which class texts form the word set (see ``CONTRASTIVE_VIEWS``).
+      Description only by default; codebook fields are opt-in.
+    - ``neighbors``: training examples of the candidate's class added to its word
+      set, picked by word overlap with the item (fitted per fold, so out-of-fold).
+      ``0`` (default) is off: training labels can be wrong. 2 is a good value
+      when on."""
+
+    views: List[str] = field(default_factory=lambda: ["description"])
+    neighbors: int = 0
+
+    def __post_init__(self) -> None:
+        self.views = list(self.views)
+
+
 @dataclass
 class SpladeConfig:
     """The learned-sparse retrieval signal (T94). Reached by adding ``"splade"``
@@ -405,12 +439,17 @@ class RetrievalConfig:
     # T94: the learned-sparse signal's settings; inert until "splade" is in
     # `PipelineConfig.signals`. Lives here for the same reason as `cross_encoder`.
     splade: SpladeConfig = field(default_factory=SpladeConfig)
+    # T97: the contrastive lexical signal's settings; inert until
+    # "contrastive-lexical" is in `PipelineConfig.signals`.
+    contrastive_lexical: ContrastiveLexicalConfig = field(default_factory=ContrastiveLexicalConfig)
 
     def __post_init__(self) -> None:
         if isinstance(self.cross_encoder, dict):
             self.cross_encoder = CrossEncoderConfig(**self.cross_encoder)
         if isinstance(self.splade, dict):
             self.splade = SpladeConfig(**self.splade)
+        if isinstance(self.contrastive_lexical, dict):
+            self.contrastive_lexical = ContrastiveLexicalConfig(**self.contrastive_lexical)
 
 
 @dataclass
@@ -493,6 +532,9 @@ class FeatureProviderConfig:
 CLEANUP_ACTIONS = ("keep", "drop", "relabel", "quarantine")
 QUARANTINE_TARGETS = ("knn_pool", "fine_tune")
 KNN_AGREEMENT_SIGNALS = ("dense", "lexical", "splade")
+# Signals that run after candidate selection: they reorder the shortlist and can
+# never bring a class into it, so they cannot stand in for a shortlist signal.
+ROUND_TWO_SIGNALS = ("cross-encoder", "contrastive-lexical")
 
 
 @dataclass
@@ -1089,10 +1131,10 @@ class PipelineConfig:
                 or (
                     bool(cu.signals)
                     and len(set(cu.signals)) == len(cu.signals)
-                    and any(s != "cross-encoder" for s in cu.signals)
+                    and any(s not in ROUND_TWO_SIGNALS for s in cu.signals)
                 ),
                 "None, or a non-empty duplicate-free list with at least one shortlist "
-                "signal (the cross-encoder only reranks)",
+                "signal (round-two signals only rerank)",
             ),
             ("cleanup.n_folds", cu.n_folds, cu.n_folds is None or cu.n_folds >= 2, "None or >= 2"),
             (
@@ -1210,6 +1252,22 @@ class PipelineConfig:
                 "in [0, 1)",
             ),
             ("retrieval.splade.flops_query", sp.flops_query, sp.flops_query >= 0, ">= 0"),
+            (
+                "retrieval.contrastive_lexical.views",
+                self.retrieval.contrastive_lexical.views,
+                bool(self.retrieval.contrastive_lexical.views)
+                and set(self.retrieval.contrastive_lexical.views) <= set(CONTRASTIVE_VIEWS)
+                and len(set(self.retrieval.contrastive_lexical.views))
+                == len(self.retrieval.contrastive_lexical.views),
+                f"a non-empty duplicate-free subset of {list(CONTRASTIVE_VIEWS)}",
+            ),
+            (
+                "retrieval.contrastive_lexical.neighbors",
+                self.retrieval.contrastive_lexical.neighbors,
+                isinstance(self.retrieval.contrastive_lexical.neighbors, int)
+                and 0 <= self.retrieval.contrastive_lexical.neighbors <= MAX_CONTRASTIVE_NEIGHBORS,
+                f"an int in [0, {MAX_CONTRASTIVE_NEIGHBORS}] (0 = off)",
+            ),
             (
                 "retrieval.splade.flops_document",
                 sp.flops_document,
