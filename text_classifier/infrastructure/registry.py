@@ -76,6 +76,7 @@ from .reranker import (
 )
 from .retrieval import DenseRetrieverAdapter, LexicalRetrieverAdapter
 from .signals import DenseSignalProvider, LexicalSignalProvider
+from .contrastive import ContrastiveLexicalSignalProvider
 from .splade import SpladeSignalProvider
 
 
@@ -724,6 +725,25 @@ register_signal_provider(
         ),
         load=lambda directory, cfg: SpladeSignalProvider.load_from(
             os.path.join(directory, "signals", "splade"), cfg.splade, cfg.dense_chunk
+        ),
+    ),
+)
+
+
+register_signal_provider(
+    "contrastive-lexical",
+    SignalProviderSpec(
+        # T97. Round two; ignores `dense`/`lexical`. Tokenizes with BM25's own
+        # `bm25_token_kwargs` so both lexical signals split text identically. Its
+        # only fitted state is the example pool, and only with neighbours on.
+        build=lambda cfg, dense, lexical, ops: ContrastiveLexicalSignalProvider(
+            cfg.contrastive_lexical, cfg.bm25_token_kwargs, chunk=cfg.dense_chunk
+        ),
+        load=lambda directory, cfg: ContrastiveLexicalSignalProvider.load_from(
+            os.path.join(directory, "signals", "contrastive-lexical"),
+            cfg.contrastive_lexical,
+            cfg.bm25_token_kwargs,
+            cfg.dense_chunk,
         ),
     ),
 )

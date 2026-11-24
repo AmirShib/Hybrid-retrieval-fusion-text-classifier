@@ -147,7 +147,11 @@ _PLUS_GLUE = re.compile(
 # "25 . 1 קג" is 1.25 kg written with its parts flipped by RTL display. Only
 # repaired when spaced on both sides of the dot AND followed by a unit.
 _FLIPPED_DECIMAL = re.compile(r"(?<![\d.])(\d+) \. (\d+)(?=\s*[" + HEB + r"A-Za-z])")
-_PERCENT_BEFORE = re.compile(r"%\s*(\d+(?:\.\d+)?)")
+# "% 37" -> "37%": a percent sign written before its number. Not when the "%"
+# already ends a number: in "0% 150מל" it belongs to the 0, and moving it onto the
+# 150 produced "0150% מל" on 1,306 rows (0% yogurts, cheeses, alcohol-free beer).
+_PERCENT_BEFORE = re.compile(r"(?<!\d)(?<!\d )%\s*(\d+(?:\.\d+)?)")
+_PERCENT_BEFORE_V1 = re.compile(r"%\s*(\d+(?:\.\d+)?)")  # pre-fix rule, for v1 files
 _PERCENT_SPACE = re.compile(r"(\d)\s+%")
 _MULT = re.compile(r"(?<=\d)\s*\*\s*(?=\d)")
 _LEAD_JUNK = re.compile(r"^[\s'\".\-_,;:|\\+`]+")
@@ -159,6 +163,33 @@ _UNIT_AFTER_NUMBER = re.compile(
     + rf")\.?(?![{HEB}A-Za-z\"'])",
     re.IGNORECASE,
 )
+# A leading-zero number directly before a *measurement* unit or "%" is a number
+# whose digits were reversed by RTL display: "001 מ\"ל" (perfume) is 100 ml,
+# "005 גרם" (honey) is 500 g, "%001" is 100%. Count units are excluded on purpose:
+# "צללית מונו 01 יחידה" / "שפתון מאט 020 יח" are shade codes, not 10 or 20 units,
+# and so is a leading-zero number with no unit ("לק נייל 080"). Runs after
+# canonicalize_units, so only the canonical unit spellings need listing.
+_MEASURE_UNITS = ('מ"ל', "גרם", 'ק"ג', "ליטר")
+_REVERSED_NUMBER = re.compile(
+    r"(?<![\d.])(0\d+)(?![\d.])(?=%|\s(?:"
+    + "|".join(re.escape(u) for u in _MEASURE_UNITS)
+    + rf")(?![{HEB}]))"
+)
+# Unit spellings that may start a token glued to the next word ("קגמעדניה").
+# Single letters (ג, ל) and the ambiguous "לי"/'מ"' are excluded: after a number,
+# ללא / לבן / גבינה / ליפגלוס start with them and are real words. Longest first.
+_GLUE_UNITS = tuple(
+    sorted(
+        (
+            f
+            for f in UNIT_CANON
+            if re.match(rf"[{HEB}]", f) and len(f) >= 2 and f not in ("לי", 'מ"')
+        ),
+        key=len,
+        reverse=True,
+    )
+)
+_NUMBER = re.compile(r"\d+(?:\.\d+)?")
 _TOKEN_SPLIT = re.compile(r"\s+")
 _FOREIGN_SOUND = re.compile("[גצזת]'")
 _HEB_WORD = re.compile(rf"^[{HEB}]+$")
@@ -178,10 +209,15 @@ class NormalizerConfig:
     spelling_whitelist: bool = True  # verified plene/defective pairs only
     complete_truncated: bool = True  # finish a word cut off by the source's length limit
     edge_junk: bool = True  # stray punctuation at the start/end of the name
+    percent_guard: bool = True  # "0% 150מל" keeps its "%" on the 0 (v2 bug fix)
+    reversed_numbers: bool = True  # "001 מ\"ל" -> "100 מ\"ל" (measurement units only)
+    glued_units: bool = True  # "5.5 קגמעדניה" -> "5.5 ק\"ג מעדניה" (mined by fit)
     truncation_length: int = 40  # the source system's hard cap (profiled)
     min_variant_count: int = 5  # both spellings must appear this often to merge
     completion_min_count: int = 5  # a completion must have been seen this often
     completion_dominance: float = 3.0  # ... and be this many times commoner than the runner-up
+    glued_unit_min_count: int = 5  # the word after the unit must be this common on its own
+    glued_unit_dominance: float = 10.0  # ... and this many times commoner than the glued token
     extra_abbreviations: Dict[str, str] = field(default_factory=dict)
 
 
@@ -194,11 +230,15 @@ class HebrewItemNormalizer:
     is fixed rules. Persist with ``save``/``load`` (JSON) so inference normalizes
     exactly as training did."""
 
-    VERSION = 1
+    # v2: percent_guard, reversed_numbers, glued_units. A v1 file loads with all
+    # three off, so it keeps normalizing exactly as the model it shipped with.
+    VERSION = 2
+    _V2_STEPS = ("percent_guard", "reversed_numbers", "glued_units")
 
     def __init__(self, config: Optional[NormalizerConfig] = None):
         self.config = config or NormalizerConfig()
         self.geresh_map: Dict[str, str] = {}
+        self.unit_splits: Dict[str, Tuple[str, str]] = {}
         self.vocab: Counter = Counter()
         self.mid_vocab: Counter = Counter()
         self._abbrev = {**ABBREVIATIONS, **self.config.extra_abbreviations}
@@ -226,6 +266,7 @@ class HebrewItemNormalizer:
             and tok.replace("'", "") not in NOT_GERESH_VARIANTS
         }
         self.geresh_map = {**mined, **GERESH_SEEDS}
+        self.unit_splits = self._mine_unit_splits(base, counts) if self.config.glued_units else {}
         final = [self._apply_maps(s) for s in base]
         self.vocab = Counter()
         self.mid_vocab = Counter()
@@ -237,6 +278,30 @@ class HebrewItemNormalizer:
             # (child) from being "completed" to "ילדים".
             self.mid_vocab.update(t for t in _TOKEN_SPLIT.split(s)[:-1] if _HEB_WORD.match(t))
         return self
+
+    def _mine_unit_splits(self, base: List[str], counts: Counter) -> Dict[str, Tuple[str, str]]:
+        """Tokens right after a number that are a unit glued to the next word
+        ("קגמעדניה" -> "קג" + "מעדניה"). Decided by the corpus, like geresh
+        variants: the remainder must be a word in its own right (3+ chars, seen
+        ``glued_unit_min_count`` times) and ``glued_unit_dominance`` times commoner
+        than the glued token. That rejects real words that merely start with a
+        unit's letters: "גרנולה" (rest "נולה" unseen), "גרעיני" (303 on its own)."""
+        c = self.config
+        out: Dict[str, Tuple[str, str]] = {}
+        for s in base:
+            toks = [t for t in _TOKEN_SPLIT.split(s) if t]
+            for prev, tok in zip(toks, toks[1:]):
+                if tok in out or not _NUMBER.fullmatch(prev) or tok.lower() in UNIT_CANON:
+                    continue
+                for unit in _GLUE_UNITS:
+                    rest = tok[len(unit) :]
+                    if tok.startswith(unit) and len(rest) >= 3:
+                        if counts.get(rest, 0) >= c.glued_unit_min_count and counts.get(
+                            tok, 0
+                        ) * c.glued_unit_dominance <= counts.get(rest, 0):
+                            out[tok] = (unit, rest)
+                        break  # longest matching unit decides; no shorter retry
+        return out
 
     # --------------------------------------------------------------- normalizing
     def normalize(self, text: str) -> str:
@@ -251,7 +316,7 @@ class HebrewItemNormalizer:
     def normalize_many(self, texts: Sequence[str]) -> List[str]:
         return [self.normalize(t) for t in texts]
 
-    def _rule_steps(self, text: str) -> str:
+    def _rule_steps(self, text: str, reverse: bool = True) -> str:
         c = self.config
         s = str(text)
         if c.unicode:
@@ -264,9 +329,11 @@ class HebrewItemNormalizer:
             # looked up again after spacing for number-glued ones ("א.אדפ50").
             s = " ".join(self._abbrev.get(t, t) for t in _TOKEN_SPLIT.split(s) if t)
         if c.spacing:
-            s = fix_spacing(s)
+            s = fix_spacing(s, percent_guard=c.percent_guard)
         if c.units:
             s = canonicalize_units(s)
+        if c.reversed_numbers and reverse:
+            s = fix_reversed_numbers(s)
         if c.edge_junk:
             s = strip_edge_junk(s)
         return collapse_spaces(s)
@@ -274,9 +341,14 @@ class HebrewItemNormalizer:
     def _apply_maps(self, s: str) -> str:
         c = self.config
         out: List[str] = []
+        prev = ""
         for tok in _TOKEN_SPLIT.split(s):
             if not tok:
                 continue
+            if c.glued_units and tok in self.unit_splits and _NUMBER.fullmatch(prev):
+                unit, tok = self.unit_splits[tok]
+                out.append(UNIT_CANON[unit.lower()] if c.units else unit)
+            prev = tok
             if c.abbreviations and tok in self._abbrev:
                 tok = self._abbrev[tok]
             elif c.geresh_variants and tok in self.geresh_map:
@@ -286,7 +358,7 @@ class HebrewItemNormalizer:
             out.append(tok)
         s = " ".join(out)
         # An expansion can create a new dot-glued or spaced form; re-run spacing.
-        return collapse_spaces(fix_spacing(s) if c.spacing else s)
+        return collapse_spaces(fix_spacing(s, percent_guard=c.percent_guard) if c.spacing else s)
 
     def _complete_last_token(self, s: str, at_cap: bool) -> str:
         """Finish a last word cut off by the source system ("שוקול" -> "שוקולד").
@@ -322,9 +394,16 @@ class HebrewItemNormalizer:
     def extract_fields(self, clean_text: str, raw_text: Optional[str] = None) -> Dict[str, Any]:
         """Structured attributes read from an already-normalized name. Nothing is
         removed from the text; this only reads it."""
+        c = self.config
         return extract_fields(
             clean_text,
-            truncated=raw_text is not None and len(raw_text) >= self.config.truncation_length,
+            truncated=raw_text is not None and len(raw_text) >= c.truncation_length,
+            # Did reversal rewrite a number in this name? Re-derive from the raw
+            # text with reversal off: the clean text alone cannot tell "100" from
+            # a repaired "001".
+            qty_reversed=raw_text is not None
+            and c.reversed_numbers
+            and _REVERSED_NUMBER.search(self._rule_steps(raw_text, reverse=False)) is not None,
         )
 
     # ------------------------------------------------------------- persistence
@@ -333,16 +412,22 @@ class HebrewItemNormalizer:
             "version": self.VERSION,
             "config": asdict(self.config),
             "geresh_map": self.geresh_map,
+            "unit_splits": {k: list(v) for k, v in self.unit_splits.items()},
             "vocab": dict(self.vocab),
             "mid_vocab": dict(self.mid_vocab),
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "HebrewItemNormalizer":
-        if data.get("version") != cls.VERSION:
-            raise ValueError(f"unsupported normalizer version {data.get('version')!r}")
-        norm = cls(NormalizerConfig(**data["config"]))
+        version = data.get("version")
+        if version not in (1, cls.VERSION):
+            raise ValueError(f"unsupported normalizer version {version!r}")
+        config = dict(data["config"])
+        if version == 1:  # fitted before these steps existed: keep its behaviour
+            config.update({step: False for step in cls._V2_STEPS})
+        norm = cls(NormalizerConfig(**config))
         norm.geresh_map = dict(data["geresh_map"])
+        norm.unit_splits = {k: (v[0], v[1]) for k, v in data.get("unit_splits", {}).items()}
         norm.vocab = Counter(data["vocab"])
         norm.mid_vocab = Counter(data["mid_vocab"])
         return norm
@@ -406,7 +491,7 @@ def fix_flipped_decimals(s: str) -> str:
     return _FLIPPED_DECIMAL.sub(lambda m: f"{m.group(2)}.{m.group(1)}", s)
 
 
-def fix_spacing(s: str) -> str:
+def fix_spacing(s: str, percent_guard: bool = True) -> str:
     """Make every meaningful piece its own token; remove nothing.
 
     - number glued to a word: ``200מל`` -> ``200 מל``, ``קטן5`` -> ``קטן 5``
@@ -419,7 +504,7 @@ def fix_spacing(s: str) -> str:
     s = _HEB_DIGIT.sub(" ", s)
     s = _DOT_GLUE.sub(". ", s)
     s = _PLUS_GLUE.sub(" + ", s)
-    s = _PERCENT_BEFORE.sub(r"\1%", s)
+    s = (_PERCENT_BEFORE if percent_guard else _PERCENT_BEFORE_V1).sub(r"\1%", s)
     s = _PERCENT_SPACE.sub(r"\1%", s)
     s = _MULT.sub("*", s)  # only between two numbers: "וונוס *8" keeps its space
     return collapse_spaces(s)
@@ -436,6 +521,15 @@ def canonicalize_units(s: str) -> str:
         return f"{num} {UNIT_CANON[m.group(2).lower()]}"
 
     return _UNIT_AFTER_NUMBER.sub(repl, s)
+
+
+def fix_reversed_numbers(s: str) -> str:
+    """``"001 מ\"ל"`` -> ``"100 מ\"ל"``, ``"065 גרם"`` -> ``"560 גרם"``, ``"001%"`` ->
+    ``"100%"``: reverse the digits of a leading-zero number directly before a
+    measurement unit or ``%``. Count units (``יח'``) and unit-less numbers are left
+    alone -- there a leading zero is a shade or product code. Expects canonical
+    units, i.e. runs after ``canonicalize_units``."""
+    return _REVERSED_NUMBER.sub(lambda m: m.group(1)[::-1], s)
 
 
 def strip_edge_junk(s: str) -> str:
@@ -462,13 +556,17 @@ _PERCENT = re.compile(r"(\d+(?:\.\d+)?)%")
 _LATIN = re.compile(r"[A-Za-z][A-Za-z&]+")
 
 
-def extract_fields(clean_text: str, truncated: bool = False) -> Dict[str, Any]:
+def extract_fields(
+    clean_text: str, truncated: bool = False, qty_reversed: bool = False
+) -> Dict[str, Any]:
     """Read structured attributes from a normalized name (text unchanged).
 
     Returns ``qty``/``unit`` (as written), ``base_qty``/``base_unit`` (g, ml,
     unit or cm), ``pack_count``, ``percent``, ``promo``, ``kosher``, ``dietary``
     (marks such as חלבי/פרווה, which are category hints), ``latin`` tokens and
-    ``truncated``. Missing values are ``None``/empty, never 0."""
+    ``truncated``, and ``qty_reversed`` (a number in the name had its digits
+    reversed by the normalizer -- a repair, so worth auditing). Missing values are
+    ``None``/empty, never 0."""
     out: Dict[str, Any] = {
         "qty": None,
         "unit": None,
@@ -481,6 +579,7 @@ def extract_fields(clean_text: str, truncated: bool = False) -> Dict[str, Any]:
         "dietary": [w for w in DIETARY_MARKS if w in clean_text],
         "latin": [t.lower() for t in _LATIN.findall(clean_text)],
         "truncated": bool(truncated),
+        "qty_reversed": bool(qty_reversed),
     }
     pack = _PACK.search(clean_text)
     if pack:

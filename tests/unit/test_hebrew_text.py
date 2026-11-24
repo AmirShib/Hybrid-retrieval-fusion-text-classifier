@@ -16,6 +16,7 @@ from text_classifier.infrastructure.hebrew_text import (
     clean_dataframe,
     extract_fields,
     fix_flipped_decimals,
+    fix_reversed_numbers,
     fix_spacing,
     is_placeholder,
     normalize_unicode,
@@ -179,6 +180,9 @@ def test_each_step_can_be_switched_off():
             spelling_whitelist=False,
             complete_truncated=False,
             edge_junk=False,
+            percent_guard=False,
+            reversed_numbers=False,
+            glued_units=False,
         )
     ).fit(["x"])
     assert off.normalize("200מל  ג`ל") == "200מל ג`ל"  # only whitespace collapsed
@@ -234,3 +238,102 @@ def test_module_never_uses_ascii_only_word_classes():
     code = "\n".join(line for line in src.splitlines() if not line.strip().startswith("#"))
     body = code.split('"""', 2)[2]  # skip the module docstring, which explains this
     assert "\\w" not in body.replace("\\\\w", "") and "\\b" not in body.replace("\\\\b", "")
+
+
+# ------------------------------------------------------------- v2 steps
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("יופלה דיאט וניל 0% 150מל", "יופלה דיאט וניל 0% 150 מל"),  # % stays on the 0
+        ("מעדן וניל 0% 1+3 *150מל", "מעדן וניל 0% 1+3*150 מל"),
+        ("שוקולד עם % 37 שוקול", "שוקולד עם 37% שוקול"),  # % before its number: moved
+        ("כוסמת %001", "כוסמת 001%"),
+    ],
+)
+def test_percent_guard_keeps_a_percent_on_its_own_number(raw, expected):
+    assert fix_spacing(raw) == expected
+
+
+def test_percent_guard_off_is_the_v1_rule():
+    assert fix_spacing("וניל 0% 150מל", percent_guard=False) == "וניל 0150% מל"
+
+
+@pytest.mark.parametrize(
+    "s, expected",
+    [
+        ('בושם 001 מ"ל', 'בושם 100 מ"ל'),
+        ("דבש 005 גרם", "דבש 500 גרם"),
+        ("זית 065 גרם", "זית 560 גרם"),
+        ("כוסמת 001%", "כוסמת 100%"),
+        ("צללית מונו 01 יחידה", "צללית מונו 01 יחידה"),  # shade code, count unit
+        ("שפתון מאט 020 יח'", "שפתון מאט 020 יח'"),
+        ("לק נייל 080", "לק נייל 080"),  # no unit: product code
+        ("חלב 0.5 ליטר", "חלב 0.5 ליטר"),  # a real decimal
+        ('בקבוק 500 מ"ל', 'בקבוק 500 מ"ל'),  # no leading zero
+    ],
+)
+def test_reversed_numbers_only_before_measurement_units(s, expected):
+    assert fix_reversed_numbers(s) == expected
+
+
+def test_reversed_number_end_to_end_and_flagged():
+    n = HebrewItemNormalizer().fit(["x"])
+    raw = "קלוין קליין מומנט 001מל. אישה"
+    clean = n.normalize(raw)
+    assert clean == 'קלוין קליין מומנט 100 מ"ל אישה'
+    f = n.extract_fields(clean, raw)
+    assert f["qty"] == 100.0 and f["qty_reversed"] is True
+    assert n.extract_fields(n.normalize("בקבוק 500מל"), "בקבוק 500מל")["qty_reversed"] is False
+
+
+def _glue_corpus():
+    # "מעדניה" and "גבינה" are common on their own; "קגמעדניה" is a rare glued form.
+    return (
+        ["זית 5.5קגמעדניה"]
+        + ["מעדניה גבינה"] * 12
+        + ["קורנפלקס 500 גרנולה"] * 3
+        + ["גבינה 5 גבינה לבנה"] * 3
+        + ["חלב 1 ליטר ללא לקטוז"] * 3
+    )
+
+
+def test_glued_unit_split_from_the_next_word():
+    n = HebrewItemNormalizer().fit(_glue_corpus())
+    assert n.unit_splits == {"קגמעדניה": ("קג", "מעדניה")}
+    assert n.normalize("זית 5.5קגמעדניה") == 'זית 5.5 ק"ג מעדניה'
+
+
+def test_glued_unit_never_splits_real_words():
+    n = HebrewItemNormalizer().fit(_glue_corpus())
+    for s in ["קורנפלקס 500 גרנולה", "גבינה 5 גבינה לבנה", "חלב 1 ליטר ללא לקטוז"]:
+        assert n.normalize(s) == s
+    # Not after a number: left alone even though the token is in the split map.
+    assert n.normalize("זית קגמעדניה") == "זית קגמעדניה"
+
+
+def test_v1_file_loads_with_v2_steps_off():
+    n = HebrewItemNormalizer().fit(_glue_corpus())
+    data = n.to_dict()
+    data["version"] = 1
+    data.pop("unit_splits")
+    for step in (
+        "percent_guard",
+        "reversed_numbers",
+        "glued_units",
+        "glued_unit_min_count",
+        "glued_unit_dominance",
+    ):
+        data["config"].pop(step)
+    old = HebrewItemNormalizer.from_dict(data)
+    assert old.normalize("וניל 0% 150מל") == "וניל 0150% מל"  # v1 behaviour, bug included
+    assert old.normalize("דבש 005 גרם") == "דבש 005 גרם"
+    assert old.normalize("זית 5.5קגמעדניה") == "זית 5.5 קגמעדניה"
+
+
+def test_v2_round_trip_keeps_unit_splits(tmp_path):
+    n = HebrewItemNormalizer().fit(_glue_corpus())
+    path = str(tmp_path / "norm.json")
+    n.save(path)
+    again = HebrewItemNormalizer.load(path)
+    assert again.unit_splits == n.unit_splits
+    assert again.normalize("זית 5.5קגמעדניה") == n.normalize("זית 5.5קגמעדניה")

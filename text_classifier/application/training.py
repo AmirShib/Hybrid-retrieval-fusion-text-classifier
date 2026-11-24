@@ -497,6 +497,15 @@ class TrainingPipeline:
                     ),
                     "deployed_weights": f"signals/{name}/",
                 }
+            elif name == "contrastive-lexical":
+                cl = cfg.retrieval.contrastive_lexical
+                signals[name] = {
+                    "round": 2,
+                    "model": "none (word sets weighted within each shortlist)",
+                    "views": list(cl.views),
+                    "neighbors": cl.neighbors,
+                    "index": f"signals/{name}/pool.npz" if cl.neighbors else None,
+                }
             else:
                 signals[name] = {"round": None, "deployed_weights": f"signals/{name}/"}
         out["signals"] = signals

@@ -8,6 +8,59 @@ lives in one place, `text_classifier/_version.py` (see `RELEASING.md`).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-24
+
+### Added
+- **Contrastive lexical signal (T97), `"contrastive-lexical"` in `signals`.** An
+  optional round-two signal for the case where the final choice comes down to a
+  few small words. For each shortlisted candidate it compares the item's words
+  with every other candidate's words, weighting each word by how rare it is
+  *within that shortlist* (`w = log(K/df) / log(K)`: 1 for a word only one
+  candidate has, 0 for a word they all have). New columns:
+  `lex_local_overlap` (+ `rank_`/`margin_`/`q_gap_lex_local`),
+  `lex_unique_hits` (share of the deciding evidence only this candidate has),
+  `lex_counter_hits` (share held by its strongest single competitor),
+  `lex_shortlist_size`, and `lex_evidence_docs` when neighbours are on.
+  Settings in `retrieval.contrastive_lexical`: `views` (class texts to use;
+  `description` by default, codebook `core`/`examples`/`inclusions` opt-in) and
+  `neighbors` (training examples of the candidate's class added by word overlap,
+  fitted per fold so out-of-fold; 0 = off, at most 5, 2 recommended). Tokenizes
+  with `retrieval.bm25_token_kwargs`, so it always matches BM25. Works alongside
+  the cross-encoder. Off by default. On the Hebrew item data (40k train / 8k
+  test, TF-IDF dense encoder) with 2 neighbours: top-1 92.66% -> 93.41%, coverage
+  93.5% -> 94.3% at 95.9% precision.
+- **Hebrew normalizer v2 (T95): two new repair steps**, each with its own
+  `NormalizerConfig` switch:
+  - `reversed_numbers`: a leading-zero number directly before a measurement unit
+    or `%` has its digits reversed by RTL display and is repaired
+    (`001 מ"ל` -> `100 מ"ל`, `005 גרם` -> `500 גרם`). Count units and unit-less
+    numbers are left alone: there a leading zero is a shade or product code.
+    `extract_fields` reports `qty_reversed` so the repairs can be audited.
+  - `glued_units`: a unit glued to the next word after a number is split
+    (`5.5קגמעדניה` -> `5.5 ק"ג מעדניה`). The splits are learned in `fit` and only
+    accepted when the remainder is a common word on its own, so real words that
+    start with unit letters (`ללא`, `גבינה`, `גרנולה`) are never split.
+
+### Changed
+- `HebrewItemNormalizer` saves format version 2. A version-1 file still loads,
+  with the three new steps switched off, so it normalizes exactly as before.
+- `cleanup.signals` now requires at least one shortlist signal other than
+  *any* round-two signal (`cross-encoder`, `contrastive-lexical`), not only
+  other than the cross-encoder.
+
+### Fixed
+- **`HebrewItemNormalizer` merged a percentage into the following number:**
+  `0% 150מל` became `0150% מל`, losing both the fat percentage and the volume
+  (1,306 of 159,594 rows in the profiled file: 0% yogurts, cheeses,
+  alcohol-free beer). The `% 37` -> `37%` rule no longer fires when the `%`
+  already ends a number. Switch: `percent_guard`.
+
+### Compatibility
+- A model directory trained with 0.5.0 does not load on 0.4.x (its config has
+  the new `retrieval.contrastive_lexical` section). Upgrade the package on a host
+  before copying such a model to it. 0.5.0 loads 0.4.x models unchanged. No
+  dependencies changed.
+
 ## [0.4.0] - 2026-11-05
 
 ### Added
