@@ -60,6 +60,29 @@ and exclude real words (צלי, דרגה, גוני, ...); truncation completion 
 that appears mid-name elsewhere (ילד, שני). Not done: Stage 5 wiring into the
 pipelines, glued-word splitting (`שטוחקרם`), and the ablation.
 
+## Progress (2026-11-24): normalizer v2
+Three fixes found while benchmarking BM25 tokenizers on the cleaned text. Each has
+its own `NormalizerConfig` switch; a v1 JSON loads with all three off, so it keeps
+normalizing exactly as before. 2,226 rows change on the full file.
+
+- **Bug, `percent_guard`:** the `% 37` -> `37%` rule also fired when the `%` already
+  ended a number, so `0% 150מל` became `0150% מל` (1,306 rows: 0% yogurts, cheeses,
+  alcohol-free beer). It is now skipped when a digit precedes the `%`.
+- **`reversed_numbers`:** a leading-zero number directly before a measurement unit
+  or `%` has its digits reversed (`001 מ"ל` -> `100 מ"ל`, `005 גרם` -> `500 גרם`;
+  105 occurrences). Count units and unit-less numbers are left alone: there a
+  leading zero is a shade or product code (`צללית מונו 01 יחידה`, `לק 080`, 870
+  occurrences). `extract_fields` reports `qty_reversed` so the repairs can be audited.
+- **`glued_units`:** a unit glued to the next word after a number is split
+  (`5.5קגמעדניה` -> `5.5 ק"ג מעדניה`). The splits are learned by `fit` (19 on the
+  full file, all correct): the unit spelling must be at least 2 characters, the
+  remainder a word seen at least 5 times on its own, and at least 10 times commoner
+  than the glued token. Splitting on unit letters alone would hit 2,926 real words
+  (`ללא`, `גבינה`, `גרנולה`).
+
+Open: `extract_fields` still reads a shade code before a count unit as a quantity
+(`שפתון מאט 020 יח'` -> 20 units); this behaviour predates v2.
+
 ## Design
 
 Output per item:
